@@ -124,6 +124,12 @@ async function runConptySmoke(
     env: toPtyEnvironment(environment),
     useConpty: true,
   })
+  const ignorePtyError = (): void => {}
+  const eventEmitter = child as unknown as {
+    on: (event: "error", listener: typeof ignorePtyError) => void
+  }
+  eventEmitter.on("error", ignorePtyError)
+  eventEmitter.on("error", ignorePtyError)
 
   return new Promise((resolveResult, reject) => {
     let output = ""
