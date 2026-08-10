@@ -131,6 +131,7 @@ async function runConptySmoke(
     rows: 24,
     env: toPtyEnvironment(environment),
     useConpty: true,
+    useConptyDll: true,
   })
   const ignorePtyError = (): void => {}
   const eventEmitter = child as unknown as {
