@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test"
+import { createTerminalCapabilities } from "@opentui/core/testing"
 
 import {
   RELEASE_TARGETS,
@@ -13,6 +14,7 @@ import {
   assertTerminalFirstRender,
   type TerminalSmokeOutput,
 } from "./release-smoke.ts"
+import { getTerminalColorMode } from "./shell.tsx"
 
 test("defines reproducible standalone targets for every supported platform architecture", () => {
   expect(RELEASE_TARGETS.map((target) => target.id)).toEqual([
@@ -108,7 +110,7 @@ test("parses one target, all targets, output directory, and reproducibility veri
 
 test("accepts a first render only when the shell, Unicode, and 256-color baseline are present", () => {
   const output: TerminalSmokeOutput = {
-    stdout: "\u001b[38;5;75mTUISCRIB · SHELL\u001b[0m MODE  NAVIGATE Unicode · 256-color baseline q quit",
+    stdout: "\u001b[38;5;75mTUISCRIB · SHELL\u001b[0m MODE  NAVIGATE Unicode · 256-color baseline active q quit",
     stderr: "",
     exitCode: 0,
     signalCode: null,
@@ -122,4 +124,27 @@ test("accepts a first render only when the shell, Unicode, and 256-color baselin
   expect(() => assertTerminalFirstRender({ ...output, exitCode: 1 })).toThrow(
     "standalone binary exited with code 1",
   )
+})
+
+test("accepts a ConPTY truecolor render only when the 256-color baseline is active", () => {
+  expect(() => assertTerminalFirstRender({
+    stdout: "\u001b[38;2;88;166;255mTUISCRIB · SHELL\u001b[0m MODE  NAVIGATE Unicode · 256-color baseline active · truecolor detected q quit",
+    stderr: "",
+    exitCode: 0,
+    signalCode: null,
+    transport: "conpty",
+  })).not.toThrow()
+  expect(() => assertTerminalFirstRender({
+    stdout: "\u001b[38;2;88;166;255mTUISCRIB · SHELL\u001b[0m MODE  NAVIGATE Unicode · 256-color baseline q quit",
+    stderr: "",
+    exitCode: 0,
+    signalCode: null,
+    transport: "conpty",
+  })).toThrow("keyboard-only shell, Unicode, and 256-color baseline")
+})
+
+test("exercises the non-RGB ANSI 256-color capability path", () => {
+  const capabilities = createTerminalCapabilities({ ansi256: true, rgb: false })
+  expect(getTerminalColorMode(capabilities)).toBe("ansi256")
+  expect(getTerminalColorMode(createTerminalCapabilities({ ansi256: true, rgb: true }))).toBe("truecolor")
 })

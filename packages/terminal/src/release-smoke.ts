@@ -19,7 +19,7 @@ export const TERMINAL_FIRST_RENDER_MARKERS = [
   "TUISCRIB",
   "MODE  NAVIGATE",
   "Unicode",
-  "256-color baseline",
+  "256-color baseline active",
   "q quit",
 ] as const
 
@@ -218,8 +218,11 @@ export function assertTerminalFirstRender(output: TerminalSmokeOutput): void {
       "first render did not contain the keyboard-only shell, Unicode, and 256-color baseline",
     )
   }
-  if (!output.stdout.includes("\u001b[") || !output.stdout.includes(";5;")) {
+  if (output.transport === "pipe" && !hasAnsi256ColorOutput(output.stdout)) {
     throw new Error("first render did not contain ANSI 256-color output")
+  }
+  if (output.transport === "conpty" && !hasAnsiColorOutput(output.stdout)) {
+    throw new Error("ConPTY first render did not contain ANSI color output")
   }
 }
 
@@ -304,6 +307,19 @@ async function readStream(
 
 function hasTerminalFirstRender(output: string): boolean {
   return TERMINAL_FIRST_RENDER_MARKERS.every((marker) => output.includes(marker))
+}
+
+function hasAnsiColorOutput(output: string): boolean {
+  return [
+    "\u001b[38;5;",
+    "\u001b[48;5;",
+    "\u001b[38;2;",
+    "\u001b[48;2;",
+  ].some((sequence) => output.includes(sequence))
+}
+
+function hasAnsi256ColorOutput(output: string): boolean {
+  return output.includes("\u001b[38;5;") || output.includes("\u001b[48;5;")
 }
 
 const isDirectInvocation = process.argv[1]

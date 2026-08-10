@@ -54,7 +54,7 @@ The build disables `.env` and `bunfig.toml` autoloading so local development con
 
 ## Platform smoke test
 
-The smoke test launches the compiled executable with an isolated config home, `TERM=xterm-256color`, and a `PATH` containing no development tools. It captures the first rendered output from a controlled terminal stream, waits for the keyboard-only shell markers, sends `q`, and requires a clean exit plus ANSI 256-color output. On Windows, the runner uses the locked `node-pty` ConPTY binding so OpenTUI sees a pseudo-console rather than a plain pipe:
+The smoke test launches the compiled executable with an isolated config home, `TERM=xterm-256color`, and a `PATH` containing no development tools. It captures the first rendered output from a controlled terminal stream, waits for the keyboard-only shell markers, sends `q`, and requires a clean exit plus the shell's `256-color baseline active` capability marker. POSIX streams additionally require indexed ANSI 256-color output. On Windows, the runner uses the locked `node-pty` ConPTY binding so OpenTUI sees a pseudo-console rather than a plain pipe. The pinned OpenTUI `0.5.1` Windows native backend enables both `ansi256` and `rgb` for ConPTY, so native Windows output is allowed to use truecolor; the startup marker is emitted only when the reported `ansi256` capability is active, and the release seam test explicitly exercises the `ansi256`-without-`rgb` fallback path on every matrix runner:
 
 ```bash
 bun run smoke:release -- --binary dist/releases/tuiscrib-darwin-arm64

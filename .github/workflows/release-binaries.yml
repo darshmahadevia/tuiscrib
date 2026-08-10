@@ -62,6 +62,9 @@ jobs:
       - name: Typecheck
         run: bun run typecheck
 
+      - name: Test release and capability seams
+        run: bun test
+
       - name: Build and verify reproducibility
         run: bun run build:release -- --target "${{ matrix.target }}" --output artifacts --verify-reproducible
 

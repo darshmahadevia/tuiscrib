@@ -169,6 +169,17 @@ const colors = {
   error: "#f85149",
 }
 
+export type TerminalColorMode = "ansi256" | "truecolor" | "unknown"
+
+export function getTerminalColorMode(
+  capabilities: Pick<TerminalCapabilities, "ansi256" | "rgb"> | null | undefined,
+): TerminalColorMode {
+  if (!capabilities?.ansi256) {
+    return "unknown"
+  }
+  return capabilities.rgb ? "truecolor" : "ansi256"
+}
+
 export function TerminalShell({
   label = "local",
   capabilities: capabilitiesOverride,
@@ -1061,9 +1072,12 @@ function ShellFrame({
 }) {
   const modeLabel = mode === "navigate" ? "NAVIGATE" : "EDIT"
   const modeColor = mode === "navigate" ? colors.accent : colors.warning
-  const capabilityLabel = capabilities?.rgb
-    ? "Unicode · 256-color baseline · truecolor detected"
-    : "Unicode · 256-color baseline"
+  const colorMode = getTerminalColorMode(capabilities)
+  const capabilityLabel = colorMode === "truecolor"
+    ? "Unicode · 256-color baseline active · truecolor detected"
+    : colorMode === "ansi256"
+      ? "Unicode · 256-color baseline active"
+      : "Unicode · color capability pending"
 
   return (
     <box

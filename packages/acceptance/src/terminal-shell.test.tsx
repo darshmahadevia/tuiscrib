@@ -824,7 +824,7 @@ test("reports truecolor only when the terminal capability is detected", async ()
 
   await activeSetup.renderOnce()
   const frame = activeSetup.captureCharFrame()
-  expect(frame).toContain("Unicode · 256-color baseline · truecolor detected")
+  expect(frame).toContain("Unicode · 256-color baseline active · truecolor detected")
 })
 
 test("keeps the baseline capability label when truecolor is unavailable", async () => {
