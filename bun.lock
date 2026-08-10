@@ -35,6 +35,7 @@
       "name": "@tuiscrib/persistence",
       "version": "0.1.0",
       "dependencies": {
+        "@tuiscrib/contracts": "workspace:*",
         "drizzle-orm": "0.45.2",
         "postgres": "3.4.9",
       },

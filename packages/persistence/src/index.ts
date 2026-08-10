@@ -12,6 +12,10 @@ export {
   type RegisteredUser,
   type CreateBoardInput,
   type CreateBoardResult,
+  type JoinBoardInput,
+  type JoinBoardResult,
+  type LeaveBoardInput,
+  type LeaveBoardResult,
   type ListBoardsInput,
   type TerminalSessionAuthentication,
 } from "./client.ts"

@@ -81,6 +81,7 @@ export const boards = pgTable(
   (table) => [
     uniqueIndex("boards_public_id_unique").on(table.publicId),
     index("boards_owner_user_id_idx").on(table.ownerUserId),
+    index("boards_join_code_hash_idx").on(table.joinCodeHash),
     index("boards_name_idx").on(table.name),
     check(
       "boards_public_id_format_check",

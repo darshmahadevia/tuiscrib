@@ -22,6 +22,13 @@
       "when": 1786385392209,
       "tag": "0002_tan_callisto",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1786389734736,
+      "tag": "0003_board_join_code_lookup",
+      "breakpoints": true
     }
   ]
 }

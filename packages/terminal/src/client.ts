@@ -1,6 +1,8 @@
 import {
   boardListResponseSchema,
   createBoardResponseSchema,
+  joinBoardResponseSchema,
+  leaveBoardResponseSchema,
   authResponseSchema,
   healthResponseSchema,
   signOutResponseSchema,
@@ -10,6 +12,9 @@ import {
   type BoardListResponse,
   type CreateBoardRequest,
   type CreateBoardResponse,
+  type JoinBoardRequest,
+  type JoinBoardResponse,
+  type LeaveBoardResponse,
   type RegisterRequest,
   type SignOutResponse,
   type ServiceError,
@@ -29,6 +34,8 @@ export type AuthClient = {
 
 export type BoardClient = {
   createBoard(credential: string, input: CreateBoardRequest): Promise<CreateBoardResponse>
+  joinBoard(credential: string, input: JoinBoardRequest): Promise<JoinBoardResponse>
+  leaveBoard(credential: string, boardId: string): Promise<LeaveBoardResponse>
   listBoards(credential: string, filter?: string): Promise<BoardListResponse>
 }
 
@@ -141,6 +148,24 @@ export function createBoardClient(
     createBoard(credential, input) {
       return requestBoard("POST", credential, input, createBoardResponseSchema)
     },
+    joinBoard(credential, input) {
+      return requestBoard(
+        "POST",
+        credential,
+        input,
+        joinBoardResponseSchema,
+        new URL("/boards/join", baseUrl),
+      )
+    },
+    leaveBoard(credential, boardId) {
+      return requestBoard(
+        "POST",
+        credential,
+        undefined,
+        leaveBoardResponseSchema,
+        new URL(`/boards/${encodeURIComponent(boardId)}/leave`, baseUrl),
+      )
+    },
     listBoards(credential, filter = "") {
       const url = new URL("/boards", baseUrl)
       if (filter.length > 0) {
@@ -153,7 +178,7 @@ export function createBoardClient(
   async function requestBoard<T>(
     method: "GET" | "POST",
     credential: string,
-    input: CreateBoardRequest | undefined,
+    input: CreateBoardRequest | JoinBoardRequest | undefined,
     schema: { parse(value: unknown): T },
     url = new URL("/boards", baseUrl),
   ): Promise<T> {

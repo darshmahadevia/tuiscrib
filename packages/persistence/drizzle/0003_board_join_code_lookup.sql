@@ -1,0 +1,1 @@
+CREATE INDEX "boards_join_code_hash_idx" ON "boards" USING btree ("join_code_hash");

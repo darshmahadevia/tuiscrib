@@ -4,6 +4,7 @@ import { countUserPerceivedCharacters } from "./auth.ts"
 
 export const MAX_BOARD_NAME_CHARACTERS = 80
 export const MAX_OWNED_BOARDS = 20
+export const MAX_BOARD_MEMBERS = 25
 export const BOARD_IDENTIFIER_LENGTH = 22
 export const JOIN_CODE_UNGROUPED_LENGTH = 26
 export const JOIN_CODE_GROUP_LENGTH = 4
@@ -63,6 +64,18 @@ export const createBoardResponseSchema = z.object({
   joinCode: joinCodeSchema,
 })
 
+export const joinBoardRequestSchema = z.object({
+  joinCode: joinCodeSchema,
+})
+
+export const joinBoardResponseSchema = z.object({
+  board: boardSummarySchema,
+})
+
+export const leaveBoardResponseSchema = z.object({
+  status: z.literal("left"),
+})
+
 export const boardListResponseSchema = z.object({
   boards: z.array(boardSummarySchema),
 })
@@ -72,3 +85,6 @@ export type BoardSummary = z.infer<typeof boardSummarySchema>
 export type CreateBoardRequest = z.infer<typeof createBoardRequestSchema>
 export type CreateBoardResponse = z.infer<typeof createBoardResponseSchema>
 export type BoardListResponse = z.infer<typeof boardListResponseSchema>
+export type JoinBoardRequest = z.infer<typeof joinBoardRequestSchema>
+export type JoinBoardResponse = z.infer<typeof joinBoardResponseSchema>
+export type LeaveBoardResponse = z.infer<typeof leaveBoardResponseSchema>

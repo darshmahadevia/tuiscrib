@@ -39,6 +39,36 @@ describe("Tuiscrib Board administration", () => {
     })
   }
 
+  async function registerUser(username: string): Promise<string> {
+    if (!harness) {
+      throw new Error("acceptance harness did not start")
+    }
+
+    const response = await fetch(`${harness.baseUrl}/auth/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        username,
+        password: "correct horse",
+        confirmation: "correct horse",
+      }),
+    })
+    expect(response.status).toBe(201)
+    return (await response.json() as { sessionCredential: string }).sessionCredential
+  }
+
+  async function listBoardsFor(credential: string): Promise<{ boards: unknown[] }> {
+    if (!harness) {
+      throw new Error("acceptance harness did not start")
+    }
+
+    const response = await fetch(`${harness.baseUrl}/boards`, {
+      headers: { authorization: `Bearer ${credential}` },
+    })
+    expect(response.status).toBe(200)
+    return await response.json() as { boards: unknown[] }
+  }
+
   async function waitForFrame(
     client: TerminalClient,
     predicate: (frame: string) => boolean,
@@ -61,6 +91,196 @@ describe("Tuiscrib Board administration", () => {
     }
     throw new Error(`Timed out waiting for ${client.label} rendered frame\n${lastFrame}`)
   }
+
+  test("joins, leaves, and rejoins a Board through public HTTP", async () => {
+    if (!harness) {
+      throw new Error("acceptance harness did not start")
+    }
+
+    const ownerCredential = await registerUser("join_slice_owner")
+    const memberCredential = await registerUser("join_slice_member")
+    const created = await fetch(`${harness.baseUrl}/boards`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${ownerCredential}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ name: "Join Slice" }),
+    })
+    expect(created.status).toBe(201)
+    const createdBody = await created.json() as {
+      board: { id: string; name: string; role: string }
+      joinCode: string
+    }
+
+    expect(await listBoardsFor(memberCredential)).toEqual({ boards: [] })
+
+    const joined = await fetch(`${harness.baseUrl}/boards/join`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${memberCredential}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ joinCode: createdBody.joinCode.toLowerCase() }),
+    })
+    expect(joined.status).toBe(201)
+    expect(await joined.json()).toEqual({
+      board: {
+        id: createdBody.board.id,
+        name: createdBody.board.name,
+        role: "member",
+      },
+    })
+    expect(await listBoardsFor(memberCredential)).toEqual({
+      boards: [{ ...createdBody.board, role: "member" }],
+    })
+
+    const left = await fetch(`${harness.baseUrl}/boards/${createdBody.board.id}/leave`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${memberCredential}` },
+    })
+    expect(left.status).toBe(200)
+    expect(await left.json()).toEqual({ status: "left" })
+    expect(await listBoardsFor(memberCredential)).toEqual({ boards: [] })
+
+    const rejoined = await fetch(`${harness.baseUrl}/boards/join`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${memberCredential}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ joinCode: createdBody.joinCode }),
+    })
+    expect(rejoined.status).toBe(201)
+    expect(await listBoardsFor(memberCredential)).toEqual({
+      boards: [{ ...createdBody.board, role: "member" }],
+    })
+  })
+
+  test("serializes the 25-Membership limit, preserves the Join Code, and protects the Owner", async () => {
+    if (!harness) {
+      throw new Error("acceptance harness did not start")
+    }
+    const baseUrl = harness.baseUrl
+
+    const ownerCredential = await registerUser("capacity_owner")
+    const created = await fetch(`${harness.baseUrl}/boards`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${ownerCredential}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ name: "Capacity Slice" }),
+    })
+    expect(created.status).toBe(201)
+    const createdBody = await created.json() as {
+      board: { id: string; name: string; role: string }
+      joinCode: string
+    }
+
+    const memberCredentials = await Promise.all(
+      Array.from({ length: 25 }, (_, index) => registerUser(`capacity_member_${index}`)),
+    )
+    const joinResults = await Promise.all(
+      memberCredentials.map(async (credential, index) => {
+        const response = await fetch(`${baseUrl}/boards/join`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${credential}`,
+            "content-type": "application/json",
+            "x-forwarded-for": `198.51.100.${index + 1}`,
+          },
+          body: JSON.stringify({ joinCode: createdBody.joinCode }),
+        })
+        return { index, status: response.status, body: await response.text() }
+      }),
+    )
+
+    expect(joinResults.filter(({ status }) => status === 201)).toHaveLength(24)
+    const rejected = joinResults.filter(({ status }) => status === 409)
+    expect(rejected).toHaveLength(1)
+    expect(rejected[0]?.body).not.toContain(createdBody.joinCode)
+
+    const rejectedIndex = rejected[0]?.index
+    if (rejectedIndex === undefined) {
+      throw new Error("capacity test did not produce a rejected Member")
+    }
+    const successfulIndex = joinResults.find(({ status }) => status === 201)?.index
+    if (successfulIndex === undefined) {
+      throw new Error("capacity test did not produce a successful Member")
+    }
+
+    const left = await fetch(`${harness.baseUrl}/boards/${createdBody.board.id}/leave`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${memberCredentials[successfulIndex]}` },
+    })
+    expect(left.status).toBe(200)
+
+    const retry = await fetch(`${harness.baseUrl}/boards/join`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${memberCredentials[rejectedIndex]}`,
+        "content-type": "application/json",
+        "x-forwarded-for": "198.51.100.250",
+      },
+      body: JSON.stringify({ joinCode: createdBody.joinCode }),
+    })
+    expect(retry.status).toBe(201)
+    expect(await listBoardsFor(memberCredentials[rejectedIndex])).toEqual({
+      boards: [{ ...createdBody.board, role: "member" }],
+    })
+
+    const ownerLeave = await fetch(`${harness.baseUrl}/boards/${createdBody.board.id}/leave`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${ownerCredential}` },
+    })
+    expect(ownerLeave.status).toBe(409)
+    expect(await ownerLeave.text()).not.toContain(createdBody.joinCode)
+    expect(await listBoardsFor(ownerCredential)).toEqual({
+      boards: [{ ...createdBody.board, role: "owner" }],
+    })
+  })
+
+  test("rejects an invalid Join Code without disclosing the private Board", async () => {
+    if (!harness) {
+      throw new Error("acceptance harness did not start")
+    }
+
+    const ownerCredential = await registerUser("privacy_owner")
+    const memberCredential = await registerUser("privacy_member")
+    const created = await fetch(`${harness.baseUrl}/boards`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${ownerCredential}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ name: "Private Slice" }),
+    })
+    expect(created.status).toBe(201)
+    const createdBody = await created.json() as {
+      board: { name: string }
+      joinCode: string
+    }
+    const invalidJoinCode = `${createdBody.joinCode.slice(0, -1)}${
+      createdBody.joinCode.endsWith("2") ? "3" : "2"
+    }`
+
+    const response = await fetch(`${harness.baseUrl}/boards/join`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${memberCredential}`,
+        "content-type": "application/json",
+        "x-forwarded-for": "198.51.100.251",
+      },
+      body: JSON.stringify({ joinCode: invalidJoinCode }),
+    })
+    const body = await response.text()
+
+    expect(response.status).toBe(404)
+    expect(body).not.toContain(invalidJoinCode)
+    expect(body).not.toContain(createdBody.board.name)
+    expect(await listBoardsFor(memberCredential)).toEqual({ boards: [] })
+  })
 
   test("creates duplicate-named Boards, discloses a grouped Join Code once, and filters Memberships", async () => {
     if (!harness) {

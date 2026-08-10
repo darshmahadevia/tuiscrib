@@ -147,3 +147,54 @@ test("Board client creates and filters Boards through authenticated HTTP", async
     },
   ])
 })
+
+test("Board client joins and leaves through the public HTTP actions", async () => {
+  const credential = "a".repeat(43)
+  const requests: Array<{ path: string; method?: string; body?: string }> = []
+  const client = createBoardClient("http://tuiscrib.test", async (input, init) => {
+    const url = new URL(String(input))
+    requests.push({
+      path: url.pathname,
+      method: init?.method,
+      body: typeof init?.body === "string" ? init.body : undefined,
+    })
+
+    if (url.pathname === "/boards/join") {
+      return new Response(JSON.stringify({
+        board: {
+          id: "Qx7u3nW8kM2pR5sT9vY4aB",
+          name: "Ideas",
+          role: "member",
+        },
+      }), { status: 201 })
+    }
+
+    return new Response(JSON.stringify({ status: "left" }), { status: 200 })
+  })
+
+  await expect(client.joinBoard(credential, {
+    joinCode: "abcd-efgh-jkmn-pqrs-tvwx-yz23-45",
+  })).resolves.toEqual({
+    board: {
+      id: "Qx7u3nW8kM2pR5sT9vY4aB",
+      name: "Ideas",
+      role: "member",
+    },
+  })
+  await expect(client.leaveBoard(credential, "Qx7u3nW8kM2pR5sT9vY4aB")).resolves.toEqual({
+    status: "left",
+  })
+
+  expect(requests).toEqual([
+    {
+      path: "/boards/join",
+      method: "POST",
+      body: JSON.stringify({ joinCode: "abcd-efgh-jkmn-pqrs-tvwx-yz23-45" }),
+    },
+    {
+      path: "/boards/Qx7u3nW8kM2pR5sT9vY4aB/leave",
+      method: "POST",
+      body: undefined,
+    },
+  ])
+})

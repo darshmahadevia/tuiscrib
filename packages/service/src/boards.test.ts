@@ -161,3 +161,95 @@ test("requires an authenticated Terminal Session for Board list and creation", a
   })
   expect(await createResponse.text()).not.toContain(joinCode)
 })
+
+test("joins a Board through authenticated HTTP and hashes the Join Code", async () => {
+  let joinInput: { userId: number; joinCodeHash: string; now: Date } | undefined
+  const app = createServiceApp({
+    persistence: persistenceForBoards({
+      joinBoard: async (input: { userId: number; joinCodeHash: string; now: Date }) => {
+        joinInput = input
+        return { kind: "joined" as const, board: { ...board, role: "member" as const } }
+      },
+    }),
+    clock: () => new Date("2026-08-10T00:00:00.000Z"),
+  })
+
+  const response = await app.request("http://tuiscrib.test/boards/join", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${credential}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ joinCode: joinCode.toLowerCase() }),
+  })
+
+  expect(response.status).toBe(201)
+  expect(await response.json()).toEqual({
+    board: { ...board, role: "member" },
+  })
+  expect(joinInput).toEqual({
+    userId: 7,
+    joinCodeHash: "b4c42461ad13439dd10d9b7b2f1fac13d5357a53633194aa453ef0103f1a9532",
+    now: new Date("2026-08-10T00:00:00.000Z"),
+  })
+  expect(JSON.stringify(joinInput)).not.toContain(joinCode)
+})
+
+test("does not disclose invalid Join Codes and rate-limits repeated attempts", async () => {
+  let joinCalls = 0
+  let now = 0
+  const app = createServiceApp({
+    persistence: persistenceForBoards({
+      joinBoard: async () => {
+        joinCalls += 1
+        return { kind: "invalid_join_code" as const }
+      },
+    }),
+    clock: () => new Date(now),
+    boardRateLimit: { maxAttempts: 2, windowMs: 1_000 },
+  })
+  const request = () => app.request("http://tuiscrib.test/boards/join", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${credential}`,
+      "content-type": "application/json",
+      "x-forwarded-for": "198.51.100.77",
+    },
+    body: JSON.stringify({ joinCode }),
+  })
+
+  const first = await request()
+  const second = await request()
+  const limited = await request()
+
+  expect(first.status).toBe(404)
+  expect(second.status).toBe(404)
+  expect(limited.status).toBe(429)
+  expect(joinCalls).toBe(2)
+  expect(await first.text()).not.toContain(joinCode)
+  expect(await second.text()).not.toContain(joinCode)
+  expect(await limited.text()).not.toContain(joinCode)
+  expect(limited.headers.get("retry-after")).toBe("1")
+
+  now = 1_000
+  expect((await request()).status).toBe(404)
+})
+
+test("prevents the Owner from leaving through authenticated HTTP", async () => {
+  const app = createServiceApp({
+    persistence: persistenceForBoards({
+      leaveBoard: async () => ({ kind: "owner_cannot_leave" as const }),
+    }),
+  })
+
+  const response = await app.request(`http://tuiscrib.test/boards/${board.id}/leave`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${credential}` },
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toEqual({
+    error: "The Owner cannot leave this Board.",
+    code: "owner_cannot_leave",
+  })
+})

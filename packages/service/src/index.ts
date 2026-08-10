@@ -14,6 +14,7 @@ export {
   type SignOutOperationResult,
 } from "./auth.ts"
 export {
+  BoardJoinRateLimiter,
   MAX_OWNED_BOARDS,
   createBoardAdministration,
   createJoinCode,
@@ -22,10 +23,17 @@ export {
   normalizeJoinCode,
   type BoardAdministrationOptions,
   type BoardCreateOperationResult,
+  type BoardJoinOperationResult,
   type BoardListOperationResult,
+  type BoardLeaveOperationResult,
+  type BoardRateLimitOptions,
   type BoardPersistence,
   type BoardUser,
   type CreateBoardPersistenceInput,
   type CreateBoardPersistenceResult,
+  type JoinBoardPersistenceInput,
+  type JoinBoardPersistenceResult,
+  type LeaveBoardPersistenceInput,
+  type LeaveBoardPersistenceResult,
   type ListBoardsPersistenceInput,
 } from "./boards.ts"

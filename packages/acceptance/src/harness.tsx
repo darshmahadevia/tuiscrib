@@ -172,6 +172,7 @@ export class AcceptanceHarness {
           persistence,
           clock: () => new Date(clock.now()),
           authRateLimit: { maxAttempts: 100 },
+          boardRateLimit: { maxAttempts: 1_000 },
         }).fetch,
       })
 

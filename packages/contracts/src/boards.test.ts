@@ -5,7 +5,10 @@ import {
   boardNameSchema,
   createBoardRequestSchema,
   createBoardResponseSchema,
+  joinBoardRequestSchema,
+  joinBoardResponseSchema,
   joinCodeSchema,
+  leaveBoardResponseSchema,
 } from "./boards.ts"
 
 test("Board names trim surrounding whitespace and count user-perceived characters", () => {
@@ -50,4 +53,19 @@ test("Board creation and listing contracts distinguish Ownership from Membership
     { name: "Ideas", role: "owner" },
     { name: "Ideas", role: "member" },
   ])
+})
+
+test("Join and leave contracts carry Membership state without returning a Join Code", () => {
+  const board = {
+    id: "Qx7u3nW8kM2pR5sT9vY4aB",
+    name: "Ideas",
+    role: "member" as const,
+  }
+
+  expect(joinBoardRequestSchema.parse({
+    joinCode: "abcd-efgh-jkmn-pqrs-tvwx-yz23-45",
+  })).toEqual({ joinCode: "abcd-efgh-jkmn-pqrs-tvwx-yz23-45" })
+  expect(joinBoardResponseSchema.parse({ board })).toEqual({ board })
+  expect(leaveBoardResponseSchema.parse({ status: "left" })).toEqual({ status: "left" })
+  expect(joinBoardResponseSchema.parse({ board, joinCode: "secret" })).toEqual({ board })
 })

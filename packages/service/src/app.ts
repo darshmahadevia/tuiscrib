@@ -17,6 +17,7 @@ import {
 } from "./auth.ts"
 import {
   createBoardAdministration,
+  type BoardRateLimitOptions,
   type BoardPersistence,
 } from "./boards.ts"
 
@@ -30,6 +31,7 @@ export type ServiceAppOptions = {
   boardIdGenerator?: () => string
   joinCodeGenerator?: () => string
   authRateLimit?: AuthRateLimitOptions
+  boardRateLimit?: BoardRateLimitOptions
   networkKey?: (request: Request) => string
 }
 
@@ -75,6 +77,63 @@ export function createServiceApp(options: ServiceAppOptions) {
     try {
       const filter = new URL(context.req.url).searchParams.get("filter") ?? ""
       const result = await boards.listBoards(authenticated.user, filter)
+      return result.kind === "success"
+        ? context.json(result.response, 200)
+        : context.json(result.error, result.status)
+    } catch {
+      return context.json(serviceErrorSchema.parse({ error: "service unavailable" }), 503)
+    }
+  })
+
+  app.post("/boards/join", async (context) => {
+    if (!authentication || !boards) {
+      return context.json(serviceErrorSchema.parse({ error: "service unavailable" }), 503)
+    }
+
+    const authenticated = await requireBoardUser(authentication, context.req.raw)
+    if (authenticated.kind !== "success") {
+      return context.json(authenticated.error, authenticated.status)
+    }
+
+    let input: unknown
+    try {
+      input = await context.req.json()
+    } catch {
+      input = undefined
+    }
+
+    try {
+      const result = await boards.joinBoard(authenticated.user, input, {
+        networkKey: options.networkKey?.(context.req.raw) ?? defaultNetworkKey(context.req.raw),
+      })
+      if (result.kind === "success") {
+        return context.json(result.response, 201)
+      }
+      const response = context.json(result.error, result.status)
+      if (result.error.retryAfterSeconds) {
+        response.headers.set("Retry-After", String(result.error.retryAfterSeconds))
+      }
+      return response
+    } catch {
+      return context.json(serviceErrorSchema.parse({ error: "service unavailable" }), 503)
+    }
+  })
+
+  app.post("/boards/:boardId/leave", async (context) => {
+    if (!authentication || !boards) {
+      return context.json(serviceErrorSchema.parse({ error: "service unavailable" }), 503)
+    }
+
+    const authenticated = await requireBoardUser(authentication, context.req.raw)
+    if (authenticated.kind !== "success") {
+      return context.json(authenticated.error, authenticated.status)
+    }
+
+    try {
+      const result = await boards.leaveBoard(
+        authenticated.user,
+        context.req.param("boardId"),
+      )
       return result.kind === "success"
         ? context.json(result.response, 200)
         : context.json(result.error, result.status)
@@ -195,6 +254,7 @@ function createBoardAdministrationIfAvailable(
     clock,
     boardIdGenerator: options.boardIdGenerator,
     joinCodeGenerator: options.joinCodeGenerator,
+    rateLimit: options.boardRateLimit,
   })
 }
 

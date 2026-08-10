@@ -3,7 +3,12 @@ import { createTerminalCapabilities, type TestRendererSetup } from "@opentui/cor
 import { testRender } from "@opentui/react/test-utils"
 import { act } from "react"
 
-import { TerminalShell, type AuthClient, type CredentialStore } from "@tuiscrib/terminal"
+import {
+  TerminalShell,
+  type AuthClient,
+  type BoardClient,
+  type CredentialStore,
+} from "@tuiscrib/terminal"
 
 let activeSetup: TestRendererSetup | null = null
 
@@ -77,6 +82,297 @@ test("navigates the shell menu with keyboard hints and opens Boards", async () =
   expect(activeSetup.captureCharFrame()).toContain("o open Board")
   expect(activeSetup.captureCharFrame()).toContain("c create Board")
   expect(activeSetup.captureCharFrame()).toContain("j join Board")
+})
+
+test("redeems a Join Code from the keyboard form and renders the new Membership", async () => {
+  const credential = "a".repeat(43)
+  let joinedInput: { credential: string; joinCode: string } | undefined
+  const joinedBoard = {
+    id: "Qx7u3nW8kM2pR5sT9vY4aB",
+    name: "Ideas",
+    role: "member" as const,
+  }
+  const boardClient: BoardClient = {
+    createBoard: async () => {
+      throw new Error("create Board was not expected")
+    },
+    listBoards: async () => ({ boards: joinedInput ? [joinedBoard] : [] }),
+    joinBoard: async (nextCredential, input) => {
+      joinedInput = { credential: nextCredential, joinCode: input.joinCode }
+      return {
+        board: {
+          ...joinedBoard,
+        },
+      }
+    },
+    leaveBoard: async () => ({ status: "left" }),
+  }
+  const credentialStore: CredentialStore = {
+    filePath: "memory://join-form/session",
+    load: async () => credential,
+    save: async () => undefined,
+    remove: async () => undefined,
+  }
+  const authClient: AuthClient = {
+    register: async () => {
+      throw new Error("register was not expected")
+    },
+    signIn: async () => {
+      throw new Error("sign-in was not expected")
+    },
+    restore: async () => ({ user: { username: "join_slice_member" } }),
+    signOut: async () => ({ status: "signed_out" }),
+  }
+
+  await act(async () => {
+    activeSetup = await testRender(
+      <TerminalShell
+        label="member"
+        authClient={authClient}
+        boardClient={boardClient}
+        credentialStore={credentialStore}
+      />,
+      { width: 80, height: 24, kittyKeyboard: true },
+    )
+    await activeSetup.renderOnce()
+  })
+  const waitForFrame = async (predicate: (frame: string) => boolean): Promise<string> => {
+    let matchedFrame: string | undefined
+    let lastFrame = ""
+    await act(async () => {
+      for (let attempt = 0; attempt < 300; attempt += 1) {
+        await Bun.sleep(5)
+        await activeSetup?.renderOnce()
+        lastFrame = activeSetup?.captureCharFrame() ?? ""
+        if (predicate(lastFrame)) {
+          matchedFrame = lastFrame
+          return
+        }
+      }
+    })
+    if (matchedFrame !== undefined) {
+      return matchedFrame
+    }
+    throw new Error(`Timed out waiting for rendered frame\n${lastFrame}`)
+  }
+  await waitForFrame((value) => value.includes("Terminal Session restored"))
+
+  await act(async () => {
+    activeSetup?.mockInput.pressKey("b")
+    await activeSetup?.renderOnce()
+  })
+  await waitForFrame((value) => value.includes("Board list"))
+  await act(async () => {
+    activeSetup?.mockInput.pressKey("j")
+    await activeSetup?.renderOnce()
+  })
+  await waitForFrame((value) => value.includes("Join Board"))
+  await act(async () => {
+    await activeSetup?.mockInput.typeText("ABCD-EFGH-JKMN-PRST-TVWX-YZ23-45")
+    activeSetup?.mockInput.pressEnter()
+    await activeSetup?.renderOnce()
+  })
+
+  expect(joinedInput).toEqual({
+    credential,
+    joinCode: "ABCD-EFGH-JKMN-PRST-TVWX-YZ23-45",
+  })
+  const frame = await waitForFrame((value) => value.includes("Ideas"))
+  expect(frame).toContain("Board \"Ideas\" joined.")
+  expect(frame).toContain("Ideas · Member")
+})
+
+test("confirms leaving a Board from Board actions and removes the Membership", async () => {
+  const credential = "b".repeat(43)
+  const board = {
+    id: "Qx7u3nW8kM2pR5sT9vY4aB",
+    name: "Ideas",
+    role: "member" as const,
+  }
+  let left = false
+  let leaveInput: { credential: string; boardId: string } | undefined
+  const boardClient: BoardClient = {
+    createBoard: async () => {
+      throw new Error("create Board was not expected")
+    },
+    listBoards: async () => ({ boards: left ? [] : [board] }),
+    joinBoard: async () => {
+      throw new Error("join Board was not expected")
+    },
+    leaveBoard: async (nextCredential, boardId) => {
+      leaveInput = { credential: nextCredential, boardId }
+      left = true
+      return { status: "left" }
+    },
+  }
+  const authClient: AuthClient = {
+    register: async () => {
+      throw new Error("register was not expected")
+    },
+    signIn: async () => {
+      throw new Error("sign-in was not expected")
+    },
+    restore: async () => ({ user: { username: "leave_slice_member" } }),
+    signOut: async () => ({ status: "signed_out" }),
+  }
+  const credentialStore: CredentialStore = {
+    filePath: "memory://leave-form/session",
+    load: async () => credential,
+    save: async () => undefined,
+    remove: async () => undefined,
+  }
+
+  await act(async () => {
+    activeSetup = await testRender(
+      <TerminalShell
+        label="member"
+        authClient={authClient}
+        boardClient={boardClient}
+        credentialStore={credentialStore}
+      />,
+      { width: 80, height: 24, kittyKeyboard: true },
+    )
+    await activeSetup.renderOnce()
+  })
+
+  const waitForFrame = async (predicate: (frame: string) => boolean): Promise<string> => {
+    let matchedFrame: string | undefined
+    let lastFrame = ""
+    await act(async () => {
+      for (let attempt = 0; attempt < 300; attempt += 1) {
+        await Bun.sleep(5)
+        await activeSetup?.renderOnce()
+        lastFrame = activeSetup?.captureCharFrame() ?? ""
+        if (predicate(lastFrame)) {
+          matchedFrame = lastFrame
+          return
+        }
+      }
+    })
+    if (matchedFrame !== undefined) {
+      return matchedFrame
+    }
+    throw new Error(`Timed out waiting for rendered frame\n${lastFrame}`)
+  }
+
+  await waitForFrame((value) => value.includes("Terminal Session restored"))
+  await act(async () => {
+    activeSetup?.mockInput.pressKey("b")
+    await activeSetup?.renderOnce()
+  })
+  await waitForFrame((value) => value.includes("Ideas · Member"))
+  await act(async () => {
+    activeSetup?.mockInput.pressKey("a")
+    await activeSetup?.renderOnce()
+  })
+  await waitForFrame((value) => value.includes("Board actions"))
+  await act(async () => {
+    activeSetup?.mockInput.pressKey("l")
+    await activeSetup?.renderOnce()
+  })
+  await waitForFrame((value) => value.includes("Confirm leaving Board"))
+  await act(async () => {
+    await Bun.sleep(10)
+    await activeSetup?.renderOnce()
+    activeSetup?.mockInput.pressKey("y")
+    await activeSetup?.renderOnce()
+  })
+
+  const frame = await waitForFrame((value) => value.includes("Left Board"))
+  expect(leaveInput).toEqual({ credential, boardId: board.id })
+  expect(frame).toContain("Left Board \"Ideas\".")
+  expect(frame).not.toContain("Ideas · Member")
+})
+
+test("clearly prevents the Owner from leaving a Board in Board actions", async () => {
+  const board = {
+    id: "Qx7u3nW8kM2pR5sT9vY4aB",
+    name: "Ideas",
+    role: "owner" as const,
+  }
+  let leaveCalled = false
+  const boardClient: BoardClient = {
+    createBoard: async () => {
+      throw new Error("create Board was not expected")
+    },
+    listBoards: async () => ({ boards: [board] }),
+    joinBoard: async () => {
+      throw new Error("join Board was not expected")
+    },
+    leaveBoard: async () => {
+      leaveCalled = true
+      return { status: "left" }
+    },
+  }
+  const authClient: AuthClient = {
+    register: async () => {
+      throw new Error("register was not expected")
+    },
+    signIn: async () => {
+      throw new Error("sign-in was not expected")
+    },
+    restore: async () => ({ user: { username: "owner_slice_user" } }),
+    signOut: async () => ({ status: "signed_out" }),
+  }
+  const credentialStore: CredentialStore = {
+    filePath: "memory://owner-form/session",
+    load: async () => "c".repeat(43),
+    save: async () => undefined,
+    remove: async () => undefined,
+  }
+
+  await act(async () => {
+    activeSetup = await testRender(
+      <TerminalShell
+        label="owner"
+        authClient={authClient}
+        boardClient={boardClient}
+        credentialStore={credentialStore}
+      />,
+      { width: 80, height: 24, kittyKeyboard: true },
+    )
+    await activeSetup.renderOnce()
+  })
+
+  const waitForFrame = async (predicate: (frame: string) => boolean): Promise<string> => {
+    let matchedFrame: string | undefined
+    let lastFrame = ""
+    await act(async () => {
+      for (let attempt = 0; attempt < 300; attempt += 1) {
+        await Bun.sleep(5)
+        await activeSetup?.renderOnce()
+        lastFrame = activeSetup?.captureCharFrame() ?? ""
+        if (predicate(lastFrame)) {
+          matchedFrame = lastFrame
+          return
+        }
+      }
+    })
+    if (matchedFrame !== undefined) {
+      return matchedFrame
+    }
+    throw new Error(`Timed out waiting for rendered frame\n${lastFrame}`)
+  }
+
+  await waitForFrame((value) => value.includes("Terminal Session restored"))
+  await act(async () => {
+    activeSetup?.mockInput.pressKey("b")
+    await activeSetup?.renderOnce()
+  })
+  await waitForFrame((value) => value.includes("Ideas · Owner"))
+  await act(async () => {
+    activeSetup?.mockInput.pressKey("a")
+    await activeSetup?.renderOnce()
+  })
+  await waitForFrame((value) => value.includes("Board actions"))
+  await act(async () => {
+    activeSetup?.mockInput.pressKey("l")
+    await activeSetup?.renderOnce()
+  })
+
+  const frame = await waitForFrame((value) => value.includes("The Owner cannot leave this Board."))
+  expect(frame).toContain("Error: The Owner cannot leave this Board.")
+  expect(leaveCalled).toBe(false)
 })
 
 test("uses the reusable Register form with visible validation and status", async () => {

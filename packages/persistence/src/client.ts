@@ -4,6 +4,8 @@ import { and, asc, eq, gt, isNull, lt, sql } from "drizzle-orm"
 import { fileURLToPath } from "node:url"
 import postgres from "postgres"
 
+import { MAX_BOARD_MEMBERS } from "@tuiscrib/contracts"
+
 import {
   boards,
   memberships,
@@ -71,6 +73,29 @@ export type CreateBoardResult =
   | { kind: "created"; board: BoardSummaryRecord }
   | { kind: "owned_board_limit" }
 
+export type JoinBoardInput = {
+  userId: number
+  joinCodeHash: string
+  now: Date
+}
+
+export type JoinBoardResult =
+  | { kind: "joined"; board: BoardSummaryRecord }
+  | { kind: "invalid_join_code" }
+  | { kind: "already_member" }
+  | { kind: "board_capacity" }
+
+export type LeaveBoardInput = {
+  userId: number
+  publicId: string
+  now: Date
+}
+
+export type LeaveBoardResult =
+  | { kind: "left" }
+  | { kind: "not_member" }
+  | { kind: "owner_cannot_leave" }
+
 export type ListBoardsInput = {
   userId: number
   nameFilter: string
@@ -92,6 +117,8 @@ export type Persistence = {
   ): Promise<TerminalSessionAuthentication>
   revokeTerminalSession(input: RevokeTerminalSessionInput): Promise<void>
   createBoard(input: CreateBoardInput): Promise<CreateBoardResult>
+  joinBoard(input: JoinBoardInput): Promise<JoinBoardResult>
+  leaveBoard(input: LeaveBoardInput): Promise<LeaveBoardResult>
   listBoards(input: ListBoardsInput): Promise<BoardSummaryRecord[]>
   reset(): Promise<void>
   close(): Promise<void>
@@ -195,6 +222,106 @@ export function createPersistence(options: PersistenceOptions): Persistence {
           kind: "created" as const,
           board: { id: board.publicId, name: board.name, role: "owner" as const },
         }
+      })
+    },
+
+    async joinBoard(input) {
+      return database.transaction(async (transaction) => {
+        const boardRows = await transaction
+          .select({
+            id: boards.id,
+            publicId: boards.publicId,
+            name: boards.name,
+          })
+          .from(boards)
+          .where(eq(boards.joinCodeHash, input.joinCodeHash))
+          .for("update")
+
+        const board = boardRows[0]
+        if (!board) {
+          return { kind: "invalid_join_code" as const }
+        }
+
+        const existingMembership = await transaction
+          .select({ role: memberships.role })
+          .from(memberships)
+          .where(
+            and(
+              eq(memberships.boardId, board.id),
+              eq(memberships.userId, input.userId),
+            ),
+          )
+          .limit(1)
+
+        if (existingMembership[0]) {
+          return { kind: "already_member" as const }
+        }
+
+        const memberCount = await transaction
+          .select({ count: sql<number>`count(*)` })
+          .from(memberships)
+          .where(eq(memberships.boardId, board.id))
+
+        if (Number(memberCount[0]?.count ?? 0) >= MAX_BOARD_MEMBERS) {
+          return { kind: "board_capacity" as const }
+        }
+
+        await transaction.insert(memberships).values({
+          boardId: board.id,
+          userId: input.userId,
+          role: "member",
+          createdAt: input.now,
+        })
+
+        return {
+          kind: "joined" as const,
+          board: { id: board.publicId, name: board.name, role: "member" as const },
+        }
+      })
+    },
+
+    async leaveBoard(input) {
+      return database.transaction(async (transaction) => {
+        const boardRows = await transaction
+          .select({ id: boards.id })
+          .from(boards)
+          .where(eq(boards.publicId, input.publicId))
+          .for("update")
+
+        const board = boardRows[0]
+        if (!board) {
+          return { kind: "not_member" as const }
+        }
+
+        const memberRows = await transaction
+          .select({ role: memberships.role })
+          .from(memberships)
+          .where(
+            and(
+              eq(memberships.boardId, board.id),
+              eq(memberships.userId, input.userId),
+            ),
+          )
+          .limit(1)
+
+        const membership = memberRows[0]
+        if (!membership) {
+          return { kind: "not_member" as const }
+        }
+        if (membership.role === "owner") {
+          return { kind: "owner_cannot_leave" as const }
+        }
+
+        await transaction
+          .delete(memberships)
+          .where(
+            and(
+              eq(memberships.boardId, board.id),
+              eq(memberships.userId, input.userId),
+            ),
+          )
+
+        return { kind: "left" as const }
       })
     },
 

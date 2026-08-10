@@ -34,6 +34,7 @@ export type TerminalShellProps = {
 
 type ShellOverlay = "none" | "help"
 type ShellView = "home" | "boards" | "board-actions" | "canvas" | "form" | "confirmation"
+type ConfirmationAction = "placeholder" | "leave"
 
 type FormKind = "sign-in" | "register" | "create-board" | "join-board" | "filter-boards"
 
@@ -122,7 +123,13 @@ const formDefinitions: Record<FormKind, FormDefinition> = {
   "join-board": {
     title: "Join Board",
     description: "Redeem the current Join Code to become a Member.",
-    fields: [{ id: "joinCode", label: "Join Code", placeholder: "grouped code" }],
+    fields: [{
+      id: "joinCode",
+      label: "Join Code",
+      placeholder: "grouped code",
+      sensitive: true,
+      maxLength: 32,
+    }],
   },
   "filter-boards": {
     title: "Filter Boards",
@@ -161,10 +168,12 @@ export function TerminalShell({
   const [view, setView] = useState<ShellView>("home")
   const [mode, setMode] = useState<ShellMode>("navigate")
   const [selectedIndex, setSelectedIndex] = useState(0)
+  const [selectedBoardIndex, setSelectedBoardIndex] = useState(0)
   const [formKind, setFormKind] = useState<FormKind | null>(null)
   const [formReturnView, setFormReturnView] = useState<ShellView>("home")
   const [formInitialKey, setFormInitialKey] = useState<string | null>(null)
   const [confirmationReturnView, setConfirmationReturnView] = useState<ShellView>("boards")
+  const [confirmationAction, setConfirmationAction] = useState<ConfirmationAction>("placeholder")
   const [notice, setNotice] = useState<ShellNotice | null>(null)
   const [boards, setBoards] = useState<BoardSummary[]>([])
   const [boardFilter, setBoardFilter] = useState("")
@@ -176,20 +185,27 @@ export function TerminalShell({
   )
   const [authenticatedUsername, setAuthenticatedUsername] = useState<string | null>(null)
   const [signOutPending, setSignOutPending] = useState(false)
+  const [boardActionPending, setBoardActionPending] = useState(false)
   const overlayRef = useRef(overlay)
   const viewRef = useRef(view)
   const modeRef = useRef(mode)
   const selectedIndexRef = useRef(selectedIndex)
+  const selectedBoardIndexRef = useRef(selectedBoardIndex)
   const sessionStateRef = useRef(sessionState)
   const boardFilterRef = useRef(boardFilter)
   const signOutPendingRef = useRef(signOutPending)
+  const confirmationActionRef = useRef(confirmationAction)
+  const boardActionPendingRef = useRef(boardActionPending)
   overlayRef.current = overlay
   viewRef.current = view
   modeRef.current = mode
   selectedIndexRef.current = selectedIndex
+  selectedBoardIndexRef.current = selectedBoardIndex
   sessionStateRef.current = sessionState
   boardFilterRef.current = boardFilter
   signOutPendingRef.current = signOutPending
+  confirmationActionRef.current = confirmationAction
+  boardActionPendingRef.current = boardActionPending
 
   useEffect(() => {
     if (capabilitiesOverride) {
@@ -295,6 +311,11 @@ export function TerminalShell({
       const response = await boardClient.listBoards(credential, filter)
       flushSync(() => {
         setBoards(response.boards)
+        setSelectedBoardIndex((currentIndex) =>
+          response.boards.length === 0
+            ? 0
+            : Math.min(currentIndex, response.boards.length - 1),
+        )
         setBoardFilter(filter)
         if (clearNotice) {
           setNotice(null)
@@ -318,6 +339,7 @@ export function TerminalShell({
         setFormKind(null)
       }
       setFormInitialKey(null)
+      setConfirmationAction("placeholder")
       setNotice(null)
       setFormPending(false)
       if (nextView !== "boards") {
@@ -350,6 +372,31 @@ export function TerminalShell({
     flushSync(() => {
       setView("confirmation")
       setConfirmationReturnView(returnView)
+      setConfirmationAction("placeholder")
+      setSelectedIndex(0)
+      setNotice(null)
+    })
+  }
+
+  const openLeaveConfirmation = () => {
+    const board = boards[selectedBoardIndexRef.current]
+    if (!board) {
+      flushSync(() => {
+        setNotice({ kind: "error", message: "Select a Board before leaving." })
+      })
+      return
+    }
+    if (board.role === "owner") {
+      flushSync(() => {
+        setNotice({ kind: "error", message: "The Owner cannot leave this Board." })
+      })
+      return
+    }
+
+    flushSync(() => {
+      setView("confirmation")
+      setConfirmationReturnView("board-actions")
+      setConfirmationAction("leave")
       setSelectedIndex(0)
       setNotice(null)
     })
@@ -364,6 +411,64 @@ export function TerminalShell({
         message: confirmed ? "Board action confirmed." : "Action cancelled.",
       })
     })
+  }
+
+  const leaveSelectedBoard = async () => {
+    if (!boardClient || boardActionPendingRef.current) {
+      return
+    }
+
+    const board = boards[selectedBoardIndexRef.current]
+    if (!board) {
+      flushSync(() => {
+        setView("board-actions")
+        setNotice({ kind: "error", message: "Select a Board before leaving." })
+      })
+      return
+    }
+    if (board.role === "owner") {
+      flushSync(() => {
+        setView("board-actions")
+        setNotice({ kind: "error", message: "The Owner cannot leave this Board." })
+      })
+      return
+    }
+
+    flushSync(() => setBoardActionPending(true))
+    try {
+      const credential = await credentialStore.load()
+      if (!credential) {
+        throw new Error("No active Terminal Session. Sign in to continue.")
+      }
+      await boardClient.leaveBoard(credential, board.id)
+      flushSync(() => {
+        setBoards((currentBoards) =>
+          currentBoards.filter((currentBoard) => currentBoard.id !== board.id),
+        )
+        setSelectedBoardIndex(0)
+        setView("boards")
+        setConfirmationAction("placeholder")
+        setSelectedIndex(0)
+        setNotice({ kind: "status", message: `Left Board "${board.name}".` })
+        setBoardActionPending(false)
+      })
+      void loadBoards(boardFilterRef.current, false)
+    } catch (error) {
+      flushSync(() => {
+        setView("board-actions")
+        setNotice({ kind: "error", message: formatBoardError(error) })
+        setBoardActionPending(false)
+      })
+    }
+  }
+
+  const moveBoardSelection = (direction: -1 | 1) => {
+    if (boards.length === 0) {
+      return
+    }
+    const nextIndex =
+      (selectedBoardIndexRef.current + direction + boards.length) % boards.length
+    flushSync(() => setSelectedBoardIndex(nextIndex))
   }
 
   const completeForm = async (values: Record<string, string>) => {
@@ -413,6 +518,7 @@ export function TerminalShell({
           setFormKind(null)
           setFormInitialKey(null)
           setSelectedIndex(0)
+          setSelectedBoardIndex(0)
           setAuthenticatedUsername(response.user.username)
           setSessionState("signed-in")
           setNotice({
@@ -443,6 +549,7 @@ export function TerminalShell({
           setFormKind(null)
           setFormInitialKey(null)
           setSelectedIndex(0)
+          setSelectedBoardIndex(0)
           setBoardFilter("")
           setBoards((currentBoards) => [
             response.board,
@@ -452,6 +559,42 @@ export function TerminalShell({
           setNotice({
             kind: "status",
             message: `Board "${response.board.name}" created.`,
+          })
+          setFormPending(false)
+        })
+        void loadBoards("", false)
+      } catch (error) {
+        flushSync(() => {
+          setNotice({ kind: "error", message: formatBoardError(error) })
+          setFormPending(false)
+        })
+      }
+      return
+    }
+
+    if (formKind === "join-board" && boardClient) {
+      flushSync(() => setFormPending(true))
+      try {
+        const credential = await credentialStore.load()
+        if (!credential) {
+          throw new Error("No active Terminal Session. Sign in to continue.")
+        }
+        const response = await boardClient.joinBoard(credential, { joinCode: values.joinCode })
+        flushSync(() => {
+          setView(formReturnView)
+          setFormKind(null)
+          setFormInitialKey(null)
+          setSelectedIndex(0)
+          setSelectedBoardIndex(0)
+          setBoardFilter("")
+          setBoards((currentBoards) => [
+            response.board,
+            ...currentBoards.filter((currentBoard) => currentBoard.id !== response.board.id),
+          ])
+          setBoardCodeNotice(null)
+          setNotice({
+            kind: "status",
+            message: `Board "${response.board.name}" joined.`,
           })
           setFormPending(false)
         })
@@ -526,7 +669,11 @@ export function TerminalShell({
   }
 
   useKeyboard((key) => {
-    if (sessionStateRef.current === "checking" || signOutPendingRef.current) {
+    if (
+      sessionStateRef.current === "checking" ||
+      signOutPendingRef.current ||
+      boardActionPendingRef.current
+    ) {
       return
     }
 
@@ -589,8 +736,12 @@ export function TerminalShell({
         moveSelection(-1)
         return
       }
-      if (key.name === "down" || key.name === "j") {
+      if (key.name === "down") {
         moveSelection(1)
+        return
+      }
+      if (key.name === "[" || key.name === "]") {
+        moveBoardSelection(key.name === "[" ? -1 : 1)
         return
       }
       if (key.name === "c") {
@@ -673,14 +824,18 @@ export function TerminalShell({
         return
       }
       if (key.name === "l" || (key.name === "return" && selectedIndexRef.current === 1)) {
-        openConfirmation("board-actions")
+        openLeaveConfirmation()
         return
       }
     }
 
     if (viewRef.current === "confirmation") {
       if (key.name === "y") {
-        resolveConfirmation(true)
+        if (confirmationActionRef.current === "leave") {
+          void leaveSelectedBoard()
+        } else {
+          resolveConfirmation(true)
+        }
         return
       }
       if (key.name === "n" || key.name === "escape") {
@@ -719,10 +874,12 @@ export function TerminalShell({
   ) : view === "board-actions" ? (
     <BoardActions
       selectedIndex={selectedIndex}
+      selectedBoard={boards[selectedBoardIndex]}
       status={notice?.kind === "status" ? notice.message : "choose an action"}
+      error={notice?.kind === "error" ? notice.message : undefined}
     />
   ) : view === "confirmation" ? (
-    <ShellConfirmation />
+    <ShellConfirmation action={confirmationAction} />
   ) : view === "canvas" ? (
     <CanvasSurface mode={mode} />
   ) : view === "form" && formKind ? (
@@ -739,6 +896,7 @@ export function TerminalShell({
     <BoardList
       selectedIndex={selectedIndex}
       boards={boards}
+      selectedBoardIndex={selectedBoardIndex}
       filter={boardFilter}
       pending={boardsPending}
       notice={notice}
@@ -870,6 +1028,7 @@ function ShellHome({
 function BoardList({
   selectedIndex,
   boards,
+  selectedBoardIndex,
   filter,
   pending,
   notice,
@@ -879,6 +1038,7 @@ function BoardList({
 }: {
   selectedIndex: number
   boards: BoardSummary[]
+  selectedBoardIndex: number
   filter: string
   pending: boolean
   notice: ShellNotice | null
@@ -920,9 +1080,9 @@ function BoardList({
         {!pending && hasBoardClient && sessionState === "signed-in" && boards.length === 0 ? (
           <text fg={colors.muted}>No Memberships match this filter.</text>
         ) : null}
-        {boards.map((board) => (
+        {boards.map((board, index) => (
           <text key={board.id} fg={colors.text}>
-            • {board.name} · {board.role === "owner" ? "Owner" : "Member"}
+            {index === selectedBoardIndex ? "›" : " "} {board.name} · {board.role === "owner" ? "Owner" : "Member"}
           </text>
         ))}
         {joinCode ? (
@@ -933,7 +1093,7 @@ function BoardList({
             {index === selectedIndex ? "›" : " "} {item.key} {item.label}
           </text>
         ))}
-        <text fg={colors.muted}>f filter Board name · ↑↓ / jk move · Enter choose · Escape back</text>
+        <text fg={colors.muted}>[/] select Board · f filter Board name · ↑↓ / jk move · Enter choose · Escape back</text>
         {notice?.kind === "error" ? <text fg={colors.error}>Error: {notice.message}</text> : null}
         {notice?.kind === "status" ? <text fg={colors.success}>Status: {notice.message}</text> : null}
       </box>
@@ -941,19 +1101,34 @@ function BoardList({
   )
 }
 
-function BoardActions({ selectedIndex, status }: { selectedIndex: number; status: string }) {
+function BoardActions({
+  selectedIndex,
+  selectedBoard,
+  status,
+  error,
+}: {
+  selectedIndex: number
+  selectedBoard: BoardSummary | undefined
+  status: string
+  error?: string
+}) {
   return (
     <ShellMenu
       title="Board actions"
-      description="Governance actions stay behind explicit keyboard confirmation."
+      description={
+        selectedBoard
+          ? `Selected Board: ${selectedBoard.name} · ${selectedBoard.role === "owner" ? "Owner" : "Member"}`
+          : "No Board selected. Return to choose a Membership."
+      }
       items={boardActionsMenu}
       selectedIndex={selectedIndex}
       status={status}
+      error={error}
     />
   )
 }
 
-function ShellConfirmation() {
+function ShellConfirmation({ action }: { action: ConfirmationAction }) {
   return (
     <box
       style={{
@@ -974,7 +1149,7 @@ function ShellConfirmation() {
           flexDirection: "column",
         }}
       >
-        <text fg={colors.warning}>Confirm Board action</text>
+        <text fg={colors.warning}>{action === "leave" ? "Confirm leaving Board" : "Confirm Board action"}</text>
         <text fg={colors.text}>This action changes shared Board state.</text>
         <text fg={colors.muted}>Review the action before continuing.</text>
         <text fg={colors.warning}>y confirm · n cancel · Escape cancel</text>
@@ -1114,6 +1289,15 @@ function ShellForm({
               cursorColor={colors.accent}
               showCursor={!field.sensitive}
               onInput={(value) => {
+                if (initialKeyToIgnoreRef.current && value === initialKeyToIgnoreRef.current) {
+                  const input = inputRefs.current[index]
+                  if (input) {
+                    input.value = ""
+                  }
+                  initialKeyToIgnoreRef.current = null
+                  return
+                }
+
                 if (field.sensitive) {
                   if (maskingInputRef.current) {
                     return
@@ -1143,14 +1327,6 @@ function ShellForm({
                   return
                 }
 
-                if (initialKeyToIgnoreRef.current && value === initialKeyToIgnoreRef.current) {
-                  const input = inputRefs.current[index]
-                  if (input) {
-                    input.value = ""
-                  }
-                  initialKeyToIgnoreRef.current = null
-                  return
-                }
                 const nextValues = { ...valuesRef.current, [field.id]: value }
                 valuesRef.current = nextValues
                 setValues(nextValues)
