@@ -23,6 +23,13 @@ export const TERMINAL_FIRST_RENDER_MARKERS = [
   "q quit",
 ] as const
 
+const TERMINAL_QUIT_RENDER_MARKERS = [
+  "TUISCRIB",
+  "MODE  NAVIGATE",
+  "Unicode",
+  "q quit",
+] as const
+
 export type TerminalSmokeOutput = {
   stdout: string
   stderr: string
@@ -76,7 +83,7 @@ async function runPipedSmoke(
   try {
     const stdoutReader = readStream(child.stdout, (chunk) => {
       stdout += chunk
-      if (!sentQuit && hasTerminalFirstRender(stdout)) {
+      if (!sentQuit && hasTerminalQuitRender(stdout)) {
         sentQuit = true
         child.stdin.write("q")
         child.stdin.end()
@@ -150,7 +157,7 @@ async function runConptySmoke(
 
     child.onData((chunk) => {
       output += chunk
-      if (!sentQuit && hasTerminalFirstRender(output)) {
+      if (!sentQuit && hasTerminalQuitRender(output)) {
         sentQuit = true
         setTimeout(() => {
           try {
@@ -307,6 +314,10 @@ async function readStream(
 
 function hasTerminalFirstRender(output: string): boolean {
   return TERMINAL_FIRST_RENDER_MARKERS.every((marker) => output.includes(marker))
+}
+
+function hasTerminalQuitRender(output: string): boolean {
+  return TERMINAL_QUIT_RENDER_MARKERS.every((marker) => output.includes(marker))
 }
 
 function hasAnsiColorOutput(output: string): boolean {
