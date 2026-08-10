@@ -1,6 +1,6 @@
 import { drizzle } from "drizzle-orm/postgres-js"
 import { migrate } from "drizzle-orm/postgres-js/migrator"
-import { eq } from "drizzle-orm"
+import { and, eq, gt, isNull } from "drizzle-orm"
 import { fileURLToPath } from "node:url"
 import postgres from "postgres"
 
@@ -31,6 +31,22 @@ export type CreateTerminalSessionInput = {
   expiresAt: Date
 }
 
+export type AuthenticateTerminalSessionInput = {
+  credentialHash: string
+  now: Date
+  expiresAt: Date
+}
+
+export type TerminalSessionAuthentication =
+  | { user: Pick<AuthUserRecord, "username"> }
+  | { status: "expired" | "revoked" }
+  | null
+
+export type RevokeTerminalSessionInput = {
+  credentialHash: string
+  now: Date
+}
+
 export type RegisteredUser = {
   user: Pick<AuthUserRecord, "id" | "username">
   sessionId: number
@@ -42,6 +58,10 @@ export type Persistence = {
   findUserByUsername(username: string): Promise<AuthUserRecord | null>
   registerUser(input: RegisterUserInput): Promise<RegisteredUser | null>
   createTerminalSession(input: CreateTerminalSessionInput): Promise<{ sessionId: number }>
+  authenticateTerminalSession(
+    input: AuthenticateTerminalSessionInput,
+  ): Promise<TerminalSessionAuthentication>
+  revokeTerminalSession(input: RevokeTerminalSessionInput): Promise<void>
   reset(): Promise<void>
   close(): Promise<void>
 }
@@ -155,6 +175,63 @@ export function createPersistence(options: PersistenceOptions): Persistence {
       }
 
       return session
+    },
+
+    async authenticateTerminalSession(input) {
+      return database.transaction(async (transaction) => {
+        const sessions = await transaction
+          .select({
+            sessionId: terminalSessions.id,
+            username: users.username,
+            expiresAt: terminalSessions.expiresAt,
+            revokedAt: terminalSessions.revokedAt,
+          })
+          .from(terminalSessions)
+          .innerJoin(users, eq(terminalSessions.userId, users.id))
+          .where(eq(terminalSessions.credentialHash, input.credentialHash))
+          .limit(1)
+
+        const session = sessions[0]
+        if (!session) {
+          return null
+        }
+        if (session.revokedAt) {
+          return { status: "revoked" as const }
+        }
+        if (session.expiresAt.getTime() <= input.now.getTime()) {
+          return { status: "expired" as const }
+        }
+
+        const updated = await transaction
+          .update(terminalSessions)
+          .set({ lastActivityAt: input.now, expiresAt: input.expiresAt })
+          .where(
+            and(
+              eq(terminalSessions.id, session.sessionId),
+              isNull(terminalSessions.revokedAt),
+              gt(terminalSessions.expiresAt, input.now),
+            ),
+          )
+          .returning({ id: terminalSessions.id })
+
+        if (!updated[0]) {
+          return { status: "expired" as const }
+        }
+
+        return { user: { username: session.username } }
+      })
+    },
+
+    async revokeTerminalSession(input) {
+      await database
+        .update(terminalSessions)
+        .set({ revokedAt: input.now })
+        .where(
+          and(
+            eq(terminalSessions.credentialHash, input.credentialHash),
+            isNull(terminalSessions.revokedAt),
+          ),
+        )
     },
 
     async reset() {

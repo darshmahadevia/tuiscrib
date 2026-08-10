@@ -3,15 +3,21 @@ import { createHash, randomBytes } from "node:crypto"
 import {
   authResponseSchema,
   registerRequestSchema,
+  signOutResponseSchema,
   serviceErrorSchema,
   signInRequestSchema,
+  terminalSessionCredentialSchema,
+  terminalSessionResponseSchema,
   type AuthResponse,
   type ServiceError,
+  type SignOutResponse,
+  type TerminalSessionResponse,
 } from "@tuiscrib/contracts"
 import type {
   AuthUserRecord,
   Persistence,
   RegisterUserInput,
+  TerminalSessionAuthentication,
 } from "@tuiscrib/persistence"
 
 export const TERMINAL_SESSION_INACTIVITY_MS = 30 * 24 * 60 * 60 * 1000
@@ -27,7 +33,8 @@ export type PasswordHasher = {
 export type AuthPersistence = Pick<
   Persistence,
   "findUserByUsername" | "registerUser" | "createTerminalSession"
->
+> &
+  Partial<Pick<Persistence, "authenticateTerminalSession" | "revokeTerminalSession">>
 
 export type AuthRateLimitOptions = {
   maxAttempts?: number
@@ -104,6 +111,14 @@ export type AuthenticationOptions = {
 export type AuthOperationResult =
   | { kind: "success"; response: AuthResponse }
   | { kind: "failure"; status: 400 | 401 | 409 | 429; error: ServiceError }
+
+export type SessionRestoreResult =
+  | { kind: "success"; response: TerminalSessionResponse }
+  | { kind: "failure"; status: 401 | 503; error: ServiceError }
+
+export type SignOutOperationResult =
+  | { kind: "success"; response: SignOutResponse }
+  | { kind: "failure"; status: 503; error: ServiceError }
 
 export type AuthRequestSignals = {
   networkKey: string
@@ -216,7 +231,89 @@ export function createAuthenticationService(options: AuthenticationOptions) {
         sessionCredential: credential,
       })
     },
+
+    async restore(credential: string | null): Promise<SessionRestoreResult> {
+      if (!isCredentialShape(credential)) {
+        return sessionFailure(
+          "Your Terminal Session is invalid. Sign in again.",
+          "invalid_session",
+        )
+      }
+
+      if (!options.persistence.authenticateTerminalSession) {
+        return { kind: "failure", status: 503, error: unavailableError() }
+      }
+
+      const now = clock()
+      const result = await options.persistence.authenticateTerminalSession({
+        credentialHash: hashCredential(credential),
+        now,
+        expiresAt: new Date(now.getTime() + TERMINAL_SESSION_INACTIVITY_MS),
+      })
+
+      return restoreResult(result)
+    },
+
+    async signOut(credential: string | null): Promise<SignOutOperationResult> {
+      if (!options.persistence.revokeTerminalSession) {
+        return { kind: "failure", status: 503, error: unavailableError() }
+      }
+
+      if (isCredentialShape(credential)) {
+        await options.persistence.revokeTerminalSession({
+          credentialHash: hashCredential(credential),
+          now: clock(),
+        })
+      }
+
+      return {
+        kind: "success",
+        response: signOutResponseSchema.parse({ status: "signed_out" }),
+      }
+    },
   }
+}
+
+function isCredentialShape(credential: string | null): credential is string {
+  return terminalSessionCredentialSchema.safeParse(credential).success
+}
+
+function restoreResult(result: TerminalSessionAuthentication): SessionRestoreResult {
+  if (!result) {
+    return sessionFailure(
+      "Your Terminal Session is invalid. Sign in again.",
+      "invalid_session",
+    )
+  }
+  if ("status" in result && result.status === "expired") {
+    return sessionFailure(
+      "Your Terminal Session expired after 30 days of inactivity. Sign in again.",
+      "session_expired",
+    )
+  }
+  if ("status" in result && result.status === "revoked") {
+    return sessionFailure(
+      "Your Terminal Session was revoked. Sign in again.",
+      "session_revoked",
+    )
+  }
+
+  return {
+    kind: "success",
+    response: terminalSessionResponseSchema.parse(result),
+  }
+}
+
+function sessionFailure(message: string, code: string): SessionRestoreResult {
+  return {
+    kind: "failure",
+    status: 401,
+    error: serviceErrorSchema.parse({ error: message, code }),
+  }
+}
+
+function unavailableError(): ServiceError {
+  return serviceErrorSchema.parse({ error: "service unavailable" })
 }
 
 function consumeRateLimit(

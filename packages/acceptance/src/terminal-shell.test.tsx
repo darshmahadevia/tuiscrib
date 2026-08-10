@@ -3,7 +3,7 @@ import { createTerminalCapabilities, type TestRendererSetup } from "@opentui/cor
 import { testRender } from "@opentui/react/test-utils"
 import { act } from "react"
 
-import { TerminalShell } from "@tuiscrib/terminal"
+import { TerminalShell, type AuthClient, type CredentialStore } from "@tuiscrib/terminal"
 
 let activeSetup: TestRendererSetup | null = null
 
@@ -290,4 +290,113 @@ test("keeps the baseline capability label when truecolor is unavailable", async 
   const frame = activeSetup.captureCharFrame()
   expect(frame).toContain("Unicode · 256-color baseline")
   expect(frame).not.toContain("truecolor detected")
+})
+
+test("restores a persisted Terminal Session and signs out through keyboard controls", async () => {
+  const credential = "a".repeat(43)
+  let removed = false
+  let restoredCredential = ""
+  let signedOutCredential = ""
+  const credentialStore: CredentialStore = {
+    filePath: "/protected/tuiscrib/session",
+    load: async () => (removed ? null : credential),
+    save: async () => undefined,
+    remove: async () => {
+      removed = true
+    },
+  }
+  const authClient: AuthClient = {
+    register: async () => {
+      throw new Error("not used")
+    },
+    signIn: async () => {
+      throw new Error("not used")
+    },
+    restore: async (value) => {
+      restoredCredential = value
+      return { user: { username: "ada_lovelace" } }
+    },
+    signOut: async (value) => {
+      signedOutCredential = value
+      return { status: "signed_out" }
+    },
+  }
+
+  activeSetup = await testRender(
+    <TerminalShell
+      label="auth-client"
+      authClient={authClient}
+      credentialStore={credentialStore}
+    />,
+    {
+      width: 80,
+      height: 24,
+      kittyKeyboard: true,
+    },
+  )
+
+  await act(async () => {
+    await activeSetup?.waitForFrame((frame) => frame.includes("Terminal Session restored"))
+  })
+  expect(restoredCredential).toBe(credential)
+  expect(activeSetup.captureCharFrame()).toContain("ada_lovelace")
+  expect(activeSetup.captureCharFrame()).not.toContain(credential)
+
+  await act(async () => {
+    activeSetup?.mockInput.pressKey("x")
+    await activeSetup?.renderOnce()
+  })
+
+  let frame = ""
+  await act(async () => {
+    frame = await activeSetup?.waitForFrame((value) => value.includes("Signed out")) ?? ""
+  })
+  expect(frame).toContain("Terminal Session revoked")
+  expect(signedOutCredential).toBe(credential)
+  expect(removed).toBe(true)
+  expect(frame).not.toContain(credential)
+})
+
+test("returns to sign-in with a clear error when no local Terminal Session exists", async () => {
+  let restoreCalled = false
+  const credentialStore: CredentialStore = {
+    filePath: "/protected/tuiscrib/session",
+    load: async () => null,
+    save: async () => undefined,
+    remove: async () => undefined,
+  }
+  const authClient: AuthClient = {
+    register: async () => {
+      throw new Error("not used")
+    },
+    signIn: async () => {
+      throw new Error("not used")
+    },
+    restore: async () => {
+      restoreCalled = true
+      return { user: { username: "unused" } }
+    },
+    signOut: async () => ({ status: "signed_out" }),
+  }
+
+  await act(async () => {
+    activeSetup = await testRender(
+      <TerminalShell authClient={authClient} credentialStore={credentialStore} />,
+      {
+        width: 80,
+        height: 24,
+        kittyKeyboard: true,
+      },
+    )
+    await activeSetup.renderOnce()
+  })
+
+  let frame = ""
+  await act(async () => {
+    frame = await activeSetup?.waitForFrame((value) => value.includes("No saved Terminal Session")) ?? ""
+  })
+  expect(frame).toContain("Error: No saved Terminal Session.")
+  expect(frame).toContain("continue.")
+  expect(frame).toContain("s sign in")
+  expect(restoreCalled).toBe(false)
 })

@@ -8,6 +8,11 @@ import {
 } from "@tuiscrib/contracts"
 
 import { ServiceRequestError, type AuthClient } from "./client.ts"
+import {
+  createCredentialStore,
+  CredentialStoreError,
+  type CredentialStore,
+} from "./credentials.ts"
 
 export const MIN_TERMINAL_WIDTH = 80
 export const MIN_TERMINAL_HEIGHT = 24
@@ -18,6 +23,7 @@ export type TerminalShellProps = {
   label?: string
   capabilities?: TerminalCapabilities | null
   authClient?: AuthClient
+  credentialStore?: CredentialStore
 }
 
 type ShellOverlay = "none" | "help"
@@ -45,6 +51,8 @@ type ShellNotice = {
   message: string
 }
 
+type SessionState = "checking" | "signed-out" | "signed-in"
+
 type ShellMenuItem = {
   key: string
   label: string
@@ -55,6 +63,7 @@ const homeMenu: ShellMenuItem[] = [
   { key: "b", label: "boards", description: "Open the Board list" },
   { key: "s", label: "sign in", description: "Sign in as a User" },
   { key: "r", label: "register", description: "Register a new User" },
+  { key: "x", label: "sign out", description: "Revoke the current Terminal Session" },
 ]
 
 const boardMenu: ShellMenuItem[] = [
@@ -128,9 +137,13 @@ export function TerminalShell({
   label = "local",
   capabilities: capabilitiesOverride,
   authClient,
+  credentialStore: credentialStoreOverride,
 }: TerminalShellProps) {
   const renderer = useRenderer()
   const { width, height } = useTerminalDimensions()
+  const [credentialStore] = useState<CredentialStore>(
+    () => credentialStoreOverride ?? createCredentialStore(),
+  )
   const [detectedCapabilities, setDetectedCapabilities] = useState(renderer.capabilities)
   const [overlay, setOverlay] = useState<ShellOverlay>("none")
   const [view, setView] = useState<ShellView>("home")
@@ -142,14 +155,23 @@ export function TerminalShell({
   const [confirmationReturnView, setConfirmationReturnView] = useState<ShellView>("boards")
   const [notice, setNotice] = useState<ShellNotice | null>(null)
   const [formPending, setFormPending] = useState(false)
+  const [sessionState, setSessionState] = useState<SessionState>(
+    authClient ? "checking" : "signed-out",
+  )
+  const [authenticatedUsername, setAuthenticatedUsername] = useState<string | null>(null)
+  const [signOutPending, setSignOutPending] = useState(false)
   const overlayRef = useRef(overlay)
   const viewRef = useRef(view)
   const modeRef = useRef(mode)
   const selectedIndexRef = useRef(selectedIndex)
+  const sessionStateRef = useRef(sessionState)
+  const signOutPendingRef = useRef(signOutPending)
   overlayRef.current = overlay
   viewRef.current = view
   modeRef.current = mode
   selectedIndexRef.current = selectedIndex
+  sessionStateRef.current = sessionState
+  signOutPendingRef.current = signOutPending
 
   useEffect(() => {
     if (capabilitiesOverride) {
@@ -167,6 +189,61 @@ export function TerminalShell({
       renderer.off("capabilities", handleCapabilities)
     }
   }, [capabilitiesOverride, renderer])
+
+  useEffect(() => {
+    if (!authClient) {
+      return
+    }
+
+    let active = true
+    void (async () => {
+      try {
+        const credential = await credentialStore.load()
+        if (!active) {
+          return
+        }
+        if (!credential) {
+          flushSync(() => {
+            setSessionState("signed-out")
+            setNotice({
+              kind: "error",
+              message: "No saved Terminal Session. Sign in to continue.",
+            })
+          })
+          return
+        }
+
+        const response = await authClient.restore(credential)
+        if (!active) {
+          return
+        }
+        flushSync(() => {
+          setAuthenticatedUsername(response.user.username)
+          setSessionState("signed-in")
+          setNotice({
+            kind: "status",
+            message: `Terminal Session restored for ${response.user.username}.`,
+          })
+        })
+      } catch (error) {
+        if (shouldDiscardCredential(error)) {
+          await credentialStore.remove().catch(() => undefined)
+        }
+        if (!active) {
+          return
+        }
+        flushSync(() => {
+          setAuthenticatedUsername(null)
+          setSessionState("signed-out")
+          setNotice({ kind: "error", message: formatSessionError(error) })
+        })
+      }
+    })()
+
+    return () => {
+      active = false
+    }
+  }, [authClient, credentialStore])
 
   const moveSelection = (direction: -1 | 1) => {
     const items =
@@ -267,12 +344,20 @@ export function TerminalShell({
                 username: values.username,
                 password: values.password,
               })
+        try {
+          await credentialStore.save(response.sessionCredential)
+        } catch (error) {
+          await authClient.signOut(response.sessionCredential).catch(() => undefined)
+          throw error
+        }
         const completedLabel = formKind === "register" ? "Registration" : "Sign-in"
         flushSync(() => {
           setView(formReturnView)
           setFormKind(null)
           setFormInitialKey(null)
           setSelectedIndex(0)
+          setAuthenticatedUsername(response.user.username)
+          setSessionState("signed-in")
           setNotice({
             kind: "status",
             message: `${completedLabel} complete for ${response.user.username}. Terminal Session ready.`,
@@ -299,7 +384,44 @@ export function TerminalShell({
     })
   }
 
+  const signOut = async () => {
+    if (signOutPendingRef.current) {
+      return
+    }
+
+    if (!authClient) {
+      flushSync(() => {
+        setNotice({ kind: "status", message: "No active Terminal Session." })
+      })
+      return
+    }
+
+    flushSync(() => setSignOutPending(true))
+    try {
+      const credential = await credentialStore.load()
+      if (credential) {
+        await authClient.signOut(credential)
+      }
+      await credentialStore.remove()
+      flushSync(() => {
+        setAuthenticatedUsername(null)
+        setSessionState("signed-out")
+        setNotice({ kind: "status", message: "Signed out. Terminal Session revoked." })
+      })
+    } catch (error) {
+      flushSync(() => {
+        setNotice({ kind: "error", message: formatSessionError(error) })
+      })
+    } finally {
+      flushSync(() => setSignOutPending(false))
+    }
+  }
+
   useKeyboard((key) => {
+    if (sessionStateRef.current === "checking" || signOutPendingRef.current) {
+      return
+    }
+
     if (overlayRef.current === "help") {
       if (key.name === "escape" || key.name === "?") {
         flushSync(() => setOverlay("none"))
@@ -328,6 +450,10 @@ export function TerminalShell({
         openForm("register", "home", key.name)
         return
       }
+      if (key.name === "x") {
+        void signOut()
+        return
+      }
       if (key.name === "return" && selectedIndexRef.current === 0) {
         openView("boards")
         return
@@ -338,6 +464,10 @@ export function TerminalShell({
       }
       if (key.name === "return" && selectedIndexRef.current === 2) {
         openForm("register")
+        return
+      }
+      if (key.name === "return" && selectedIndexRef.current === 3) {
+        void signOut()
         return
       }
     }
@@ -471,7 +601,8 @@ export function TerminalShell({
   ) : view === "home" ? (
     <ShellHome
       selectedIndex={selectedIndex}
-      status={notice?.kind === "status" ? notice.message : "shell ready"}
+      sessionState={sessionState}
+      notice={notice}
     />
   ) : view === "board-actions" ? (
     <BoardActions
@@ -506,11 +637,11 @@ export function TerminalShell({
             ? mode === "edit"
               ? "? help · q quit · Escape leave Edit mode"
               : "? help · q quit · Escape back"
-            : "? help · q quit"
+            : "? help · x sign out · q quit"
 
   return (
     <ShellFrame
-      label={label}
+      label={authenticatedUsername ?? label}
       mode={mode}
       capabilities={capabilitiesOverride ?? detectedCapabilities}
       footerHint={footerHint}
@@ -585,14 +716,29 @@ function ShellFrame({
   )
 }
 
-function ShellHome({ selectedIndex, status }: { selectedIndex: number; status: string }) {
+function ShellHome({
+  selectedIndex,
+  sessionState,
+  notice,
+}: {
+  selectedIndex: number
+  sessionState: SessionState
+  notice: ShellNotice | null
+}) {
   return (
     <ShellMenu
       title="Welcome to Tuiscrib"
       description="Choose a workflow. Every action remains keyboard reachable."
       items={homeMenu}
       selectedIndex={selectedIndex}
-      status={status}
+      status={
+        sessionState === "checking"
+          ? "Restoring Terminal Session…"
+          : notice?.kind === "status"
+            ? notice.message
+            : "shell ready"
+      }
+      error={notice?.kind === "error" ? notice.message : undefined}
       canGoBack={false}
     />
   )
@@ -837,6 +983,9 @@ function ShellForm({
 }
 
 function formatAuthError(error: unknown): string {
+  if (error instanceof CredentialStoreError) {
+    return formatCredentialStoreError(error)
+  }
   if (!(error instanceof ServiceRequestError)) {
     return "Service unavailable. Try again later."
   }
@@ -845,6 +994,35 @@ function formatAuthError(error: unknown): string {
   return fieldErrors.length > 0
     ? `${error.details.error} ${fieldErrors.join(" ")}`
     : error.details.error
+}
+
+function formatSessionError(error: unknown): string {
+  if (error instanceof CredentialStoreError) {
+    return formatCredentialStoreError(error)
+  }
+  if (error instanceof ServiceRequestError) {
+    return error.details.error
+  }
+  return "Service unavailable. Try again later."
+}
+
+function formatCredentialStoreError(error: CredentialStoreError): string {
+  switch (error.code) {
+    case "malformed":
+      return "The saved Terminal Session is malformed. Sign in again."
+    case "insecure":
+      return "The saved Terminal Session is not protected. Sign in again."
+    case "unavailable":
+      return "The saved Terminal Session could not be read securely. Try again later."
+  }
+}
+
+function shouldDiscardCredential(error: unknown): boolean {
+  return (
+    (error instanceof ServiceRequestError && error.status === 401) ||
+    (error instanceof CredentialStoreError &&
+      (error.code === "malformed" || error.code === "insecure"))
+  )
 }
 
 function updateMaskedInputValue(
@@ -888,6 +1066,7 @@ function ShellMenu({
   items,
   selectedIndex,
   status,
+  error,
   canGoBack = true,
 }: {
   title: string
@@ -895,6 +1074,7 @@ function ShellMenu({
   items: ShellMenuItem[]
   selectedIndex: number
   status: string
+  error?: string
   canGoBack?: boolean
 }) {
   return (
@@ -927,6 +1107,7 @@ function ShellMenu({
         <text fg={colors.muted}>
           {canGoBack ? "↑↓ / jk move · Enter choose · Escape back" : "↑↓ / jk move · Enter choose"}
         </text>
+        {error ? <text fg={colors.error}>Error: {error}</text> : null}
         <text fg={colors.success}>Status: {status}</text>
       </box>
     </box>
@@ -962,7 +1143,7 @@ function HelpOverlay() {
         <text fg={colors.muted}>Forms: Tab next field · Enter submit · Escape cancel</text>
         <text fg={colors.muted}>Confirmations: y confirm · n cancel</text>
         <text fg={colors.muted}>↑↓ / jk move · Enter choose · Escape back</text>
-        <text fg={colors.muted}>q quit · ? toggle help</text>
+        <text fg={colors.muted}>x sign out · q quit · ? toggle help</text>
         <text fg={colors.success}>Escape close</text>
       </box>
     </box>

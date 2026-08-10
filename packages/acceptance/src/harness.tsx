@@ -5,7 +5,7 @@ import { act } from "react"
 
 import { createPersistence, type Persistence } from "@tuiscrib/persistence"
 import { createServiceApp } from "@tuiscrib/service"
-import { HealthScreen, TerminalShell } from "@tuiscrib/terminal"
+import { HealthScreen, TerminalShell, type CredentialStore } from "@tuiscrib/terminal"
 import { createAuthClient, createHealthClient } from "@tuiscrib/terminal/client"
 
 type ProcessResult = {
@@ -125,6 +125,21 @@ async function startDisposablePostgres(): Promise<DisposablePostgres> {
 export type TerminalClient = {
   label: string
   setup: TestRendererSetup
+  credentialStore?: CredentialStore
+}
+
+function createMemoryCredentialStore(): CredentialStore {
+  let credential: string | null = null
+  return {
+    filePath: "memory://tuiscrib/session",
+    load: async () => credential,
+    save: async (nextCredential) => {
+      credential = nextCredential
+    },
+    remove: async () => {
+      credential = null
+    },
+  }
 }
 
 export class AcceptanceHarness {
@@ -152,6 +167,7 @@ export class AcceptanceHarness {
         fetch: createServiceApp({
           persistence,
           clock: () => new Date(clock.now()),
+          authRateLimit: { maxAttempts: 100 },
         }).fetch,
       })
 
@@ -177,24 +193,36 @@ export class AcceptanceHarness {
         clock: this.clock,
       },
     )
-    await setup.renderOnce()
+    await act(async () => {
+      await setup.renderOnce()
+    })
     const client = { label, setup }
     this.clients.push(client)
     return client
   }
 
-  async addShellClient(label: string): Promise<TerminalClient> {
-    const setup = await testRender(
-      <TerminalShell label={label} authClient={createAuthClient(this.baseUrl)} />,
-      {
-        width: 80,
-        height: 24,
-        clock: this.clock,
-        kittyKeyboard: true,
-      },
-    )
-    await setup.renderOnce()
-    const client = { label, setup }
+  async addShellClient(
+    label: string,
+    credentialStore: CredentialStore = createMemoryCredentialStore(),
+  ): Promise<TerminalClient> {
+    let setup!: TestRendererSetup
+    await act(async () => {
+      setup = await testRender(
+        <TerminalShell
+          label={label}
+          authClient={createAuthClient(this.baseUrl)}
+          credentialStore={credentialStore}
+        />,
+        {
+          width: 80,
+          height: 24,
+          clock: this.clock,
+          kittyKeyboard: true,
+        },
+      )
+      await setup.renderOnce()
+    })
+    const client = { label, setup, credentialStore }
     this.clients.push(client)
     return client
   }

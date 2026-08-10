@@ -10,4 +10,6 @@ export {
   type AuthRateLimitOptions,
   type AuthenticationOptions,
   type PasswordHasher,
+  type SessionRestoreResult,
+  type SignOutOperationResult,
 } from "./auth.ts"

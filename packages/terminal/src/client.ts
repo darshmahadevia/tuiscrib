@@ -1,11 +1,15 @@
 import {
   authResponseSchema,
   healthResponseSchema,
+  signOutResponseSchema,
   serviceErrorSchema,
+  terminalSessionResponseSchema,
   type AuthResponse,
   type RegisterRequest,
+  type SignOutResponse,
   type ServiceError,
   type SignInRequest,
+  type TerminalSessionResponse,
   type HealthResponse,
 } from "@tuiscrib/contracts"
 
@@ -14,6 +18,8 @@ type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Respons
 export type AuthClient = {
   register(input: RegisterRequest): Promise<AuthResponse>
   signIn(input: SignInRequest): Promise<AuthResponse>
+  restore(credential: string): Promise<TerminalSessionResponse>
+  signOut(credential: string): Promise<SignOutResponse>
 }
 
 export class ServiceRequestError extends Error {
@@ -64,6 +70,12 @@ export function createAuthClient(
     signIn(input) {
       return requestAuth("/auth/sign-in", input)
     },
+    restore(credential) {
+      return requestSession("/auth/session", credential, terminalSessionResponseSchema)
+    },
+    signOut(credential) {
+      return requestSession("/auth/sign-out", credential, signOutResponseSchema)
+    },
   }
 
   async function requestAuth(
@@ -86,5 +98,27 @@ export function createAuthClient(
     }
 
     return authResponseSchema.parse(payload)
+  }
+
+  async function requestSession<T>(
+    path: string,
+    credential: string,
+    schema: { parse(value: unknown): T },
+  ): Promise<T> {
+    const response = await fetcher(new URL(path, baseUrl), {
+      method: "POST",
+      headers: { authorization: `Bearer ${credential}` },
+    })
+    const payload: unknown = await response.json().catch(() => undefined)
+
+    if (!response.ok) {
+      const details = serviceErrorSchema.safeParse(payload)
+      throw new ServiceRequestError(
+        response.status,
+        details.success ? details.data : { error: "service unavailable" },
+      )
+    }
+
+    return schema.parse(payload)
   }
 }

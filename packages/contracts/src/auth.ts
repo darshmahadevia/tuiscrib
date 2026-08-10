@@ -3,6 +3,7 @@ import { z } from "zod"
 const USERNAME_PATTERN = /^[a-z0-9_-]{3,24}$/
 const MIN_PASSWORD_CHARACTERS = 8
 const MAX_PASSWORD_CHARACTERS = 128
+const TERMINAL_SESSION_CREDENTIAL_PATTERN = /^[A-Za-z0-9_-]{43}$/
 
 let graphemeSegmenter: Intl.Segmenter | undefined
 
@@ -62,6 +63,11 @@ export const signInRequestSchema = z.object({
   password: z.string().min(1, "Password is required."),
 })
 
+export const terminalSessionCredentialSchema = z.string().regex(
+  TERMINAL_SESSION_CREDENTIAL_PATTERN,
+  "Terminal Session credential has an invalid shape.",
+)
+
 export const authenticatedUserSchema = z.object({
   username: usernameSchema,
 })
@@ -69,6 +75,14 @@ export const authenticatedUserSchema = z.object({
 export const authResponseSchema = z.object({
   user: authenticatedUserSchema,
   sessionCredential: z.string().min(1),
+})
+
+export const terminalSessionResponseSchema = z.object({
+  user: authenticatedUserSchema,
+})
+
+export const signOutResponseSchema = z.object({
+  status: z.literal("signed_out"),
 })
 
 export const authErrorCodeSchema = z.enum([
@@ -82,4 +96,6 @@ export type RegisterRequest = z.infer<typeof registerRequestSchema>
 export type SignInRequest = z.infer<typeof signInRequestSchema>
 export type AuthenticatedUser = z.infer<typeof authenticatedUserSchema>
 export type AuthResponse = z.infer<typeof authResponseSchema>
+export type TerminalSessionResponse = z.infer<typeof terminalSessionResponseSchema>
+export type SignOutResponse = z.infer<typeof signOutResponseSchema>
 export type AuthErrorCode = z.infer<typeof authErrorCodeSchema>

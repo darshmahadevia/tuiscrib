@@ -28,7 +28,7 @@ bun run dev:service
 bun run dev:terminal
 ```
 
-The terminal client opens the keyboard-only shell. Press `b` for Boards, `s` to sign in, `r` to register, `?` for help, or `q` to quit. The shell requires an 80 by 24 terminal and supports Unicode plus a 256-color baseline, with truecolor used when detected.
+The terminal client opens the keyboard-only shell. Press `b` for Boards, `s` to sign in, `r` to register, `x` to sign out, `?` for help, or `q` to quit. A valid Terminal Session is restored from the protected platform config location on launch and expires after 30 days without authenticated activity. The shell requires an 80 by 24 terminal and supports Unicode plus a 256-color baseline, with truecolor used when detected.
 
 ## Verification
 

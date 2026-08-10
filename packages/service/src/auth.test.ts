@@ -1,6 +1,130 @@
 import { expect, test } from "bun:test"
 
 import { createServiceApp } from "./app.ts"
+import { hashCredential, TERMINAL_SESSION_INACTIVITY_MS } from "./auth.ts"
+
+test("restores a valid Terminal Session through public HTTP and refreshes activity", async () => {
+  const now = new Date("2026-08-10T00:00:00.000Z")
+  const credential = "a".repeat(43)
+  let restoredInput: {
+    credentialHash: string
+    now: Date
+    expiresAt: Date
+  } | undefined
+
+  const app = createServiceApp({
+    persistence: {
+      healthCheck: async () => ({ database: "ready" }),
+      findUserByUsername: async () => null,
+      registerUser: async () => null,
+      createTerminalSession: async () => ({ sessionId: 1 }),
+      authenticateTerminalSession: async (input) => {
+        restoredInput = input
+        return { user: { username: "ada_lovelace" } }
+      },
+      revokeTerminalSession: async () => undefined,
+    },
+    clock: () => now,
+  })
+
+  const response = await app.request("http://tuiscrib.test/auth/session", {
+    method: "POST",
+    headers: { authorization: `Bearer ${credential}` },
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({ user: { username: "ada_lovelace" } })
+  expect(restoredInput).toEqual({
+    credentialHash: hashCredential(credential),
+    now,
+    expiresAt: new Date(now.getTime() + TERMINAL_SESSION_INACTIVITY_MS),
+  })
+})
+
+test("expired Terminal Sessions return a clear nondisclosing error", async () => {
+  const credential = "b".repeat(43)
+  const app = createServiceApp({
+    persistence: {
+      healthCheck: async () => ({ database: "ready" }),
+      findUserByUsername: async () => null,
+      registerUser: async () => null,
+      createTerminalSession: async () => ({ sessionId: 1 }),
+      authenticateTerminalSession: async () => ({ status: "expired" }),
+      revokeTerminalSession: async () => undefined,
+    },
+  })
+
+  const response = await app.request("http://tuiscrib.test/auth/session", {
+    method: "POST",
+    headers: { authorization: `Bearer ${credential}` },
+  })
+
+  expect(response.status).toBe(401)
+  expect(await response.json()).toEqual({
+    error: "Your Terminal Session expired after 30 days of inactivity. Sign in again.",
+    code: "session_expired",
+  })
+})
+
+test("malformed Terminal Session credentials fail closed without a credential-bearing error", async () => {
+  const credential = "not-a-session"
+  let persistenceCalled = false
+  const app = createServiceApp({
+    persistence: {
+      healthCheck: async () => ({ database: "ready" }),
+      findUserByUsername: async () => null,
+      registerUser: async () => null,
+      createTerminalSession: async () => ({ sessionId: 1 }),
+      authenticateTerminalSession: async () => {
+        persistenceCalled = true
+        return null
+      },
+      revokeTerminalSession: async () => undefined,
+    },
+  })
+
+  const response = await app.request("http://tuiscrib.test/auth/session", {
+    method: "POST",
+    headers: { authorization: `Bearer ${credential}` },
+  })
+  const body = await response.text()
+
+  expect(response.status).toBe(401)
+  expect(body).toContain("Your Terminal Session is invalid")
+  expect(body).not.toContain(credential)
+  expect(persistenceCalled).toBe(false)
+})
+
+test("sign-out revokes the Terminal Session through public HTTP", async () => {
+  const credential = "c".repeat(43)
+  let revokedInput: { credentialHash: string; now: Date } | undefined
+  const now = new Date("2026-08-10T00:00:00.000Z")
+  const app = createServiceApp({
+    persistence: {
+      healthCheck: async () => ({ database: "ready" }),
+      findUserByUsername: async () => null,
+      registerUser: async () => null,
+      createTerminalSession: async () => ({ sessionId: 1 }),
+      authenticateTerminalSession: async () => ({ status: "revoked" }),
+      revokeTerminalSession: async (input) => {
+        revokedInput = input
+      },
+    },
+    clock: () => now,
+  })
+
+  const response = await app.request("http://tuiscrib.test/auth/sign-out", {
+    method: "POST",
+    headers: { authorization: `Bearer ${credential}` },
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({ status: "signed_out" })
+  expect(revokedInput).toEqual({
+    credentialHash: hashCredential(credential),
+    now,
+  })
+})
 
 test("registration returns one opaque Terminal Session through public HTTP", async () => {
   let storedPasswordHash = ""

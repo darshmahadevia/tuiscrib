@@ -7,6 +7,16 @@ export {
   type HealthClient,
 } from "./client.ts"
 export {
+  createCredentialStore,
+  CredentialStoreError,
+  getTerminalSessionCredentialPath,
+  type CredentialFileSystem,
+  type CredentialPathOptions,
+  type CredentialStore,
+  type CredentialStoreErrorCode,
+  type CredentialStoreOptions,
+} from "./credentials.ts"
+export {
   MIN_TERMINAL_HEIGHT,
   MIN_TERMINAL_WIDTH,
   TerminalShell,

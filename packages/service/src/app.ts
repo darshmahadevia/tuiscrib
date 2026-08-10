@@ -61,6 +61,36 @@ export function createServiceApp(options: ServiceAppOptions) {
     return handleAuthenticationRequest(context, authentication, "signIn", options.networkKey)
   })
 
+  app.post("/auth/session", async (context) => {
+    if (!authentication) {
+      return context.json(serviceErrorSchema.parse({ error: "service unavailable" }), 503)
+    }
+
+    try {
+      const result = await authentication.restore(readBearerCredential(context.req.raw))
+      return result.kind === "success"
+        ? context.json(result.response, 200)
+        : context.json(result.error, result.status)
+    } catch {
+      return context.json(serviceErrorSchema.parse({ error: "service unavailable" }), 503)
+    }
+  })
+
+  app.post("/auth/sign-out", async (context) => {
+    if (!authentication) {
+      return context.json(serviceErrorSchema.parse({ error: "service unavailable" }), 503)
+    }
+
+    try {
+      const result = await authentication.signOut(readBearerCredential(context.req.raw))
+      return result.kind === "success"
+        ? context.json(result.response, 200)
+        : context.json(result.error, result.status)
+    } catch {
+      return context.json(serviceErrorSchema.parse({ error: "service unavailable" }), 503)
+    }
+  })
+
   return app
 }
 
@@ -137,4 +167,14 @@ function defaultNetworkKey(request: Request): string {
     request.headers.get("cf-connecting-ip")?.trim() ||
     "unknown"
   )
+}
+
+function readBearerCredential(request: Request): string | null {
+  const authorization = request.headers.get("authorization")
+  if (!authorization) {
+    return null
+  }
+
+  const match = /^Bearer ([^\s]+)$/.exec(authorization)
+  return match?.[1] ?? null
 }
