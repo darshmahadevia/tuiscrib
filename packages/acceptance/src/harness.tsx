@@ -6,7 +6,11 @@ import { act } from "react"
 import { createPersistence, type Persistence } from "@tuiscrib/persistence"
 import { createServiceApp } from "@tuiscrib/service"
 import { HealthScreen, TerminalShell, type CredentialStore } from "@tuiscrib/terminal"
-import { createAuthClient, createHealthClient } from "@tuiscrib/terminal/client"
+import {
+  createAuthClient,
+  createBoardClient,
+  createHealthClient,
+} from "@tuiscrib/terminal/client"
 
 type ProcessResult = {
   stdout: string
@@ -211,6 +215,7 @@ export class AcceptanceHarness {
         <TerminalShell
           label={label}
           authClient={createAuthClient(this.baseUrl)}
+          boardClient={createBoardClient(this.baseUrl)}
           credentialStore={credentialStore}
         />,
         {

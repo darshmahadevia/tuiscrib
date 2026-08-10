@@ -13,3 +13,19 @@ export {
   type SessionRestoreResult,
   type SignOutOperationResult,
 } from "./auth.ts"
+export {
+  MAX_OWNED_BOARDS,
+  createBoardAdministration,
+  createJoinCode,
+  formatJoinCode,
+  hashJoinCode,
+  normalizeJoinCode,
+  type BoardAdministrationOptions,
+  type BoardCreateOperationResult,
+  type BoardListOperationResult,
+  type BoardPersistence,
+  type BoardUser,
+  type CreateBoardPersistenceInput,
+  type CreateBoardPersistenceResult,
+  type ListBoardsPersistenceInput,
+} from "./boards.ts"

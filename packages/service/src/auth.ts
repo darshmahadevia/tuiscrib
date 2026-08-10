@@ -149,6 +149,24 @@ export function createAuthenticationService(options: AuthenticationOptions) {
     })
 
   return {
+    async authenticate(
+      credential: string | null,
+    ): Promise<TerminalSessionAuthentication | undefined> {
+      if (!options.persistence.authenticateTerminalSession) {
+        return undefined
+      }
+      if (!isCredentialShape(credential)) {
+        return null
+      }
+
+      const now = clock()
+      return options.persistence.authenticateTerminalSession({
+        credentialHash: hashCredential(credential),
+        now,
+        expiresAt: new Date(now.getTime() + TERMINAL_SESSION_INACTIVITY_MS),
+      })
+    },
+
     async register(input: unknown, signals: AuthRequestSignals): Promise<AuthOperationResult> {
       const rateLimitResult = consumeRateLimit(rateLimiter, input, signals)
       if (!rateLimitResult.allowed) {
@@ -240,18 +258,12 @@ export function createAuthenticationService(options: AuthenticationOptions) {
         )
       }
 
-      if (!options.persistence.authenticateTerminalSession) {
+      const authentication = await this.authenticate(credential)
+      if (authentication === undefined) {
         return { kind: "failure", status: 503, error: unavailableError() }
       }
 
-      const now = clock()
-      const result = await options.persistence.authenticateTerminalSession({
-        credentialHash: hashCredential(credential),
-        now,
-        expiresAt: new Date(now.getTime() + TERMINAL_SESSION_INACTIVITY_MS),
-      })
-
-      return restoreResult(result)
+      return restoreResult(authentication)
     },
 
     async signOut(credential: string | null): Promise<SignOutOperationResult> {

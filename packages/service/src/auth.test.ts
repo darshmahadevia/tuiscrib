@@ -20,7 +20,7 @@ test("restores a valid Terminal Session through public HTTP and refreshes activi
       createTerminalSession: async () => ({ sessionId: 1 }),
       authenticateTerminalSession: async (input) => {
         restoredInput = input
-        return { user: { username: "ada_lovelace" } }
+        return { user: { id: 1, username: "ada_lovelace" } }
       },
       revokeTerminalSession: async () => undefined,
     },

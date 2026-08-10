@@ -1,5 +1,6 @@
 export {
   createPersistence,
+  type BoardSummaryRecord,
   type AuthenticateTerminalSessionInput,
   type AuthUserRecord,
   type CreateTerminalSessionInput,
@@ -9,6 +10,9 @@ export {
   type RevokeTerminalSessionInput,
   type RegisterUserInput,
   type RegisteredUser,
+  type CreateBoardInput,
+  type CreateBoardResult,
+  type ListBoardsInput,
   type TerminalSessionAuthentication,
 } from "./client.ts"
-export { serviceMetadata, terminalSessions, users } from "./schema.ts"
+export { boards, memberships, serviceMetadata, terminalSessions, users } from "./schema.ts"

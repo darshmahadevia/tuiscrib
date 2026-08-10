@@ -1,9 +1,11 @@
 export { HealthScreen, type HealthScreenProps } from "./app.tsx"
 export {
+  createBoardClient,
   createAuthClient,
   createHealthClient,
   ServiceRequestError,
   type AuthClient,
+  type BoardClient,
   type HealthClient,
 } from "./client.ts"
 export {

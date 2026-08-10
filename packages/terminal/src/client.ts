@@ -1,10 +1,15 @@
 import {
+  boardListResponseSchema,
+  createBoardResponseSchema,
   authResponseSchema,
   healthResponseSchema,
   signOutResponseSchema,
   serviceErrorSchema,
   terminalSessionResponseSchema,
   type AuthResponse,
+  type BoardListResponse,
+  type CreateBoardRequest,
+  type CreateBoardResponse,
   type RegisterRequest,
   type SignOutResponse,
   type ServiceError,
@@ -20,6 +25,11 @@ export type AuthClient = {
   signIn(input: SignInRequest): Promise<AuthResponse>
   restore(credential: string): Promise<TerminalSessionResponse>
   signOut(credential: string): Promise<SignOutResponse>
+}
+
+export type BoardClient = {
+  createBoard(credential: string, input: CreateBoardRequest): Promise<CreateBoardResponse>
+  listBoards(credential: string, filter?: string): Promise<BoardListResponse>
 }
 
 export class ServiceRequestError extends Error {
@@ -108,6 +118,52 @@ export function createAuthClient(
     const response = await fetcher(new URL(path, baseUrl), {
       method: "POST",
       headers: { authorization: `Bearer ${credential}` },
+    })
+    const payload: unknown = await response.json().catch(() => undefined)
+
+    if (!response.ok) {
+      const details = serviceErrorSchema.safeParse(payload)
+      throw new ServiceRequestError(
+        response.status,
+        details.success ? details.data : { error: "service unavailable" },
+      )
+    }
+
+    return schema.parse(payload)
+  }
+}
+
+export function createBoardClient(
+  baseUrl: string,
+  fetcher: Fetcher = fetch,
+): BoardClient {
+  return {
+    createBoard(credential, input) {
+      return requestBoard("POST", credential, input, createBoardResponseSchema)
+    },
+    listBoards(credential, filter = "") {
+      const url = new URL("/boards", baseUrl)
+      if (filter.length > 0) {
+        url.searchParams.set("filter", filter)
+      }
+      return requestBoard("GET", credential, undefined, boardListResponseSchema, url)
+    },
+  }
+
+  async function requestBoard<T>(
+    method: "GET" | "POST",
+    credential: string,
+    input: CreateBoardRequest | undefined,
+    schema: { parse(value: unknown): T },
+    url = new URL("/boards", baseUrl),
+  ): Promise<T> {
+    const response = await fetcher(url, {
+      method,
+      headers: {
+        authorization: `Bearer ${credential}`,
+        ...(input ? { "content-type": "application/json" } : {}),
+      },
+      ...(input ? { body: JSON.stringify(input) } : {}),
     })
     const payload: unknown = await response.json().catch(() => undefined)
 

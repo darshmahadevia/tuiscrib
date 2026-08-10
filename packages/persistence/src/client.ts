@@ -1,10 +1,16 @@
 import { drizzle } from "drizzle-orm/postgres-js"
 import { migrate } from "drizzle-orm/postgres-js/migrator"
-import { and, eq, gt, isNull } from "drizzle-orm"
+import { and, asc, eq, gt, isNull, lt, sql } from "drizzle-orm"
 import { fileURLToPath } from "node:url"
 import postgres from "postgres"
 
-import { serviceMetadata, terminalSessions, users } from "./schema.ts"
+import {
+  boards,
+  memberships,
+  serviceMetadata,
+  terminalSessions,
+  users,
+} from "./schema.ts"
 
 export type PersistenceHealth = {
   database: "ready"
@@ -38,13 +44,36 @@ export type AuthenticateTerminalSessionInput = {
 }
 
 export type TerminalSessionAuthentication =
-  | { user: Pick<AuthUserRecord, "username"> }
+  | { user: Pick<AuthUserRecord, "id" | "username"> }
   | { status: "expired" | "revoked" }
   | null
 
 export type RevokeTerminalSessionInput = {
   credentialHash: string
   now: Date
+}
+
+export type CreateBoardInput = {
+  publicId: string
+  name: string
+  ownerUserId: number
+  joinCodeHash: string
+  now: Date
+}
+
+export type BoardSummaryRecord = {
+  id: string
+  name: string
+  role: "owner" | "member"
+}
+
+export type CreateBoardResult =
+  | { kind: "created"; board: BoardSummaryRecord }
+  | { kind: "owned_board_limit" }
+
+export type ListBoardsInput = {
+  userId: number
+  nameFilter: string
 }
 
 export type RegisteredUser = {
@@ -62,6 +91,8 @@ export type Persistence = {
     input: AuthenticateTerminalSessionInput,
   ): Promise<TerminalSessionAuthentication>
   revokeTerminalSession(input: RevokeTerminalSessionInput): Promise<void>
+  createBoard(input: CreateBoardInput): Promise<CreateBoardResult>
+  listBoards(input: ListBoardsInput): Promise<BoardSummaryRecord[]>
   reset(): Promise<void>
   close(): Promise<void>
 }
@@ -118,6 +149,83 @@ export function createPersistence(options: PersistenceOptions): Persistence {
         .limit(1)
 
       return result[0] ?? null
+    },
+
+    async createBoard(input) {
+      return database.transaction(async (transaction) => {
+        const owners = await transaction
+          .update(users)
+          .set({ ownedBoardCount: sql`${users.ownedBoardCount} + 1` })
+          .where(
+            and(
+              eq(users.id, input.ownerUserId),
+              lt(users.ownedBoardCount, 20),
+            ),
+          )
+          .returning({ id: users.id })
+
+        if (!owners[0]) {
+          return { kind: "owned_board_limit" as const }
+        }
+
+        const insertedBoards = await transaction
+          .insert(boards)
+          .values({
+            publicId: input.publicId,
+            name: input.name,
+            ownerUserId: input.ownerUserId,
+            joinCodeHash: input.joinCodeHash,
+            createdAt: input.now,
+          })
+          .returning({ id: boards.id, publicId: boards.publicId, name: boards.name })
+
+        const board = insertedBoards[0]
+        if (!board) {
+          throw new Error("Board could not be created")
+        }
+
+        await transaction.insert(memberships).values({
+          boardId: board.id,
+          userId: input.ownerUserId,
+          role: "owner",
+          createdAt: input.now,
+        })
+
+        return {
+          kind: "created" as const,
+          board: { id: board.publicId, name: board.name, role: "owner" as const },
+        }
+      })
+    },
+
+    async listBoards(input) {
+      const conditions = [eq(memberships.userId, input.userId)]
+      if (input.nameFilter.length > 0) {
+        const escapedFilter = input.nameFilter
+          .replaceAll("!", "!!")
+          .replaceAll("%", "!%")
+          .replaceAll("_", "!_")
+        conditions.push(
+          sql`${boards.name} ILIKE ${`%${escapedFilter}%`} ESCAPE '!'`,
+        )
+      }
+
+      const result = await database
+        .select({
+          id: boards.publicId,
+          name: boards.name,
+          role: memberships.role,
+        })
+        .from(memberships)
+        .innerJoin(boards, eq(memberships.boardId, boards.id))
+        .where(and(...conditions))
+        .orderBy(asc(boards.name), asc(boards.id))
+
+      return result.map((board) => ({
+        id: board.id,
+        name: board.name,
+        role: board.role as "owner" | "member",
+      }))
     },
 
     async registerUser(input) {
@@ -182,6 +290,7 @@ export function createPersistence(options: PersistenceOptions): Persistence {
         const sessions = await transaction
           .select({
             sessionId: terminalSessions.id,
+            userId: users.id,
             username: users.username,
             expiresAt: terminalSessions.expiresAt,
             revokedAt: terminalSessions.revokedAt,
@@ -218,7 +327,7 @@ export function createPersistence(options: PersistenceOptions): Persistence {
           return { status: "expired" as const }
         }
 
-        return { user: { username: session.username } }
+        return { user: { id: session.userId, username: session.username } }
       })
     },
 
@@ -235,6 +344,7 @@ export function createPersistence(options: PersistenceOptions): Persistence {
     },
 
     async reset() {
+      await database.delete(boards)
       await database.delete(terminalSessions)
       await database.delete(users)
       await database.delete(serviceMetadata)

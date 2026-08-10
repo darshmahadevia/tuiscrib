@@ -15,12 +15,20 @@ import {
   type AuthRateLimitOptions,
   type PasswordHasher,
 } from "./auth.ts"
+import {
+  createBoardAdministration,
+  type BoardPersistence,
+} from "./boards.ts"
 
 export type ServiceAppOptions = {
-  persistence: Pick<Persistence, "healthCheck"> & Partial<AuthPersistence>
+  persistence: Pick<Persistence, "healthCheck"> &
+    Partial<AuthPersistence> &
+    Partial<BoardPersistence>
   clock?: () => Date
   passwordHasher?: PasswordHasher
   credentialGenerator?: () => string
+  boardIdGenerator?: () => string
+  joinCodeGenerator?: () => string
   authRateLimit?: AuthRateLimitOptions
   networkKey?: (request: Request) => string
 }
@@ -29,6 +37,7 @@ export function createServiceApp(options: ServiceAppOptions) {
   const app = new Hono()
   const clock = options.clock ?? (() => new Date())
   const authentication = createAuthenticationIfAvailable(options, clock)
+  const boards = createBoardAdministrationIfAvailable(options, clock)
 
   app.get("/health", async (context) => {
     const request = healthRequestSchema.safeParse(
@@ -48,6 +57,61 @@ export function createServiceApp(options: ServiceAppOptions) {
         checkedAt: clock().toISOString(),
       })
       return context.json(response, 200)
+    } catch {
+      return context.json(serviceErrorSchema.parse({ error: "service unavailable" }), 503)
+    }
+  })
+
+  app.get("/boards", async (context) => {
+    if (!authentication || !boards) {
+      return context.json(serviceErrorSchema.parse({ error: "service unavailable" }), 503)
+    }
+
+    const authenticated = await requireBoardUser(authentication, context.req.raw)
+    if (authenticated.kind !== "success") {
+      return context.json(authenticated.error, authenticated.status)
+    }
+
+    try {
+      const filter = new URL(context.req.url).searchParams.get("filter") ?? ""
+      const result = await boards.listBoards(authenticated.user, filter)
+      return result.kind === "success"
+        ? context.json(result.response, 200)
+        : context.json(result.error, result.status)
+    } catch {
+      return context.json(serviceErrorSchema.parse({ error: "service unavailable" }), 503)
+    }
+  })
+
+  app.post("/boards", async (context) => {
+    if (!authentication || !boards) {
+      return context.json(serviceErrorSchema.parse({ error: "service unavailable" }), 503)
+    }
+
+    const authenticated = await requireBoardUser(authentication, context.req.raw)
+    if (authenticated.kind !== "success") {
+      return context.json(authenticated.error, authenticated.status)
+    }
+
+    let input: unknown
+    try {
+      input = await context.req.json()
+    } catch {
+      return context.json(
+        serviceErrorSchema.parse({
+          error: "Check the highlighted fields.",
+          code: "invalid_input",
+          fieldErrors: { form: "Request body must be valid JSON." },
+        }),
+        400,
+      )
+    }
+
+    try {
+      const result = await boards.createBoard(authenticated.user, input)
+      return result.kind === "success"
+        ? context.json(result.response, 201)
+        : context.json(result.error, result.status)
     } catch {
       return context.json(serviceErrorSchema.parse({ error: "service unavailable" }), 503)
     }
@@ -113,6 +177,66 @@ function createAuthenticationIfAvailable(
     credentialGenerator: options.credentialGenerator,
     rateLimit: options.authRateLimit,
   })
+}
+
+function createBoardAdministrationIfAvailable(
+  options: ServiceAppOptions,
+  clock: () => Date,
+) {
+  if (
+    typeof options.persistence.createBoard !== "function" ||
+    typeof options.persistence.listBoards !== "function"
+  ) {
+    return null
+  }
+
+  return createBoardAdministration({
+    persistence: options.persistence as BoardPersistence,
+    clock,
+    boardIdGenerator: options.boardIdGenerator,
+    joinCodeGenerator: options.joinCodeGenerator,
+  })
+}
+
+type BoardAuthenticationService = NonNullable<ReturnType<typeof createAuthenticationIfAvailable>>
+
+type BoardUserResult =
+  | { kind: "success"; user: { id: number; username: string } }
+  | { kind: "failure"; status: 401 | 503; error: ReturnType<typeof serviceErrorSchema.parse> }
+
+async function requireBoardUser(
+  authentication: BoardAuthenticationService,
+  request: Request,
+): Promise<BoardUserResult> {
+  let result: Awaited<ReturnType<BoardAuthenticationService["authenticate"]>>
+  try {
+    result = await authentication.authenticate(readBearerCredential(request))
+  } catch {
+    return {
+      kind: "failure",
+      status: 503,
+      error: serviceErrorSchema.parse({ error: "service unavailable" }),
+    }
+  }
+  if (result === undefined) {
+    return {
+      kind: "failure",
+      status: 503,
+      error: serviceErrorSchema.parse({ error: "service unavailable" }),
+    }
+  }
+  if (!result || "status" in result) {
+    return {
+      kind: "failure",
+      status: 401,
+      error: serviceErrorSchema.parse({
+        error: "Your Terminal Session is invalid. Sign in again.",
+        code: "invalid_session",
+      }),
+    }
+  }
+
+  return { kind: "success", user: result.user }
 }
 
 async function handleAuthenticationRequest(

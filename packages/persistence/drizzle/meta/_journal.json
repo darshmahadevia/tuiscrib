@@ -15,6 +15,13 @@
       "when": 1786381384397,
       "tag": "0001_new_azazel",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1786385392209,
+      "tag": "0002_tan_callisto",
+      "breakpoints": true
     }
   ]
 }

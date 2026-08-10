@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test"
 
-import { createAuthClient } from "./client.ts"
+import { createAuthClient, createBoardClient } from "./client.ts"
 
 test("auth client sends registration through the public HTTP contract", async () => {
   let requestBody = ""
@@ -72,6 +72,76 @@ test("auth client restores and signs out a Terminal Session through public HTTP"
     {
       path: "/auth/sign-out",
       method: "POST",
+      authorization: `Bearer ${credential}`,
+      body: undefined,
+    },
+  ])
+})
+
+test("Board client creates and filters Boards through authenticated HTTP", async () => {
+  const credential = "a".repeat(43)
+  const requests: Array<{
+    path: string
+    method?: string
+    authorization?: string
+    body?: string
+  }> = []
+  const client = createBoardClient("http://tuiscrib.test", async (input, init) => {
+    const url = new URL(String(input))
+    requests.push({
+      path: `${url.pathname}${url.search}`,
+      method: init?.method,
+      authorization: new Headers(init?.headers).get("authorization") ?? undefined,
+      body: typeof init?.body === "string" ? init.body : undefined,
+    })
+
+    if (url.pathname === "/boards" && init?.method === "POST") {
+      return new Response(
+        JSON.stringify({
+          board: {
+            id: "Qx7u3nW8kM2pR5sT9vY4aB",
+            name: "Ideas",
+            role: "owner",
+          },
+          joinCode: "ABCD-EFGH-JKMN-PQRS-TVWX-YZ23-45",
+        }),
+        { status: 201, headers: { "content-type": "application/json" } },
+      )
+    }
+
+    return new Response(
+      JSON.stringify({
+        boards: [{
+          id: "Qx7u3nW8kM2pR5sT9vY4aB",
+          name: "Ideas",
+          role: "owner",
+        }],
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    )
+  })
+
+  await expect(client.createBoard(credential, { name: "Ideas" })).resolves.toMatchObject({
+    board: { name: "Ideas", role: "owner" },
+  })
+  await expect(client.listBoards(credential, "ideas")).resolves.toEqual({
+    boards: [{
+      id: "Qx7u3nW8kM2pR5sT9vY4aB",
+      name: "Ideas",
+      role: "owner",
+    }],
+  })
+
+  expect(requests).toEqual([
+    {
+      path: "/boards",
+      method: "POST",
+      authorization: `Bearer ${credential}`,
+      body: JSON.stringify({ name: "Ideas" }),
+    },
+    {
+      path: "/boards?filter=ideas",
+      method: "GET",
       authorization: `Bearer ${credential}`,
       body: undefined,
     },

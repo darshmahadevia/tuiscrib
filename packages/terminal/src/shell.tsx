@@ -5,9 +5,14 @@ import { useEffect, useRef, useState, type ReactNode } from "react"
 import {
   countUserPerceivedCharacters,
   splitUserPerceivedCharacters,
+  type BoardSummary,
 } from "@tuiscrib/contracts"
 
-import { ServiceRequestError, type AuthClient } from "./client.ts"
+import {
+  ServiceRequestError,
+  type AuthClient,
+  type BoardClient,
+} from "./client.ts"
 import {
   createCredentialStore,
   CredentialStoreError,
@@ -23,13 +28,14 @@ export type TerminalShellProps = {
   label?: string
   capabilities?: TerminalCapabilities | null
   authClient?: AuthClient
+  boardClient?: BoardClient
   credentialStore?: CredentialStore
 }
 
 type ShellOverlay = "none" | "help"
 type ShellView = "home" | "boards" | "board-actions" | "canvas" | "form" | "confirmation"
 
-type FormKind = "sign-in" | "register" | "create-board" | "join-board"
+type FormKind = "sign-in" | "register" | "create-board" | "join-board" | "filter-boards"
 
 type FormField = {
   id: string
@@ -118,6 +124,11 @@ const formDefinitions: Record<FormKind, FormDefinition> = {
     description: "Redeem the current Join Code to become a Member.",
     fields: [{ id: "joinCode", label: "Join Code", placeholder: "grouped code" }],
   },
+  "filter-boards": {
+    title: "Filter Boards",
+    description: "Show Memberships whose Board name contains this text.",
+    fields: [{ id: "filter", label: "Board name filter", placeholder: "contains…", maxLength: 80 }],
+  },
 }
 
 const colors = {
@@ -137,6 +148,7 @@ export function TerminalShell({
   label = "local",
   capabilities: capabilitiesOverride,
   authClient,
+  boardClient,
   credentialStore: credentialStoreOverride,
 }: TerminalShellProps) {
   const renderer = useRenderer()
@@ -154,6 +166,10 @@ export function TerminalShell({
   const [formInitialKey, setFormInitialKey] = useState<string | null>(null)
   const [confirmationReturnView, setConfirmationReturnView] = useState<ShellView>("boards")
   const [notice, setNotice] = useState<ShellNotice | null>(null)
+  const [boards, setBoards] = useState<BoardSummary[]>([])
+  const [boardFilter, setBoardFilter] = useState("")
+  const [boardsPending, setBoardsPending] = useState(false)
+  const [boardCodeNotice, setBoardCodeNotice] = useState<string | null>(null)
   const [formPending, setFormPending] = useState(false)
   const [sessionState, setSessionState] = useState<SessionState>(
     authClient ? "checking" : "signed-out",
@@ -165,12 +181,14 @@ export function TerminalShell({
   const modeRef = useRef(mode)
   const selectedIndexRef = useRef(selectedIndex)
   const sessionStateRef = useRef(sessionState)
+  const boardFilterRef = useRef(boardFilter)
   const signOutPendingRef = useRef(signOutPending)
   overlayRef.current = overlay
   viewRef.current = view
   modeRef.current = mode
   selectedIndexRef.current = selectedIndex
   sessionStateRef.current = sessionState
+  boardFilterRef.current = boardFilter
   signOutPendingRef.current = signOutPending
 
   useEffect(() => {
@@ -259,6 +277,38 @@ export function TerminalShell({
     flushSync(() => setSelectedIndex(nextIndex))
   }
 
+  const loadBoards = async (filter: string, clearNotice = true) => {
+    if (!boardClient || sessionStateRef.current !== "signed-in") {
+      return
+    }
+
+    const credential = await credentialStore.load()
+    if (!credential) {
+      flushSync(() => {
+        setNotice({ kind: "error", message: "No active Terminal Session. Sign in to continue." })
+      })
+      return
+    }
+
+    flushSync(() => setBoardsPending(true))
+    try {
+      const response = await boardClient.listBoards(credential, filter)
+      flushSync(() => {
+        setBoards(response.boards)
+        setBoardFilter(filter)
+        if (clearNotice) {
+          setNotice(null)
+        }
+      })
+    } catch (error) {
+      flushSync(() => {
+        setNotice({ kind: "error", message: formatBoardError(error) })
+      })
+    } finally {
+      flushSync(() => setBoardsPending(false))
+    }
+  }
+
   const openView = (nextView: ShellView) => {
     flushSync(() => {
       setView(nextView)
@@ -270,7 +320,13 @@ export function TerminalShell({
       setFormInitialKey(null)
       setNotice(null)
       setFormPending(false)
+      if (nextView !== "boards") {
+        setBoardCodeNotice(null)
+      }
     })
+    if (nextView === "boards") {
+      void loadBoards(boardFilterRef.current)
+    }
   }
 
   const openForm = (
@@ -286,6 +342,7 @@ export function TerminalShell({
       setSelectedIndex(0)
       setNotice(null)
       setFormPending(false)
+      setBoardCodeNotice(null)
     })
   }
 
@@ -370,6 +427,57 @@ export function TerminalShell({
       } finally {
         flushSync(() => setFormPending(false))
       }
+      return
+    }
+
+    if (formKind === "create-board" && boardClient) {
+      flushSync(() => setFormPending(true))
+      try {
+        const credential = await credentialStore.load()
+        if (!credential) {
+          throw new Error("No active Terminal Session. Sign in to continue.")
+        }
+        const response = await boardClient.createBoard(credential, { name: values.name })
+        flushSync(() => {
+          setView(formReturnView)
+          setFormKind(null)
+          setFormInitialKey(null)
+          setSelectedIndex(0)
+          setBoardFilter("")
+          setBoards((currentBoards) => [
+            response.board,
+            ...currentBoards.filter((currentBoard) => currentBoard.id !== response.board.id),
+          ])
+          setBoardCodeNotice(response.joinCode)
+          setNotice({
+            kind: "status",
+            message: `Board "${response.board.name}" created.`,
+          })
+          setFormPending(false)
+        })
+        void loadBoards("", false)
+      } catch (error) {
+        flushSync(() => {
+          setNotice({ kind: "error", message: formatBoardError(error) })
+          setFormPending(false)
+        })
+      }
+      return
+    }
+
+    if (formKind === "filter-boards" && boardClient) {
+      const filter = values.filter?.trim() ?? ""
+      flushSync(() => {
+        setView(formReturnView)
+        setFormKind(null)
+        setFormInitialKey(null)
+        setSelectedIndex(0)
+        setBoardFilter(filter)
+        setBoardCodeNotice(null)
+        setNotice(null)
+        setFormPending(false)
+      })
+      void loadBoards(filter)
       return
     }
 
@@ -491,6 +599,10 @@ export function TerminalShell({
       }
       if (key.name === "j") {
         openForm("join-board", "boards", key.name)
+        return
+      }
+      if (key.name === "f") {
+        openForm("filter-boards", "boards", key.name)
         return
       }
       if (key.name === "a") {
@@ -624,7 +736,16 @@ export function TerminalShell({
       onSubmit={completeForm}
     />
   ) : (
-    <BoardList selectedIndex={selectedIndex} />
+    <BoardList
+      selectedIndex={selectedIndex}
+      boards={boards}
+      filter={boardFilter}
+      pending={boardsPending}
+      notice={notice}
+      joinCode={boardCodeNotice}
+      hasBoardClient={Boolean(boardClient)}
+      sessionState={sessionState}
+    />
   )
   const footerHint =
     overlay === "help"
@@ -637,6 +758,8 @@ export function TerminalShell({
             ? mode === "edit"
               ? "? help · q quit · Escape leave Edit mode"
               : "? help · q quit · Escape back"
+            : view === "boards"
+              ? "f filter · c create · Escape back"
             : "? help · x sign out · q quit"
 
   return (
@@ -744,15 +867,77 @@ function ShellHome({
   )
 }
 
-function BoardList({ selectedIndex }: { selectedIndex: number }) {
+function BoardList({
+  selectedIndex,
+  boards,
+  filter,
+  pending,
+  notice,
+  joinCode,
+  hasBoardClient,
+  sessionState,
+}: {
+  selectedIndex: number
+  boards: BoardSummary[]
+  filter: string
+  pending: boolean
+  notice: ShellNotice | null
+  joinCode: string | null
+  hasBoardClient: boolean
+  sessionState: SessionState
+}) {
   return (
-    <ShellMenu
-      title="Board list"
-      description="Memberships will appear here when the Board workflow is connected."
-      items={boardMenu}
-      selectedIndex={selectedIndex}
-      status="choose a Board action"
-    />
+    <box
+      style={{
+        width: "100%",
+        height: "100%",
+        alignItems: "center",
+        justifyContent: "center",
+      }}
+    >
+      <box
+        style={{
+          width: 72,
+          border: true,
+          borderStyle: "rounded",
+          borderColor: colors.border,
+          backgroundColor: colors.panel,
+          padding: 2,
+          flexDirection: "column",
+        }}
+      >
+        <text fg={colors.text}>Board list</text>
+        <text fg={colors.muted}>
+          {hasBoardClient
+            ? "Every Membership appears here; Owner marks the governing Member."
+            : "Memberships will appear here when the Board workflow is connected."}
+        </text>
+        <text fg={colors.accent}>Filter: {filter || "all Boards"}</text>
+        {pending ? <text fg={colors.muted}>Loading Memberships…</text> : null}
+        {!pending && hasBoardClient && sessionState !== "signed-in" ? (
+          <text fg={colors.warning}>Sign in to load Memberships.</text>
+        ) : null}
+        {!pending && hasBoardClient && sessionState === "signed-in" && boards.length === 0 ? (
+          <text fg={colors.muted}>No Memberships match this filter.</text>
+        ) : null}
+        {boards.map((board) => (
+          <text key={board.id} fg={colors.text}>
+            • {board.name} · {board.role === "owner" ? "Owner" : "Member"}
+          </text>
+        ))}
+        {joinCode ? (
+          <text fg={colors.success}>Initial Join Code (shown once): {joinCode}</text>
+        ) : null}
+        {boardMenu.map((item, index) => (
+          <text key={item.key} fg={index === selectedIndex ? colors.accent : colors.text}>
+            {index === selectedIndex ? "›" : " "} {item.key} {item.label}
+          </text>
+        ))}
+        <text fg={colors.muted}>f filter Board name · ↑↓ / jk move · Enter choose · Escape back</text>
+        {notice?.kind === "error" ? <text fg={colors.error}>Error: {notice.message}</text> : null}
+        {notice?.kind === "status" ? <text fg={colors.success}>Status: {notice.message}</text> : null}
+      </box>
+    </box>
   )
 }
 
@@ -982,6 +1167,22 @@ function ShellForm({
   )
 }
 
+function formatBoardError(error: unknown): string {
+  if (error instanceof CredentialStoreError) {
+    return formatCredentialStoreError(error)
+  }
+  if (error instanceof ServiceRequestError) {
+    const fieldErrors = Object.values(error.details.fieldErrors ?? {})
+    return fieldErrors.length > 0
+      ? `${error.details.error} ${fieldErrors.join(" ")}`
+      : error.details.error
+  }
+  if (error instanceof Error && error.message.length > 0) {
+    return error.message
+  }
+  return "Service unavailable. Try again later."
+}
+
 function formatAuthError(error: unknown): string {
   if (error instanceof CredentialStoreError) {
     return formatCredentialStoreError(error)
@@ -1139,7 +1340,7 @@ function HelpOverlay() {
         <text fg={colors.text}>Navigate mode · move through menus and the Board.</text>
         <text fg={colors.text}>Edit mode     · type into the selected Sticky Note.</text>
         <text fg={colors.muted}>b boards · s sign in · r register</text>
-        <text fg={colors.muted}>Boards: o open · c create · j join · a actions</text>
+        <text fg={colors.muted}>Boards: o open · c create · f filter · j join · a actions</text>
         <text fg={colors.muted}>Forms: Tab next field · Enter submit · Escape cancel</text>
         <text fg={colors.muted}>Confirmations: y confirm · n cancel</text>
         <text fg={colors.muted}>↑↓ / jk move · Enter choose · Escape back</text>
