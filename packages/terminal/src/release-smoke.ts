@@ -152,7 +152,7 @@ async function runConptySmoke(
       output += chunk
       if (!sentQuit && hasTerminalFirstRender(output)) {
         sentQuit = true
-        child.write("q")
+        child.write("q\r")
       }
     })
     child.onExit(({ exitCode }) => {
