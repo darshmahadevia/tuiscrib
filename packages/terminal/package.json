@@ -12,6 +12,7 @@
     "dev": "bun src/main.tsx",
     "build": "bun src/release-build.ts",
     "smoke": "bun src/release-smoke.ts",
+    "smoke:node": "node --experimental-strip-types src/release-smoke.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

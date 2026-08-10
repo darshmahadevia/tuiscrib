@@ -2,6 +2,7 @@ import { createHash } from "node:crypto"
 import { mkdtemp, mkdir, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
+import { fileURLToPath } from "node:url"
 
 import {
   RELEASE_TARGETS,
@@ -10,9 +11,11 @@ import {
   type ReleaseTarget,
 } from "./release.ts"
 
-export const RELEASE_ENTRYPOINT = resolve(import.meta.dir, "main.tsx")
-export const RELEASE_REPOSITORY_ROOT = resolve(import.meta.dir, "../../..")
-export const DEFAULT_RELEASE_OUTPUT_DIRECTORY = resolve(import.meta.dir, "../../../dist/releases")
+const RELEASE_SOURCE_DIRECTORY = resolve(fileURLToPath(new URL(".", import.meta.url)))
+
+export const RELEASE_ENTRYPOINT = resolve(RELEASE_SOURCE_DIRECTORY, "main.tsx")
+export const RELEASE_REPOSITORY_ROOT = resolve(RELEASE_SOURCE_DIRECTORY, "../../..")
+export const DEFAULT_RELEASE_OUTPUT_DIRECTORY = resolve(RELEASE_SOURCE_DIRECTORY, "../../../dist/releases")
 
 export type ReleaseBuildArguments = {
   targetIds: ["current"] | ["all"] | [string]

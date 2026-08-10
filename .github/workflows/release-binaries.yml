@@ -66,7 +66,10 @@ jobs:
         run: bun run build:release -- --target "${{ matrix.target }}" --output artifacts --verify-reproducible
 
       - name: Smoke test first render and clean exit
-        run: bun run smoke:release -- --binary "artifacts/${{ matrix.artifact }}"
+        run: >-
+          ${{ matrix.target == 'win32-x64' && 'node --experimental-strip-types' || 'bun run smoke:release' }}
+          ${{ matrix.target == 'win32-x64' && 'packages/terminal/src/release-smoke.ts' || '' }}
+          --binary "artifacts/${{ matrix.artifact }}"
 
       - name: Upload standalone binary
         uses: actions/upload-artifact@v4

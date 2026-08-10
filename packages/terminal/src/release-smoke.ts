@@ -1,6 +1,7 @@
 import { mkdtemp, mkdir, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
+import { fileURLToPath } from "node:url"
 
 import { spawn as spawnPty } from "node-pty"
 
@@ -299,7 +300,11 @@ function hasTerminalFirstRender(output: string): boolean {
   return TERMINAL_FIRST_RENDER_MARKERS.every((marker) => output.includes(marker))
 }
 
-if (import.meta.main) {
+const isDirectInvocation = process.argv[1]
+  ? resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+  : false
+
+if (import.meta.main || isDirectInvocation) {
   const arguments_ = process.argv.slice(2)
   if (arguments_.includes("--help") || arguments_.includes("-h")) {
     console.log("Usage: bun src/release-smoke.ts [--target <id> | --binary <path>] [--timeout-ms <ms>]")
