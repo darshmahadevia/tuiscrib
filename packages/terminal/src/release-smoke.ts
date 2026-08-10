@@ -152,7 +152,13 @@ async function runConptySmoke(
       output += chunk
       if (!sentQuit && hasTerminalFirstRender(output)) {
         sentQuit = true
-        child.write("q\r")
+        setTimeout(() => {
+          try {
+            child.write("q\r\u0003")
+          } catch {
+            // ConPTY can close its input socket while flushing the final frame.
+          }
+        }, 100)
       }
     })
     child.onExit(({ exitCode }) => {
