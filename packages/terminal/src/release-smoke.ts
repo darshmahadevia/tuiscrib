@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm } from "node:fs/promises"
+import { access, mkdtemp, mkdir, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 
@@ -25,7 +25,7 @@ export type TerminalSmokeOutput = {
   stderr: string
   exitCode: number | null
   signalCode: NodeJS.Signals | null
-  transport: "pipe"
+  transport: "pipe" | "winpty"
 }
 
 export type TerminalSmokeOptions = {
@@ -44,7 +44,15 @@ export async function runTerminalSmokeTest(
 
   try {
     const environment = createSmokeEnvironment(smokeDirectory, emptyPath, options.environment)
-    const result = await runPipedSmoke(options.binaryPath, environment, timeoutMs)
+    const command = process.platform === "win32"
+      ? [await resolveWindowsWinptyPath(), resolve(options.binaryPath)]
+      : [resolve(options.binaryPath)]
+    const result = await runPipedSmoke(
+      command,
+      environment,
+      timeoutMs,
+      process.platform === "win32" ? "winpty" : "pipe",
+    )
     assertTerminalFirstRender(result)
     return result
   } finally {
@@ -53,11 +61,12 @@ export async function runTerminalSmokeTest(
 }
 
 async function runPipedSmoke(
-  binaryPath: string,
+  command: string[],
   environment: NodeJS.ProcessEnv,
   timeoutMs: number,
+  transport: "pipe" | "winpty",
 ): Promise<TerminalSmokeOutput> {
-  const child = Bun.spawn([resolve(binaryPath)], {
+  const child = Bun.spawn(command, {
     stdin: "pipe",
     stdout: "pipe",
     stderr: "pipe",
@@ -99,13 +108,39 @@ async function runPipedSmoke(
       stderr,
       exitCode,
       signalCode: child.signalCode,
-      transport: "pipe",
+      transport,
     }
   } finally {
     if (!child.killed) {
       child.kill()
     }
   }
+}
+
+async function resolveWindowsWinptyPath(): Promise<string> {
+  const candidates = [
+    process.env.TUISCRIB_WINPTY,
+    process.env.ProgramFiles
+      ? join(process.env.ProgramFiles, "Git", "usr", "bin", "winpty.exe")
+      : undefined,
+    process.env["ProgramFiles(x86)"]
+      ? join(process.env["ProgramFiles(x86)"], "Git", "usr", "bin", "winpty.exe")
+      : undefined,
+  ].filter((candidate): candidate is string => Boolean(candidate))
+
+  for (const candidate of candidates) {
+    try {
+      await access(candidate)
+      return candidate
+    } catch {
+      // Try the next known Git for Windows location.
+    }
+  }
+
+  throw new Error(
+    "Windows standalone smoke requires Git for Windows winpty.exe; " +
+    "set TUISCRIB_WINPTY to its path when the runner does not use the default installation",
+  )
 }
 
 function createSmokeEnvironment(
