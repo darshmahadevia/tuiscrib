@@ -1,6 +1,8 @@
-import { access, mkdtemp, mkdir, rm } from "node:fs/promises"
+import { mkdtemp, mkdir, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
+
+import { spawn as spawnPty } from "node-pty"
 
 import {
   getCurrentReleaseTarget,
@@ -25,7 +27,7 @@ export type TerminalSmokeOutput = {
   stderr: string
   exitCode: number | null
   signalCode: NodeJS.Signals | null
-  transport: "pipe" | "winpty"
+  transport: "pipe" | "conpty"
 }
 
 export type TerminalSmokeOptions = {
@@ -44,21 +46,9 @@ export async function runTerminalSmokeTest(
 
   try {
     const environment = createSmokeEnvironment(smokeDirectory, emptyPath, options.environment)
-    const command = process.platform === "win32"
-      ? [
-        await resolveWindowsWinptyPath(),
-        "-Xallow-non-tty",
-        "-Xcolor",
-        "--",
-        resolve(options.binaryPath),
-      ]
-      : [resolve(options.binaryPath)]
-    const result = await runPipedSmoke(
-      command,
-      environment,
-      timeoutMs,
-      process.platform === "win32" ? "winpty" : "pipe",
-    )
+    const result = process.platform === "win32"
+      ? await runConptySmoke(options.binaryPath, environment, timeoutMs)
+      : await runPipedSmoke([resolve(options.binaryPath)], environment, timeoutMs)
     assertTerminalFirstRender(result)
     return result
   } finally {
@@ -70,7 +60,6 @@ async function runPipedSmoke(
   command: string[],
   environment: NodeJS.ProcessEnv,
   timeoutMs: number,
-  transport: "pipe" | "winpty",
 ): Promise<TerminalSmokeOutput> {
   const child = Bun.spawn(command, {
     stdin: "pipe",
@@ -114,7 +103,7 @@ async function runPipedSmoke(
       stderr,
       exitCode,
       signalCode: child.signalCode,
-      transport,
+      transport: "pipe",
     }
   } finally {
     if (!child.killed) {
@@ -123,29 +112,64 @@ async function runPipedSmoke(
   }
 }
 
-async function resolveWindowsWinptyPath(): Promise<string> {
-  const candidates = [
-    process.env.TUISCRIB_WINPTY,
-    process.env.ProgramFiles
-      ? join(process.env.ProgramFiles, "Git", "usr", "bin", "winpty.exe")
-      : undefined,
-    process.env["ProgramFiles(x86)"]
-      ? join(process.env["ProgramFiles(x86)"], "Git", "usr", "bin", "winpty.exe")
-      : undefined,
-  ].filter((candidate): candidate is string => Boolean(candidate))
+async function runConptySmoke(
+  binaryPath: string,
+  environment: NodeJS.ProcessEnv,
+  timeoutMs: number,
+): Promise<TerminalSmokeOutput> {
+  const child = spawnPty(resolve(binaryPath), [], {
+    name: "xterm-256color",
+    cols: 80,
+    rows: 24,
+    env: toPtyEnvironment(environment),
+    useConpty: true,
+  })
 
-  for (const candidate of candidates) {
-    try {
-      await access(candidate)
-      return candidate
-    } catch {
-      // Try the next known Git for Windows location.
-    }
-  }
+  return new Promise((resolveResult, reject) => {
+    let output = ""
+    let sentQuit = false
+    let settled = false
+    const timeout = setTimeout(() => {
+      if (settled) {
+        return
+      }
+      settled = true
+      child.kill()
+      reject(new Error(
+        `standalone binary did not complete within ${timeoutMs}ms` +
+        ` (captured ${output.length} bytes of conpty output)`,
+      ))
+    }, timeoutMs)
 
-  throw new Error(
-    "Windows standalone smoke requires Git for Windows winpty.exe; " +
-    "set TUISCRIB_WINPTY to its path when the runner does not use the default installation",
+    child.onData((chunk) => {
+      output += chunk
+      if (!sentQuit && hasTerminalFirstRender(output)) {
+        sentQuit = true
+        child.write("q")
+      }
+    })
+    child.onExit(({ exitCode }) => {
+      if (settled) {
+        return
+      }
+      settled = true
+      clearTimeout(timeout)
+      resolveResult({
+        stdout: output,
+        stderr: "",
+        exitCode,
+        signalCode: null,
+        transport: "conpty",
+      })
+    })
+  })
+}
+
+function toPtyEnvironment(environment: NodeJS.ProcessEnv): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(environment).filter(
+      (entry): entry is [string, string] => entry[1] !== undefined,
+    ),
   )
 }
 

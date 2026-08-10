@@ -19,5 +19,8 @@
     "@opentui/react": "0.5.1",
     "@tuiscrib/contracts": "workspace:*",
     "react": "19.2.8"
+  },
+  "devDependencies": {
+    "node-pty": "1.1.0"
   }
 }

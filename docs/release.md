@@ -54,7 +54,7 @@ The build disables `.env` and `bunfig.toml` autoloading so local development con
 
 ## Platform smoke test
 
-The smoke test launches the compiled executable with an isolated config home, `TERM=xterm-256color`, and a `PATH` containing no development tools. It captures the first rendered output from a controlled terminal stream, waits for the keyboard-only shell markers, sends `q`, and requires a clean exit plus ANSI 256-color output. On Windows, the runner uses Git for Windows' `winpty.exe` with its non-TTY and color-escape options so OpenTUI sees a pseudo-console rather than a plain pipe; `TUISCRIB_WINPTY` can override its path on a custom runner:
+The smoke test launches the compiled executable with an isolated config home, `TERM=xterm-256color`, and a `PATH` containing no development tools. It captures the first rendered output from a controlled terminal stream, waits for the keyboard-only shell markers, sends `q`, and requires a clean exit plus ANSI 256-color output. On Windows, the runner uses the locked `node-pty` ConPTY binding so OpenTUI sees a pseudo-console rather than a plain pipe:
 
 ```bash
 bun run smoke:release -- --binary dist/releases/tuiscrib-darwin-arm64
