@@ -1,6 +1,6 @@
 # Tuiscrib
 
-Tuiscrib is a keyboard-first collaborative Sticky Note editor. This repository currently contains the issue #2 walking skeleton: a Bun workspace with a shared Zod contract, a Hono Tuiscrib Service, Drizzle/PostgreSQL persistence, and a React-bound OpenTUI terminal client.
+Tuiscrib is a keyboard-first collaborative Sticky Note editor. This repository contains the reusable issue #3 terminal shell plus the issue #2 walking skeleton: a Bun workspace with a shared Zod contract, a Hono Tuiscrib Service, Drizzle/PostgreSQL persistence, and a React-bound OpenTUI terminal client.
 
 ## Prerequisites
 
@@ -28,11 +28,11 @@ bun run dev:service
 bun run dev:terminal
 ```
 
-The terminal client renders the Zod-validated `/health?probe=readiness` response after the Hono process executes a real PostgreSQL readiness query. Press `r` to refresh or `q` to quit.
+The terminal client opens the keyboard-only shell. Press `b` for Boards, `s` to sign in, `r` to register, `?` for help, or `q` to quit. The shell requires an 80 by 24 terminal and supports Unicode plus a 256-color baseline, with truecolor used when detected.
 
 ## Verification
 
-The full test command includes the deterministic multi-client acceptance seam. It starts a fresh PostgreSQL container, applies Drizzle migrations from zero, mounts two OpenTUI test renderers, drives keyboard input, captures frames, and tears down every resource:
+The full test command includes the deterministic terminal-shell and multi-client acceptance seams. It starts a fresh PostgreSQL container, applies Drizzle migrations from zero, mounts OpenTUI test renderers, drives keyboard input, captures rendered frames, and tears down every resource:
 
 ```bash
 bun test
