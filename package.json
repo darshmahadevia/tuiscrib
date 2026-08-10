@@ -10,6 +10,8 @@
     "dev": "bun run dev:service",
     "dev:service": "bun run --cwd packages/service dev",
     "dev:terminal": "bun run --cwd packages/terminal dev",
+    "build:release": "bun run --cwd packages/terminal build",
+    "smoke:release": "bun run --cwd packages/terminal smoke",
     "db:migrate": "bun run --cwd packages/persistence migrate",
     "test": "bun test",
     "test:acceptance": "bun test packages/acceptance/src",
