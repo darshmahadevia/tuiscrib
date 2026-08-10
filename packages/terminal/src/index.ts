@@ -1,5 +1,11 @@
 export { HealthScreen, type HealthScreenProps } from "./app.tsx"
-export { createHealthClient, type HealthClient } from "./client.ts"
+export {
+  createAuthClient,
+  createHealthClient,
+  ServiceRequestError,
+  type AuthClient,
+  type HealthClient,
+} from "./client.ts"
 export {
   MIN_TERMINAL_HEIGHT,
   MIN_TERMINAL_WIDTH,

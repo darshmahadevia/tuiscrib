@@ -13,6 +13,9 @@ export const healthResponseSchema = z.object({
 
 export const serviceErrorSchema = z.object({
   error: z.string().min(1),
+  code: z.string().min(1).optional(),
+  fieldErrors: z.record(z.string(), z.string()).optional(),
+  retryAfterSeconds: z.number().int().positive().optional(),
 })
 
 export type HealthRequest = z.infer<typeof healthRequestSchema>

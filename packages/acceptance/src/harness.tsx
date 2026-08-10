@@ -5,8 +5,8 @@ import { act } from "react"
 
 import { createPersistence, type Persistence } from "@tuiscrib/persistence"
 import { createServiceApp } from "@tuiscrib/service"
-import { HealthScreen } from "@tuiscrib/terminal"
-import { createHealthClient } from "@tuiscrib/terminal/client"
+import { HealthScreen, TerminalShell } from "@tuiscrib/terminal"
+import { createAuthClient, createHealthClient } from "@tuiscrib/terminal/client"
 
 type ProcessResult = {
   stdout: string
@@ -175,6 +175,22 @@ export class AcceptanceHarness {
         width: 80,
         height: 24,
         clock: this.clock,
+      },
+    )
+    await setup.renderOnce()
+    const client = { label, setup }
+    this.clients.push(client)
+    return client
+  }
+
+  async addShellClient(label: string): Promise<TerminalClient> {
+    const setup = await testRender(
+      <TerminalShell label={label} authClient={createAuthClient(this.baseUrl)} />,
+      {
+        width: 80,
+        height: 24,
+        clock: this.clock,
+        kittyKeyboard: true,
       },
     )
     await setup.renderOnce()

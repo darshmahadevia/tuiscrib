@@ -2,6 +2,13 @@ import { flushSync, useKeyboard, useRenderer, useTerminalDimensions } from "@ope
 import type { InputRenderable, TerminalCapabilities } from "@opentui/core"
 import { useEffect, useRef, useState, type ReactNode } from "react"
 
+import {
+  countUserPerceivedCharacters,
+  splitUserPerceivedCharacters,
+} from "@tuiscrib/contracts"
+
+import { ServiceRequestError, type AuthClient } from "./client.ts"
+
 export const MIN_TERMINAL_WIDTH = 80
 export const MIN_TERMINAL_HEIGHT = 24
 
@@ -10,6 +17,7 @@ export type ShellMode = "navigate" | "edit"
 export type TerminalShellProps = {
   label?: string
   capabilities?: TerminalCapabilities | null
+  authClient?: AuthClient
 }
 
 type ShellOverlay = "none" | "help"
@@ -21,12 +29,15 @@ type FormField = {
   id: string
   label: string
   placeholder: string
+  sensitive?: boolean
+  maxLength?: number
 }
 
 type FormDefinition = {
   title: string
   description: string
   fields: FormField[]
+  warning?: string
 }
 
 type ShellNotice = {
@@ -64,16 +75,28 @@ const formDefinitions: Record<FormKind, FormDefinition> = {
     description: "Enter your immutable User identity to continue.",
     fields: [
       { id: "username", label: "Username", placeholder: "lowercase username" },
-      { id: "password", label: "Password", placeholder: "password" },
+      { id: "password", label: "Password", placeholder: "password", sensitive: true },
     ],
   },
   register: {
     title: "Register User",
-    description: "Choose a service-wide username and a confirmed password.",
+    description:
+      "Username: 3-24 lowercase ASCII letters, digits, hyphens, or underscores. Password: 8-128 user-perceived Unicode characters; spaces allowed.",
+    warning: "Password recovery is unavailable; losing this password permanently loses access.",
     fields: [
       { id: "username", label: "Username", placeholder: "lowercase username" },
-      { id: "password", label: "Password", placeholder: "8-128 Unicode characters" },
-      { id: "confirmation", label: "Confirm password", placeholder: "repeat password" },
+      {
+        id: "password",
+        label: "Password",
+        placeholder: "8-128 Unicode characters",
+        sensitive: true,
+      },
+      {
+        id: "confirmation",
+        label: "Confirm password",
+        placeholder: "repeat password",
+        sensitive: true,
+      },
     ],
   },
   "create-board": {
@@ -101,7 +124,11 @@ const colors = {
   error: "#f85149",
 }
 
-export function TerminalShell({ label = "local", capabilities: capabilitiesOverride }: TerminalShellProps) {
+export function TerminalShell({
+  label = "local",
+  capabilities: capabilitiesOverride,
+  authClient,
+}: TerminalShellProps) {
   const renderer = useRenderer()
   const { width, height } = useTerminalDimensions()
   const [detectedCapabilities, setDetectedCapabilities] = useState(renderer.capabilities)
@@ -114,6 +141,7 @@ export function TerminalShell({ label = "local", capabilities: capabilitiesOverr
   const [formInitialKey, setFormInitialKey] = useState<string | null>(null)
   const [confirmationReturnView, setConfirmationReturnView] = useState<ShellView>("boards")
   const [notice, setNotice] = useState<ShellNotice | null>(null)
+  const [formPending, setFormPending] = useState(false)
   const overlayRef = useRef(overlay)
   const viewRef = useRef(view)
   const modeRef = useRef(mode)
@@ -164,6 +192,7 @@ export function TerminalShell({ label = "local", capabilities: capabilitiesOverr
       }
       setFormInitialKey(null)
       setNotice(null)
+      setFormPending(false)
     })
   }
 
@@ -179,6 +208,7 @@ export function TerminalShell({ label = "local", capabilities: capabilitiesOverr
       setFormInitialKey(initialKey)
       setSelectedIndex(0)
       setNotice(null)
+      setFormPending(false)
     })
   }
 
@@ -202,8 +232,8 @@ export function TerminalShell({ label = "local", capabilities: capabilitiesOverr
     })
   }
 
-  const completeForm = (values: Record<string, string>) => {
-    if (!formKind) {
+  const completeForm = async (values: Record<string, string>) => {
+    if (!formKind || formPending) {
       return
     }
 
@@ -223,6 +253,41 @@ export function TerminalShell({ label = "local", capabilities: capabilitiesOverr
       return
     }
 
+    if (authClient && (formKind === "register" || formKind === "sign-in")) {
+      flushSync(() => setFormPending(true))
+      try {
+        const response =
+          formKind === "register"
+            ? await authClient.register({
+                username: values.username,
+                password: values.password,
+                confirmation: values.confirmation,
+              })
+            : await authClient.signIn({
+                username: values.username,
+                password: values.password,
+              })
+        const completedLabel = formKind === "register" ? "Registration" : "Sign-in"
+        flushSync(() => {
+          setView(formReturnView)
+          setFormKind(null)
+          setFormInitialKey(null)
+          setSelectedIndex(0)
+          setNotice({
+            kind: "status",
+            message: `${completedLabel} complete for ${response.user.username}. Terminal Session ready.`,
+          })
+        })
+      } catch (error) {
+        flushSync(() => {
+          setNotice({ kind: "error", message: formatAuthError(error) })
+        })
+      } finally {
+        flushSync(() => setFormPending(false))
+      }
+      return
+    }
+
     const completedLabel = formKind === "register" ? "registration" : definition.title.toLowerCase()
     flushSync(() => {
       setView(formReturnView)
@@ -230,6 +295,7 @@ export function TerminalShell({ label = "local", capabilities: capabilitiesOverr
       setFormInitialKey(null)
       setSelectedIndex(0)
       setNotice({ kind: "status", message: `${completedLabel} form complete` })
+      setFormPending(false)
     })
   }
 
@@ -421,6 +487,7 @@ export function TerminalShell({ label = "local", capabilities: capabilitiesOverr
       key={formKind}
       definition={formDefinitions[formKind]}
       notice={notice}
+      pending={formPending}
       initialKeyToIgnore={formInitialKey}
       onCancel={() => openView(formReturnView)}
       onSubmit={completeForm}
@@ -626,15 +693,17 @@ function CanvasSurface({ mode }: { mode: ShellMode }) {
 function ShellForm({
   definition,
   notice,
+  pending,
   initialKeyToIgnore,
   onCancel,
   onSubmit,
 }: {
   definition: FormDefinition
   notice: ShellNotice | null
+  pending: boolean
   initialKeyToIgnore: string | null
   onCancel: () => void
-  onSubmit: (values: Record<string, string>) => void
+  onSubmit: (values: Record<string, string>) => void | Promise<void>
 }) {
   const [focusedIndex, setFocusedIndex] = useState(0)
   const [values, setValues] = useState<Record<string, string>>({})
@@ -642,6 +711,9 @@ function ShellForm({
   const valuesRef = useRef(values)
   const inputRefs = useRef<Array<InputRenderable | null>>([])
   const initialKeyToIgnoreRef = useRef(initialKeyToIgnore)
+  const secretValuesRef = useRef<Record<string, string>>({})
+  const displayedSecretValuesRef = useRef<Record<string, string>>({})
+  const maskingInputRef = useRef(false)
   focusedIndexRef.current = focusedIndex
   valuesRef.current = values
 
@@ -656,6 +728,9 @@ function ShellForm({
   }
 
   useKeyboard((key) => {
+    if (pending) {
+      return
+    }
     if (key.name === "tab") {
       focusField(focusedIndexRef.current + 1)
       return
@@ -687,6 +762,7 @@ function ShellForm({
       >
         <text fg={colors.accent}>{definition.title}</text>
         <text fg={colors.muted}>{definition.description}</text>
+        {definition.warning ? <text fg={colors.warning}>{definition.warning}</text> : null}
         {definition.fields.map((field, index) => (
           <box key={field.id} style={{ width: "100%", flexDirection: "row" }}>
             <text fg={colors.muted} style={{ width: 20 }}>
@@ -698,12 +774,44 @@ function ShellForm({
               }}
               focused={focusedIndex === index}
               width={36}
+              maxLength={field.maxLength}
               placeholder={field.placeholder}
               backgroundColor={colors.panelStrong}
-              focusedBackgroundColor="#26374d"
-              textColor={colors.text}
+              focusedBackgroundColor={field.sensitive ? colors.panelStrong : "#26374d"}
+              textColor={field.sensitive ? colors.panelStrong : colors.text}
+              focusedTextColor={field.sensitive ? colors.panelStrong : colors.text}
               cursorColor={colors.accent}
+              showCursor={!field.sensitive}
               onInput={(value) => {
+                if (field.sensitive) {
+                  if (maskingInputRef.current) {
+                    return
+                  }
+
+                  const previousRawValue = secretValuesRef.current[field.id] ?? ""
+                  const previousDisplayedValue = displayedSecretValuesRef.current[field.id] ?? ""
+                  const nextRawValue = updateMaskedInputValue(
+                    previousRawValue,
+                    previousDisplayedValue,
+                    value,
+                  )
+                  const nextDisplayedValue = "•".repeat(
+                    countUserPerceivedCharacters(nextRawValue),
+                  )
+                  secretValuesRef.current[field.id] = nextRawValue
+                  displayedSecretValuesRef.current[field.id] = nextDisplayedValue
+                  const inputRenderable = inputRefs.current[index]
+                  if (inputRenderable && inputRenderable.value !== nextDisplayedValue) {
+                    maskingInputRef.current = true
+                    inputRenderable.value = nextDisplayedValue
+                    maskingInputRef.current = false
+                  }
+                  const nextValues = { ...valuesRef.current, [field.id]: nextRawValue }
+                  valuesRef.current = nextValues
+                  setValues(nextValues)
+                  return
+                }
+
                 if (initialKeyToIgnoreRef.current && value === initialKeyToIgnoreRef.current) {
                   const input = inputRefs.current[index]
                   if (input) {
@@ -720,11 +828,58 @@ function ShellForm({
             />
           </box>
         ))}
+        {pending ? <text fg={colors.muted}>Contacting the Tuiscrib Service…</text> : null}
         {notice?.kind === "error" ? <text fg={colors.error}>Error: {notice.message}</text> : null}
         <text fg={colors.muted}>Tab next field · Enter submit · Escape cancel</text>
       </box>
     </box>
   )
+}
+
+function formatAuthError(error: unknown): string {
+  if (!(error instanceof ServiceRequestError)) {
+    return "Service unavailable. Try again later."
+  }
+
+  const fieldErrors = Object.values(error.details.fieldErrors ?? {})
+  return fieldErrors.length > 0
+    ? `${error.details.error} ${fieldErrors.join(" ")}`
+    : error.details.error
+}
+
+function updateMaskedInputValue(
+  previousRawValue: string,
+  previousDisplayedValue: string,
+  nextDisplayedValue: string,
+): string {
+  let prefixLength = 0
+  while (
+    prefixLength < previousDisplayedValue.length &&
+    prefixLength < nextDisplayedValue.length &&
+    previousDisplayedValue[prefixLength] === nextDisplayedValue[prefixLength]
+  ) {
+    prefixLength += 1
+  }
+
+  let suffixLength = 0
+  while (
+    suffixLength < previousDisplayedValue.length - prefixLength &&
+    suffixLength < nextDisplayedValue.length - prefixLength &&
+    previousDisplayedValue[previousDisplayedValue.length - suffixLength - 1] ===
+      nextDisplayedValue[nextDisplayedValue.length - suffixLength - 1]
+  ) {
+    suffixLength += 1
+  }
+
+  const previousGraphemes = splitUserPerceivedCharacters(previousRawValue)
+  const start = Array.from(previousDisplayedValue.slice(0, prefixLength)).length
+  const removed = previousDisplayedValue.length - prefixLength - suffixLength
+  const inserted = nextDisplayedValue.slice(
+    prefixLength,
+    nextDisplayedValue.length - suffixLength,
+  )
+  previousGraphemes.splice(start, removed, inserted)
+  return previousGraphemes.join("")
 }
 
 function ShellMenu({
