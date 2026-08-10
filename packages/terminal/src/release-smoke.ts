@@ -174,6 +174,11 @@ async function runConptySmoke(
       }
       settled = true
       clearTimeout(timeout)
+      try {
+        child.kill()
+      } catch {
+        // The ConPTY process is already gone; cleanup is best effort.
+      }
       resolveResult({
         stdout: output,
         stderr: "",
