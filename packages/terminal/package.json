@@ -1,0 +1,21 @@
+{
+  "name": "@tuiscrib/terminal",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./app": "./src/app.tsx",
+    "./client": "./src/client.ts"
+  },
+  "scripts": {
+    "dev": "bun src/main.tsx",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@opentui/core": "0.5.1",
+    "@opentui/react": "0.5.1",
+    "@tuiscrib/contracts": "workspace:*",
+    "react": "19.2.8"
+  }
+}
