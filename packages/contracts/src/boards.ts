@@ -1,6 +1,9 @@
 import { z } from "zod"
 
-import { countUserPerceivedCharacters } from "./auth.ts"
+import {
+  countUserPerceivedCharacters,
+  USER_PERCEIVED_CHARACTER_SEGMENTATION_UNAVAILABLE,
+} from "./auth.ts"
 
 export const MAX_BOARD_NAME_CHARACTERS = 80
 export const MAX_OWNED_BOARDS = 20
@@ -33,7 +36,17 @@ export const boardNameSchema = z.string().transform((value) => value.trim()).sup
     if (SINGLE_LINE_BREAK_PATTERN.test(value)) {
       context.addIssue({ code: "custom", message: "Board name must be a single line." })
     }
-    if (countUserPerceivedCharacters(value) > MAX_BOARD_NAME_CHARACTERS) {
+    let characterCount: number
+    try {
+      characterCount = countUserPerceivedCharacters(value)
+    } catch {
+      context.addIssue({
+        code: "custom",
+        message: USER_PERCEIVED_CHARACTER_SEGMENTATION_UNAVAILABLE,
+      })
+      return
+    }
+    if (characterCount > MAX_BOARD_NAME_CHARACTERS) {
       context.addIssue({
         code: "custom",
         message: `Use at most ${MAX_BOARD_NAME_CHARACTERS} user-perceived characters.`,

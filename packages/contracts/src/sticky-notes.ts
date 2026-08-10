@@ -2,6 +2,7 @@ import { z } from "zod"
 
 import {
   countUserPerceivedCharacters,
+  USER_PERCEIVED_CHARACTER_SEGMENTATION_UNAVAILABLE,
   usernameSchema,
 } from "./auth.ts"
 import { boardIdentifierSchema } from "./boards.ts"
@@ -9,6 +10,8 @@ import { boardIdentifierSchema } from "./boards.ts"
 export const STICKY_NOTE_WIDTH = 32
 export const MAX_STICKY_NOTE_CHARACTERS = 2_000
 export const MAX_STICKY_NOTES = 500
+export const STICKY_NOTE_TEXT_LIMIT_ERROR =
+  "Use at most 2,000 user-perceived Unicode characters."
 
 export const stickyNoteColorSchema = z.enum([
   "amber",
@@ -31,16 +34,36 @@ export const stickyNotePositionSchema = z.object({
 })
 
 export const stickyNoteTextSchema = z.string().superRefine((value, context) => {
-  if (!value.isWellFormed()) {
+  let wellFormed: boolean
+  try {
+    wellFormed = value.isWellFormed()
+  } catch {
+    context.addIssue({
+      code: "custom",
+      message: USER_PERCEIVED_CHARACTER_SEGMENTATION_UNAVAILABLE,
+    })
+    return
+  }
+  if (!wellFormed) {
     context.addIssue({
       code: "custom",
       message: "Sticky Note text must be well-formed Unicode.",
     })
   }
-  if (countUserPerceivedCharacters(value) > MAX_STICKY_NOTE_CHARACTERS) {
+  let characterCount: number
+  try {
+    characterCount = countUserPerceivedCharacters(value)
+  } catch {
     context.addIssue({
       code: "custom",
-      message: `Use at most ${MAX_STICKY_NOTE_CHARACTERS} user-perceived Unicode characters.`,
+      message: USER_PERCEIVED_CHARACTER_SEGMENTATION_UNAVAILABLE,
+    })
+    return
+  }
+  if (characterCount > MAX_STICKY_NOTE_CHARACTERS) {
+    context.addIssue({
+      code: "custom",
+      message: STICKY_NOTE_TEXT_LIMIT_ERROR,
     })
   }
   if (value.includes("\u0000")) {
@@ -124,6 +147,7 @@ export const boardCommandErrorCodeSchema = z.enum([
   "creation_claim_unavailable",
   "invalid_creation_claim",
   "empty_sticky_note",
+  "sticky_note_text_limit",
   "sticky_note_capacity",
   "sticky_note_rejected",
   "revision_conflict",

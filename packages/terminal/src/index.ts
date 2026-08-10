@@ -32,6 +32,8 @@ export {
 export {
   STICKY_NOTE_TEXT_DEBOUNCE_MS,
   createStickyNoteDebouncer,
+  validateStickyNoteEditorText,
+  type StickyNoteEditorTextValidation,
   type StickyNoteDebouncer,
   type StickyNoteDebouncerOptions,
   type StickyNoteTimer,

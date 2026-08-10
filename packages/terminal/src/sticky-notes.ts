@@ -1,4 +1,4 @@
-import { STICKY_NOTE_WIDTH } from "@tuiscrib/contracts"
+import { splitUserPerceivedCharacters, STICKY_NOTE_WIDTH } from "@tuiscrib/contracts"
 
 export { STICKY_NOTE_WIDTH }
 
@@ -19,7 +19,7 @@ export function wrapStickyNoteText(
 
     let line = ""
     let lineWidth = 0
-    for (const segment of segmentGraphemes(sourceLine)) {
+    for (const segment of splitUserPerceivedCharacters(sourceLine)) {
       const segmentWidth = Bun.stringWidth(segment)
       if (line.length > 0 && lineWidth + segmentWidth > width) {
         lines.push(line)
@@ -33,9 +33,4 @@ export function wrapStickyNoteText(
   }
 
   return lines.length > 0 ? lines : [""]
-}
-
-function segmentGraphemes(value: string): string[] {
-  const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" })
-  return [...segmenter.segment(value)].map((segment) => segment.segment)
 }

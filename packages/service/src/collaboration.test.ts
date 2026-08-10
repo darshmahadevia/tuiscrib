@@ -428,9 +428,421 @@ test("grants creation authority before publication and broadcasts one durable re
       color: note.color,
     })
     expect(createInputs).toHaveLength(1)
+    const editingPresence = await nextMessageMatching(
+      member,
+      (message) =>
+        message.type === "snapshot" &&
+        message.revision === 1 &&
+        presenceFor(message, "ada_lovelace") === "editing",
+    )
+    expect(editingPresence).toMatchObject({ revision: 1, stickyNotes: [note] })
   } finally {
     releaseCreation()
     await Promise.all([closeSocket(owner.socket), closeSocket(member.socket)])
     server.stop(true)
   }
 })
+
+test("releasing an empty provisional Sticky Note returns Presence to viewing without persistence", async () => {
+  const provisionalId = "5ab7d4c2-2a35-4ee3-9f0f-9d0d2a92f36a"
+  let createCalls = 0
+  const collaboration = createBoardCollaboration({
+    persistence: {
+      openBoard: async ({ userId, publicId }) => ({
+        board: {
+          id: publicId,
+          name: "Empty Ideas",
+          role: userId === 7 ? "owner" : "member",
+        },
+        revision: 0,
+        stickyNotes: [],
+      }),
+      createStickyNote: async () => {
+        createCalls += 1
+        return { kind: "created" as const, revision: 1, stickyNote: {} as never }
+      },
+    },
+    sessionAuthenticator: async (value) => {
+      if (value === credential) {
+        return { user: { id: 7, username: "ada_lovelace" } }
+      }
+      if (value === "b".repeat(43)) {
+        return { user: { id: 8, username: "grace_hopper" } }
+      }
+      return null
+    },
+  })
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request, bunServer) {
+      const result = await collaboration.handleUpgrade(request, bunServer)
+      return result === null ? new Response("not found", { status: 404 }) : result
+    },
+    websocket: collaboration.websocket,
+  })
+  const url = `ws://127.0.0.1:${server.port}/boards/${boardId}/collaboration`
+  const owner = createSocketClient(url, credential)
+  const member = createSocketClient(url, "b".repeat(43))
+
+  try {
+    await Promise.all([waitForSocketOpen(owner.socket), waitForSocketOpen(member.socket)])
+    await owner.nextMessage()
+    await member.nextMessage()
+    await nextMessageMatching(owner, (message) => (message.presence as unknown[]).length === 2)
+
+    owner.socket.send(JSON.stringify({
+      type: "begin_sticky_note",
+      provisionalId,
+      position: { x: 0, y: 0 },
+      color: "yellow",
+    }))
+    const claim = await nextMessageMatching(
+      owner,
+      (message) => message.type === "sticky_note_creation_claim_granted",
+    )
+    await nextMessageMatching(
+      member,
+      (message) => presenceFor(message, "ada_lovelace") === "creating",
+    )
+
+    owner.socket.send(JSON.stringify({
+      type: "release_sticky_note_creation",
+      claimId: claim.claimId,
+      provisionalId,
+    }))
+
+    const viewing = await nextMessageMatching(
+      member,
+      (message) => presenceFor(message, "ada_lovelace") === "viewing",
+    )
+    expect(viewing).toMatchObject({ revision: 0, stickyNotes: [] })
+    expect(createCalls).toBe(0)
+  } finally {
+    await Promise.all([closeSocket(owner.socket), closeSocket(member.socket)])
+    await server.stop(true)
+  }
+})
+
+test("rejects over-limit publication at the public socket seam without echoing text", async () => {
+  const provisionalId = "7ab7d4c2-2a35-4ee3-9f0f-9d0d2a92f36a"
+  const privateText = "e\u0301".repeat(2_001)
+  let createCalls = 0
+  const collaboration = createBoardCollaboration({
+    persistence: {
+      openBoard: async ({ publicId }) => ({
+        board: { id: publicId, name: "Bounded Ideas", role: "owner" as const },
+        revision: 0,
+        stickyNotes: [],
+      }),
+      createStickyNote: async () => {
+        createCalls += 1
+        return { kind: "empty_text" as const }
+      },
+    },
+    sessionAuthenticator: async (value) => value === credential
+      ? { user: { id: 7, username: "ada_lovelace" } }
+      : null,
+  })
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request, bunServer) {
+      const result = await collaboration.handleUpgrade(request, bunServer)
+      return result === null ? new Response("not found", { status: 404 }) : result
+    },
+    websocket: collaboration.websocket,
+  })
+  const socket = createSocketClient(
+    `ws://127.0.0.1:${server.port}/boards/${boardId}/collaboration`,
+    credential,
+  )
+
+  try {
+    await waitForSocketOpen(socket.socket)
+    await socket.nextMessage()
+    socket.socket.send(JSON.stringify({
+      type: "begin_sticky_note",
+      provisionalId,
+      position: { x: 0, y: 0 },
+      color: "yellow",
+    }))
+    const claim = await nextMessageMatching(
+      socket,
+      (message) => message.type === "sticky_note_creation_claim_granted",
+    )
+    socket.socket.send(JSON.stringify({
+      type: "publish_sticky_note",
+      claimId: claim.claimId,
+      provisionalId,
+      text: privateText,
+    }))
+    const error = await nextMessageMatching(socket, (message) => message.type === "error")
+    expect(error).toMatchObject({
+      type: "error",
+      code: "sticky_note_text_limit",
+      error: "Use at most 2,000 user-perceived Unicode characters.",
+    })
+    expect(JSON.stringify(error)).not.toContain(privateText)
+    expect(createCalls).toBe(0)
+  } finally {
+    await closeSocket(socket.socket)
+    await server.stop(true)
+  }
+})
+
+test("a release during publication leaves the durable note but does not orphan editing Presence", async () => {
+  const provisionalId = "6ab7d4c2-2a35-4ee3-9f0f-9d0d2a92f36a"
+  const note = {
+    id: "Lm7u3nW8kM2pR5sT9vY4aB",
+    text: "durable despite release",
+    textVersion: 1,
+    position: { x: 0, y: 0 },
+    color: "yellow" as const,
+    stackingOrder: 0,
+    authorship: { member: { username: "ada_lovelace" } },
+    createdAt: "2026-08-10T00:00:00.000Z",
+    lastEdit: {
+      member: { username: "ada_lovelace" },
+      at: "2026-08-10T00:00:00.000Z",
+    },
+  }
+  let releaseCreate!: () => void
+  const createStarted = Promise.withResolvers<void>()
+  const collaboration = createBoardCollaboration({
+    clock: () => new Date("2026-08-10T00:00:00.000Z"),
+    stickyNoteIdGenerator: () => note.id,
+    persistence: {
+      openBoard: async ({ userId, publicId }) => ({
+        board: {
+          id: publicId,
+          name: "Release Ideas",
+          role: userId === 7 ? "owner" : "member",
+        },
+        revision: 0,
+        stickyNotes: [],
+      }),
+      createStickyNote: async () => {
+        createStarted.resolve()
+        await new Promise<void>((resolve) => {
+          releaseCreate = resolve
+        })
+        return { kind: "created" as const, revision: 1, stickyNote: note }
+      },
+    },
+    sessionAuthenticator: async (value) => {
+      if (value === credential) {
+        return { user: { id: 7, username: "ada_lovelace" } }
+      }
+      if (value === "b".repeat(43)) {
+        return { user: { id: 8, username: "grace_hopper" } }
+      }
+      return null
+    },
+  })
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request, bunServer) {
+      const result = await collaboration.handleUpgrade(request, bunServer)
+      return result === null ? new Response("not found", { status: 404 }) : result
+    },
+    websocket: collaboration.websocket,
+  })
+  const url = `ws://127.0.0.1:${server.port}/boards/${boardId}/collaboration`
+  const owner = createSocketClient(url, credential)
+  const member = createSocketClient(url, "b".repeat(43))
+
+  try {
+    await Promise.all([waitForSocketOpen(owner.socket), waitForSocketOpen(member.socket)])
+    await owner.nextMessage()
+    await member.nextMessage()
+    await nextMessageMatching(owner, (message) => (message.presence as unknown[]).length === 2)
+    owner.socket.send(JSON.stringify({
+      type: "begin_sticky_note",
+      provisionalId,
+      position: { x: 0, y: 0 },
+      color: "yellow",
+    }))
+    const claim = await nextMessageMatching(
+      owner,
+      (message) => message.type === "sticky_note_creation_claim_granted",
+    )
+    owner.socket.send(JSON.stringify({
+      type: "publish_sticky_note",
+      claimId: claim.claimId,
+      provisionalId,
+      text: note.text,
+    }))
+    await createStarted.promise
+    await nextMessageMatching(member, (message) => presenceFor(message, "ada_lovelace") === "creating")
+
+    owner.socket.send(JSON.stringify({
+      type: "release_sticky_note_creation",
+      claimId: claim.claimId,
+      provisionalId,
+    }))
+    await nextMessageMatching(
+      member,
+      (message) => presenceFor(message, "ada_lovelace") === "viewing" && message.revision === 0,
+    )
+    releaseCreate()
+
+    const created = await nextMessageMatching(owner, (message) => message.type === "sticky_note_created")
+    expect(created).toMatchObject({ stickyNote: note, revision: 1 })
+    const viewing = await nextMessageMatching(
+      member,
+      (message) => presenceFor(message, "ada_lovelace") === "viewing" && message.revision === 1,
+    )
+    expect(viewing).toMatchObject({ stickyNotes: [note] })
+  } finally {
+    releaseCreate?.()
+    await Promise.all([closeSocket(owner.socket), closeSocket(member.socket)])
+    await server.stop(true)
+  }
+})
+
+test("lost in-flight cleanup cannot erase a replacement creation claim", async () => {
+  const provisionalId = "8ab7d4c2-2a35-4ee3-9f0f-9d0d2a92f36a"
+  const note = {
+    id: "Mm7u3nW8kM2pR5sT9vY4aB",
+    text: "durable after session loss",
+    textVersion: 1,
+    position: { x: 0, y: 0 },
+    color: "yellow" as const,
+    stackingOrder: 0,
+    authorship: { member: { username: "ada_lovelace" } },
+    createdAt: "2026-08-10T00:00:00.000Z",
+    lastEdit: {
+      member: { username: "ada_lovelace" },
+      at: "2026-08-10T00:00:00.000Z",
+    },
+  }
+  let releaseCreate!: () => void
+  const createStarted = Promise.withResolvers<void>()
+  const collaboration = createBoardCollaboration({
+    clock: () => new Date("2026-08-10T00:00:00.000Z"),
+    stickyNoteIdGenerator: () => note.id,
+    persistence: {
+      openBoard: async ({ userId, publicId }) => ({
+        board: {
+          id: publicId,
+          name: "Claim Recovery Ideas",
+          role: userId === 7 ? "owner" : "member",
+        },
+        revision: 0,
+        stickyNotes: [],
+      }),
+      createStickyNote: async () => {
+        createStarted.resolve()
+        await new Promise<void>((resolve) => {
+          releaseCreate = resolve
+        })
+        return { kind: "created" as const, revision: 1, stickyNote: note }
+      },
+    },
+    sessionAuthenticator: async (value) => {
+      if (value === credential) {
+        return { user: { id: 7, username: "ada_lovelace" } }
+      }
+      if (value === "b".repeat(43)) {
+        return { user: { id: 8, username: "grace_hopper" } }
+      }
+      if (value === "c".repeat(43)) {
+        return { user: { id: 9, username: "alan_turing" } }
+      }
+      return null
+    },
+  })
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request, bunServer) {
+      const result = await collaboration.handleUpgrade(request, bunServer)
+      return result === null ? new Response("not found", { status: 404 }) : result
+    },
+    websocket: collaboration.websocket,
+  })
+  const url = `ws://127.0.0.1:${server.port}/boards/${boardId}/collaboration`
+  const owner = createSocketClient(url, credential)
+  const replacement = createSocketClient(url, "b".repeat(43))
+  const observer = createSocketClient(url, "c".repeat(43))
+
+  try {
+    await Promise.all([
+      waitForSocketOpen(owner.socket),
+      waitForSocketOpen(replacement.socket),
+      waitForSocketOpen(observer.socket),
+    ])
+    await Promise.all([owner.nextMessage(), replacement.nextMessage(), observer.nextMessage()])
+    await nextMessageMatching(owner, (message) => (message.presence as unknown[]).length === 3)
+
+    owner.socket.send(JSON.stringify({
+      type: "begin_sticky_note",
+      provisionalId,
+      position: { x: 0, y: 0 },
+      color: "yellow",
+    }))
+    const ownerClaim = await nextMessageMatching(
+      owner,
+      (message) => message.type === "sticky_note_creation_claim_granted",
+    )
+    await nextMessageMatching(
+      replacement,
+      (message) => presenceFor(message, "ada_lovelace") === "creating",
+    )
+    owner.socket.send(JSON.stringify({
+      type: "publish_sticky_note",
+      claimId: ownerClaim.claimId,
+      provisionalId,
+      text: note.text,
+    }))
+    await createStarted.promise
+
+    owner.socket.send(JSON.stringify({
+      type: "release_sticky_note_creation",
+      claimId: ownerClaim.claimId,
+      provisionalId,
+    }))
+    await nextMessageMatching(
+      replacement,
+      (message) => presenceFor(message, "ada_lovelace") === "viewing" && message.revision === 0,
+    )
+    await closeSocket(owner.socket)
+
+    replacement.socket.send(JSON.stringify({
+      type: "begin_sticky_note",
+      provisionalId,
+      position: { x: 1, y: 1 },
+      color: "blue",
+    }))
+    await nextMessageMatching(
+      replacement,
+      (message) => message.type === "sticky_note_creation_claim_granted",
+    )
+    releaseCreate()
+    await nextMessageMatching(observer, (message) => message.type === "sticky_note_created")
+
+    observer.socket.send(JSON.stringify({
+      type: "begin_sticky_note",
+      provisionalId,
+      position: { x: 2, y: 2 },
+      color: "red",
+    }))
+    await expect(nextMessageMatching(observer, (message) => message.type === "error"))
+      .resolves.toMatchObject({ type: "error", code: "creation_claim_unavailable" })
+  } finally {
+    releaseCreate?.()
+    await Promise.all([
+      closeSocket(owner.socket),
+      closeSocket(replacement.socket),
+      closeSocket(observer.socket),
+    ])
+    await server.stop(true)
+  }
+})
+
+function presenceFor(message: Record<string, unknown>, username: string): string | undefined {
+  const presence = message.presence as Array<{ member: { username: string }; activity: string }> | undefined
+  return presence?.find((entry) => entry.member.username === username)?.activity
+}

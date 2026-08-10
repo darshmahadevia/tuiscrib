@@ -1,4 +1,22 @@
+import { stickyNoteTextSchema } from "@tuiscrib/contracts"
+
 export const STICKY_NOTE_TEXT_DEBOUNCE_MS = 150
+
+export type StickyNoteEditorTextValidation =
+  | { accepted: true }
+  | { accepted: false; error: string }
+
+export function validateStickyNoteEditorText(text: string): StickyNoteEditorTextValidation {
+  const parsed = stickyNoteTextSchema.safeParse(text)
+  if (parsed.success) {
+    return { accepted: true }
+  }
+
+  return {
+    accepted: false,
+    error: parsed.error.issues[0]?.message ?? "Sticky Note text was rejected.",
+  }
+}
 
 export type StickyNoteTimer = {
   schedule(callback: () => void, delayMs: number): unknown

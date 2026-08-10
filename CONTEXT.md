@@ -16,6 +16,10 @@ _Avoid_: Workspace, wall, collection
 A board contribution consisting of bounded multiline Unicode plain text, a decorative color, authorship, and a position.
 _Avoid_: Card, item, document
 
+**User-perceived Unicode character**:
+One Unicode extended grapheme cluster segmented by `Intl.Segmenter("und", { granularity: "grapheme" })`; the shared contracts fail closed when that runtime is unavailable.
+_Avoid_: Code point, UTF-16 unit
+
 **Color**:
 A member-selected decorative property shared by every viewer of a sticky note; it carries no service-defined meaning.
 _Avoid_: Label, category, local theme

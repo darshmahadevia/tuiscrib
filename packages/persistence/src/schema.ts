@@ -12,7 +12,6 @@ import {
 } from "drizzle-orm/pg-core"
 
 import {
-  MAX_STICKY_NOTE_CHARACTERS,
   MAX_STICKY_NOTES,
   stickyNoteColorSchema,
 } from "@tuiscrib/contracts"
@@ -165,7 +164,9 @@ export const stickyNotes = pgTable(
     ),
     check(
       "sticky_notes_text_length_check",
-      sql`char_length(${table.text}) > 0 AND char_length(${table.text}) <= ${sql.raw(String(MAX_STICKY_NOTE_CHARACTERS))}`,
+      // PostgreSQL char_length counts code points, not user-perceived grapheme clusters.
+      // The persistence boundary revalidates the shared contract before its transaction.
+      sql`char_length(${table.text}) > 0`,
     ),
     check(
       "sticky_notes_text_version_check",

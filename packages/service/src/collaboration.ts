@@ -6,8 +6,10 @@ import {
   boardIdentifierSchema,
   boardOpenReadyResponseSchema,
   boardSnapshotSchema,
+  STICKY_NOTE_TEXT_LIMIT_ERROR,
   stickyNoteCreationClaimGrantedSchema,
   stickyNoteCreatedSchema,
+  stickyNoteTextSchema,
   serviceErrorSchema,
   type BoardCommand,
   type BoardSnapshot,
@@ -87,6 +89,7 @@ type StickyNoteCreationClaim = {
   position: { x: number; y: number }
   color: "amber" | "blue" | "cyan" | "green" | "magenta" | "red" | "violet" | "yellow"
   status: "creating" | "publishing" | "editing"
+  releaseRequested?: boolean
   stickyNoteId?: string
 }
 
@@ -232,8 +235,7 @@ export function createBoardCollaboration(
 
     for (const claim of creationClaimsById.values()) {
       if (claim.connectionId === connectionId) {
-        creationClaimsById.delete(claim.claimId)
-        creationClaimIdByKey.delete(creationClaimKey(claim.boardId, claim.provisionalId))
+        removeCreationClaim(claim)
       }
     }
 
@@ -284,6 +286,10 @@ export function createBoardCollaboration(
 
     const parsed = boardCommandSchema.safeParse(payload)
     if (!parsed.success) {
+      if (isOverLimitStickyNotePublication(payload)) {
+        sendCommandError(socket, "sticky_note_text_limit", STICKY_NOTE_TEXT_LIMIT_ERROR)
+        return
+      }
       sendCommandError(socket, "invalid_command", "The Board command was invalid.")
       return
     }
@@ -388,7 +394,13 @@ export function createBoardCollaboration(
         now: clock(),
       })
       if (result.kind !== "created") {
-        claim.status = "creating"
+        if (claim.releaseRequested) {
+          removeCreationClaim(claim)
+          setActivity(socket, "viewing")
+          broadcastPresenceForBoard(socket.data.boardId)
+        } else {
+          claim.status = "creating"
+        }
         sendPersistenceError(socket, result)
         return
       }
@@ -399,20 +411,31 @@ export function createBoardCollaboration(
         provisionalId: claim.provisionalId,
         stickyNote: result.stickyNote,
       })
-      claim.status = "editing"
-      claim.stickyNoteId = result.stickyNote.id
+      const releaseRequested = claim.releaseRequested === true
+      if (releaseRequested) {
+        removeCreationClaim(claim)
+      } else {
+        claim.status = "editing"
+        claim.stickyNoteId = result.stickyNote.id
+      }
 
       const state = presenceByBoard.get(socket.data.boardId)
       if (!state) {
         return
       }
-      setActivity(socket, "editing")
+      setActivity(socket, releaseRequested ? "viewing" : "editing")
       applyCreatedNote(state, result.stickyNote, result.revision)
       broadcastStickyNoteCreated(state, event)
       broadcastSnapshot(state)
     } catch (error) {
       if (claim.status === "publishing") {
-        claim.status = "creating"
+        if (claim.releaseRequested) {
+          removeCreationClaim(claim)
+          setActivity(socket, "viewing")
+          broadcastPresenceForBoard(socket.data.boardId)
+        } else {
+          claim.status = "creating"
+        }
       }
       throw error
     }
@@ -438,13 +461,16 @@ export function createBoardCollaboration(
       return
     }
 
-    creationClaimsById.delete(claim.claimId)
-    creationClaimIdByKey.delete(creationClaimKey(claim.boardId, claim.provisionalId))
-    setActivity(socket, "viewing")
-    const state = presenceByBoard.get(socket.data.boardId)
-    if (state) {
-      broadcastSnapshot(state)
+    if (claim.status === "publishing") {
+      claim.releaseRequested = true
+      setActivity(socket, "viewing")
+      broadcastPresenceForBoard(socket.data.boardId)
+      return
     }
+
+    removeCreationClaim(claim)
+    setActivity(socket, "viewing")
+    broadcastPresenceForBoard(socket.data.boardId)
   }
 
   function setActivity(
@@ -457,6 +483,23 @@ export function createBoardCollaboration(
       return
     }
     member.activityByConnection.set(socket.data.connectionId, activity)
+  }
+
+  function removeCreationClaim(claim: StickyNoteCreationClaim): void {
+    if (creationClaimsById.get(claim.claimId) === claim) {
+      creationClaimsById.delete(claim.claimId)
+    }
+    const key = creationClaimKey(claim.boardId, claim.provisionalId)
+    if (creationClaimIdByKey.get(key) === claim.claimId) {
+      creationClaimIdByKey.delete(key)
+    }
+  }
+
+  function broadcastPresenceForBoard(boardId: string): void {
+    const state = presenceByBoard.get(boardId)
+    if (state) {
+      broadcastSnapshot(state)
+    }
   }
 
   function applyCreatedNote(
@@ -523,7 +566,7 @@ export function createBoardCollaboration(
 
   function sendCommandError(
     socket: BoardWebSocket,
-    code: "invalid_command" | "creation_claim_unavailable" | "invalid_creation_claim" | "empty_sticky_note" | "sticky_note_capacity" | "sticky_note_rejected" | "revision_conflict",
+    code: "invalid_command" | "creation_claim_unavailable" | "invalid_creation_claim" | "empty_sticky_note" | "sticky_note_text_limit" | "sticky_note_capacity" | "sticky_note_rejected" | "revision_conflict",
     error: string,
   ): void {
     socket.send(JSON.stringify(boardCommandErrorSchema.parse({
@@ -534,6 +577,21 @@ export function createBoardCollaboration(
   }
 
   return collaboration
+}
+
+function isOverLimitStickyNotePublication(payload: unknown): boolean {
+  if (typeof payload !== "object" || payload === null) {
+    return false
+  }
+  const candidate = payload as { type?: unknown; text?: unknown }
+  if (candidate.type !== "publish_sticky_note" || typeof candidate.text !== "string") {
+    return false
+  }
+
+  const parsed = stickyNoteTextSchema.safeParse(candidate.text)
+  return !parsed.success && parsed.error.issues.some(
+    (issue) => issue.message === STICKY_NOTE_TEXT_LIMIT_ERROR,
+  )
 }
 
 function activityForMember(member: {

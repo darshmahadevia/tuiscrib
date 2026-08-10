@@ -5,15 +5,22 @@ const MIN_PASSWORD_CHARACTERS = 8
 const MAX_PASSWORD_CHARACTERS = 128
 const TERMINAL_SESSION_CREDENTIAL_PATTERN = /^[A-Za-z0-9_-]{43}$/
 
-let graphemeSegmenter: Intl.Segmenter | undefined
+export const USER_PERCEIVED_CHARACTER_SEGMENTATION_UNAVAILABLE =
+  "User-perceived Unicode character segmentation is unavailable in this runtime."
 
+// The fixed "und" locale keeps the shared grapheme strategy independent of a user's locale.
+// Do not fall back to code points or UTF-16 units: every caller must fail closed together.
 function getGraphemeSegmenter(): Intl.Segmenter | undefined {
-  if (typeof Intl.Segmenter === "undefined") {
+  const intl = globalThis.Intl
+  if (!intl || typeof intl.Segmenter !== "function") {
     return undefined
   }
 
-  graphemeSegmenter ??= new Intl.Segmenter(undefined, { granularity: "grapheme" })
-  return graphemeSegmenter
+  try {
+    return new intl.Segmenter("und", { granularity: "grapheme" })
+  } catch {
+    return undefined
+  }
 }
 
 export function countUserPerceivedCharacters(value: string): number {
@@ -22,9 +29,15 @@ export function countUserPerceivedCharacters(value: string): number {
 
 export function splitUserPerceivedCharacters(value: string): string[] {
   const segmenter = getGraphemeSegmenter()
-  return segmenter
-    ? Array.from(segmenter.segment(value), (segment) => segment.segment)
-    : Array.from(value)
+  if (!segmenter) {
+    throw new Error(USER_PERCEIVED_CHARACTER_SEGMENTATION_UNAVAILABLE)
+  }
+
+  try {
+    return Array.from(segmenter.segment(value), (segment) => segment.segment)
+  } catch {
+    throw new Error(USER_PERCEIVED_CHARACTER_SEGMENTATION_UNAVAILABLE)
+  }
 }
 
 export const usernameSchema = z.string().regex(
@@ -33,7 +46,16 @@ export const usernameSchema = z.string().regex(
 )
 
 export const registrationPasswordSchema = z.string().superRefine((value, context) => {
-  const characterCount = countUserPerceivedCharacters(value)
+  let characterCount: number
+  try {
+    characterCount = countUserPerceivedCharacters(value)
+  } catch {
+    context.addIssue({
+      code: "custom",
+      message: USER_PERCEIVED_CHARACTER_SEGMENTATION_UNAVAILABLE,
+    })
+    return
+  }
   if (characterCount < MIN_PASSWORD_CHARACTERS || characterCount > MAX_PASSWORD_CHARACTERS) {
     context.addIssue({
       code: "custom",

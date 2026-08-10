@@ -1,0 +1,2 @@
+ALTER TABLE "sticky_notes" DROP CONSTRAINT "sticky_notes_text_length_check";--> statement-breakpoint
+ALTER TABLE "sticky_notes" ADD CONSTRAINT "sticky_notes_text_length_check" CHECK (char_length("sticky_notes"."text") > 0);

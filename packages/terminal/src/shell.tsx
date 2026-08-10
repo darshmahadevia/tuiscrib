@@ -1,12 +1,12 @@
-import { flushSync, useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react"
-import type { InputRenderable, TerminalCapabilities, TextareaRenderable } from "@opentui/core"
+import { decodePasteBytes, type InputRenderable, type TerminalCapabilities, type TextareaRenderable } from "@opentui/core"
+import { flushSync, useKeyboard, usePaste, useRenderer, useTerminalDimensions } from "@opentui/react"
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react"
 
 import {
   countUserPerceivedCharacters,
   DEFAULT_STICKY_NOTE_COLOR,
-  MAX_STICKY_NOTE_CHARACTERS,
   splitUserPerceivedCharacters,
+  USER_PERCEIVED_CHARACTER_SEGMENTATION_UNAVAILABLE,
   type StickyNote,
   type StickyNoteColor,
   type StickyNotePosition,
@@ -27,6 +27,7 @@ import {
 } from "./credentials.ts"
 import {
   createStickyNoteDebouncer,
+  validateStickyNoteEditorText,
   type StickyNoteDebouncer,
   type StickyNoteTimer,
 } from "./sticky-note-editor.ts"
@@ -588,15 +589,16 @@ export function TerminalShell({
     flushSync(() => setNotice({ kind: "error", message: commandError.error }))
   }
 
-  const handleProvisionalStickyNoteTextChange = (text: string) => {
-    if (countUserPerceivedCharacters(text) > MAX_STICKY_NOTE_CHARACTERS) {
+  const handleProvisionalStickyNoteTextChange = (text: string): boolean => {
+    const validation = validateStickyNoteEditorText(text)
+    if (!validation.accepted) {
       flushSync(() => {
         setNotice({
           kind: "error",
-          message: `Sticky Note text is limited to ${MAX_STICKY_NOTE_CHARACTERS} Unicode characters.`,
+          message: validation.error,
         })
       })
-      return
+      return false
     }
     updateProvisionalStickyNote((current) => current ? { ...current, text } : current)
     if (text.length === 0) {
@@ -604,6 +606,7 @@ export function TerminalShell({
     } else {
       stickyNoteDebouncerRef.current?.schedule(text)
     }
+    return true
   }
 
   const appendProvisionalStickyNoteText = (addition: string) => {
@@ -753,7 +756,7 @@ export function TerminalShell({
           flushSync(() => {
             setBoardSnapshot(snapshot)
             setBoardOpenPending(false)
-            setNotice(null)
+            setNotice((current) => current?.kind === "error" ? current : null)
           })
         },
         onStickyNoteCreationClaimGranted: handleStickyNoteCreationClaimGranted,
@@ -1354,6 +1357,8 @@ export function TerminalShell({
         }
       }
       if (modeRef.current === "edit" && key.name === "escape") {
+        key.preventDefault()
+        key.stopPropagation()
         if (provisionalStickyNoteRef.current) {
           releaseProvisionalStickyNote()
         } else {
@@ -1364,7 +1369,16 @@ export function TerminalShell({
       if (modeRef.current === "edit" && provisionalStickyNoteRef.current) {
         if (key.name === "backspace") {
           key.preventDefault()
-          const graphemes = splitUserPerceivedCharacters(provisionalStickyNoteRef.current.text)
+          let graphemes: string[]
+          try {
+            graphemes = splitUserPerceivedCharacters(provisionalStickyNoteRef.current.text)
+          } catch {
+            flushSync(() => setNotice({
+              kind: "error",
+              message: USER_PERCEIVED_CHARACTER_SEGMENTATION_UNAVAILABLE,
+            }))
+            return
+          }
           handleProvisionalStickyNoteTextChange(graphemes.slice(0, -1).join(""))
           return
         }
@@ -1458,6 +1472,23 @@ export function TerminalShell({
     if (key.name === "q") {
       renderer.destroy()
     }
+  })
+
+  usePaste((event) => {
+    if (
+      sessionStateRef.current === "checking" ||
+      signOutPendingRef.current ||
+      boardActionPendingRef.current ||
+      viewRef.current !== "canvas" ||
+      modeRef.current !== "edit" ||
+      !provisionalStickyNoteRef.current
+    ) {
+      return
+    }
+
+    event.preventDefault()
+    event.stopPropagation()
+    appendProvisionalStickyNoteText(decodePasteBytes(event.bytes))
   })
 
   if (width < MIN_TERMINAL_WIDTH || height < MIN_TERMINAL_HEIGHT) {
@@ -1790,7 +1821,7 @@ function CanvasSurface({
   status?: string
   cursor: StickyNotePosition
   provisionalStickyNote: ProvisionalStickyNote | null
-  onProvisionalTextChange(text: string): void
+  onProvisionalTextChange(text: string): boolean
 }) {
   return (
     <box
@@ -1834,6 +1865,7 @@ function CanvasSurface({
               </text>
             ))}
             <text fg={colors.accent}>Sticky Notes: {snapshot.stickyNotes?.length ?? 0}</text>
+            {error && snapshot ? <text fg={colors.error}>Error: {error}</text> : null}
             {snapshot.stickyNotes?.map((note) => (
               <StickyNoteCard key={note.id} note={note} />
             ))}
@@ -1859,7 +1891,9 @@ function CanvasSurface({
                 <text fg={colors.muted}>
                   Position ({provisionalStickyNote.position.x}, {provisionalStickyNote.position.y}) · Color {provisionalStickyNote.color}
                 </text>
-                <text fg={colors.muted}>Draft characters: {provisionalStickyNote.text.length}</text>
+                <text fg={colors.muted}>
+                  Draft characters: {userPerceivedCharacterCountLabel(provisionalStickyNote.text)}
+                </text>
                 <StickyNoteEditor
                   draft={provisionalStickyNote}
                   mode={mode}
@@ -1889,10 +1923,17 @@ function CanvasSurface({
             <text fg={colors.muted}>Escape leave Edit mode · n creates a durable Sticky Note</text>
           </>
         )}
-        {error && snapshot ? <text fg={colors.error}>Error: {error}</text> : null}
       </box>
     </box>
   )
+}
+
+function userPerceivedCharacterCountLabel(value: string): string {
+  try {
+    return String(countUserPerceivedCharacters(value))
+  } catch {
+    return "unavailable"
+  }
 }
 
 function StickyNoteEditor({
@@ -1902,7 +1943,7 @@ function StickyNoteEditor({
 }: {
   draft: ProvisionalStickyNote
   mode: ShellMode
-  onTextChange(text: string): void
+  onTextChange(text: string): boolean
 }) {
   const textareaRef = useRef<TextareaRenderable | null>(null)
   const ignoreShortcutInputRef = useRef(true)
@@ -1949,9 +1990,16 @@ function StickyNoteEditor({
       return
     }
     ignoreShortcutInputRef.current = false
+    const previousText = textRef.current
+    if (!onTextChange(nextText)) {
+      syncingTextRef.current = true
+      textareaRef.current?.setText(previousText)
+      syncingTextRef.current = false
+      setText(previousText)
+      return
+    }
     textRef.current = nextText
     setText(nextText)
-    onTextChange(nextText)
   }
 
   return (
@@ -2041,6 +2089,7 @@ function ShellForm({
 }) {
   const [focusedIndex, setFocusedIndex] = useState(0)
   const [values, setValues] = useState<Record<string, string>>({})
+  const [inputError, setInputError] = useState<string | null>(null)
   const focusedIndexRef = useRef(focusedIndex)
   const valuesRef = useRef(values)
   const inputRefs = useRef<Array<InputRenderable | null>>([])
@@ -2133,14 +2182,22 @@ function ShellForm({
 
                   const previousRawValue = secretValuesRef.current[field.id] ?? ""
                   const previousDisplayedValue = displayedSecretValuesRef.current[field.id] ?? ""
-                  const nextRawValue = updateMaskedInputValue(
-                    previousRawValue,
-                    previousDisplayedValue,
-                    value,
-                  )
-                  const nextDisplayedValue = "•".repeat(
-                    countUserPerceivedCharacters(nextRawValue),
-                  )
+                  let nextRawValue: string
+                  let nextDisplayedValue: string
+                  try {
+                    nextRawValue = updateMaskedInputValue(
+                      previousRawValue,
+                      previousDisplayedValue,
+                      value,
+                    )
+                    nextDisplayedValue = "•".repeat(
+                      countUserPerceivedCharacters(nextRawValue),
+                    )
+                  } catch {
+                    setInputError(USER_PERCEIVED_CHARACTER_SEGMENTATION_UNAVAILABLE)
+                    return
+                  }
+                  setInputError(null)
                   secretValuesRef.current[field.id] = nextRawValue
                   displayedSecretValuesRef.current[field.id] = nextDisplayedValue
                   const inputRenderable = inputRefs.current[index]
@@ -2155,6 +2212,7 @@ function ShellForm({
                   return
                 }
 
+                setInputError(null)
                 const nextValues = { ...valuesRef.current, [field.id]: value }
                 valuesRef.current = nextValues
                 setValues(nextValues)
@@ -2164,6 +2222,7 @@ function ShellForm({
           </box>
         ))}
         {pending ? <text fg={colors.muted}>Contacting the Tuiscrib Service…</text> : null}
+        {inputError ? <text fg={colors.error}>Error: {inputError}</text> : null}
         {notice?.kind === "error" ? <text fg={colors.error}>Error: {notice.message}</text> : null}
         <text fg={colors.muted}>Tab next field · Enter submit · Escape cancel</text>
       </box>

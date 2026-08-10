@@ -165,46 +165,23 @@ export class AcceptanceHarness {
   private constructor(
     readonly clock: ManualClock,
     private readonly persistence: Persistence,
-    private readonly server: Bun.Server<BoardWebSocketData>,
     private readonly database: DisposablePostgres,
-  ) {}
+  ) {
+    this.server = this.createServer()
+  }
+
+  private server: Bun.Server<BoardWebSocketData>
 
   static async start(): Promise<AcceptanceHarness> {
     const database = await startDisposablePostgres()
     const persistence = createPersistence({ databaseUrl: database.databaseUrl })
-    let server: Bun.Server<BoardWebSocketData> | undefined
 
     try {
       await persistence.migrate()
       const clock = new ManualClock()
       clock.setTime(Date.parse("2026-08-10T00:00:00.000Z"))
-      const collaboration = createBoardCollaboration({
-        persistence,
-        clock: () => new Date(clock.now()),
-      })
-      const app = createServiceApp({
-        persistence,
-        collaboration,
-        clock: () => new Date(clock.now()),
-        authRateLimit: { maxAttempts: 100 },
-        boardRateLimit: { maxAttempts: 1_000 },
-      })
-      server = Bun.serve({
-        hostname: "127.0.0.1",
-        port: 0,
-        async fetch(request, bunServer) {
-          const result = await collaboration.handleUpgrade(request, bunServer)
-          if (result !== null) {
-            return result
-          }
-          return app.fetch(request)
-        },
-        websocket: collaboration.websocket,
-      })
-
-      return new AcceptanceHarness(clock, persistence, server, database)
+      return new AcceptanceHarness(clock, persistence, database)
     } catch (error) {
-      server?.stop(true)
       await persistence.close().catch(() => undefined)
       await database.stop().catch(() => undefined)
       throw error
@@ -213,6 +190,11 @@ export class AcceptanceHarness {
 
   get baseUrl(): string {
     return `http://127.0.0.1:${this.server.port}`
+  }
+
+  async restartService(): Promise<void> {
+    await this.server.stop(true)
+    this.server = this.createServer()
   }
 
   async addClient(label: string): Promise<TerminalClient> {
@@ -315,6 +297,32 @@ export class AcceptanceHarness {
     if (cleanupError) {
       throw cleanupError
     }
+  }
+
+  private createServer(): Bun.Server<BoardWebSocketData> {
+    const collaboration = createBoardCollaboration({
+      persistence: this.persistence,
+      clock: () => new Date(this.clock.now()),
+    })
+    const app = createServiceApp({
+      persistence: this.persistence,
+      collaboration,
+      clock: () => new Date(this.clock.now()),
+      authRateLimit: { maxAttempts: 100 },
+      boardRateLimit: { maxAttempts: 1_000 },
+    })
+    return Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request, bunServer) {
+        const result = await collaboration.handleUpgrade(request, bunServer)
+        if (result !== null) {
+          return result
+        }
+        return app.fetch(request)
+      },
+      websocket: collaboration.websocket,
+    })
   }
 }
 

@@ -1,8 +1,11 @@
 import { expect, test } from "bun:test"
 
+import { MAX_STICKY_NOTE_CHARACTERS } from "@tuiscrib/contracts"
+
 import {
   STICKY_NOTE_TEXT_DEBOUNCE_MS,
   createStickyNoteDebouncer,
+  validateStickyNoteEditorText,
 } from "./sticky-note-editor.ts"
 
 test("publishes only the latest full-text snapshot after the idle debounce", () => {
@@ -53,4 +56,16 @@ test("flushes one pending full-text snapshot immediately and cancels its timer",
 
   expect(published).toEqual(["pending"])
   expect(cancelled).toBe(1)
+})
+
+test("rejects over-limit editor text with a user-perceived Unicode error", () => {
+  expect(validateStickyNoteEditorText("a".repeat(MAX_STICKY_NOTE_CHARACTERS))).toEqual({
+    accepted: true,
+  })
+
+  const rejected = validateStickyNoteEditorText("a".repeat(MAX_STICKY_NOTE_CHARACTERS + 1))
+  expect(rejected.accepted).toBe(false)
+  if (!rejected.accepted) {
+    expect(rejected.error).toContain("2,000 user-perceived Unicode characters")
+  }
 })
