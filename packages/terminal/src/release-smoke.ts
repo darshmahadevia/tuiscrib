@@ -45,7 +45,13 @@ export async function runTerminalSmokeTest(
   try {
     const environment = createSmokeEnvironment(smokeDirectory, emptyPath, options.environment)
     const command = process.platform === "win32"
-      ? [await resolveWindowsWinptyPath(), resolve(options.binaryPath)]
+      ? [
+        await resolveWindowsWinptyPath(),
+        "-Xallow-non-tty",
+        "-Xcolor",
+        "--",
+        resolve(options.binaryPath),
+      ]
       : [resolve(options.binaryPath)]
     const result = await runPipedSmoke(
       command,
