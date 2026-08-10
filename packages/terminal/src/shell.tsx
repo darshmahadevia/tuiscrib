@@ -36,7 +36,13 @@ type ShellOverlay = "none" | "help"
 type ShellView = "home" | "boards" | "board-actions" | "canvas" | "form" | "confirmation"
 type ConfirmationAction = "placeholder" | "leave"
 
-type FormKind = "sign-in" | "register" | "create-board" | "join-board" | "filter-boards"
+type FormKind =
+  | "sign-in"
+  | "register"
+  | "create-board"
+  | "join-board"
+  | "rename-board"
+  | "filter-boards"
 
 type FormField = {
   id: string
@@ -56,6 +62,11 @@ type FormDefinition = {
 type ShellNotice = {
   kind: "status" | "error"
   message: string
+}
+
+type BoardCodeNotice = {
+  kind: "initial" | "rotated"
+  code: string
 }
 
 type SessionState = "checking" | "signed-out" | "signed-in"
@@ -83,6 +94,8 @@ const boardMenu: ShellMenuItem[] = [
 const boardActionsMenu: ShellMenuItem[] = [
   { key: "d", label: "delete Board", description: "Permanently remove this Board" },
   { key: "l", label: "leave Board", description: "Leave this Board as a Member" },
+  { key: "r", label: "rename Board", description: "Rename this Board as the Owner" },
+  { key: "t", label: "rotate Join Code", description: "Replace this Board's Join Code as the Owner" },
 ]
 
 const formDefinitions: Record<FormKind, FormDefinition> = {
@@ -131,6 +144,11 @@ const formDefinitions: Record<FormKind, FormDefinition> = {
       maxLength: 32,
     }],
   },
+  "rename-board": {
+    title: "Rename Board",
+    description: "Set a new human-readable label for the selected Board.",
+    fields: [{ id: "name", label: "Board name", placeholder: "new name" }],
+  },
   "filter-boards": {
     title: "Filter Boards",
     description: "Show Memberships whose Board name contains this text.",
@@ -178,7 +196,7 @@ export function TerminalShell({
   const [boards, setBoards] = useState<BoardSummary[]>([])
   const [boardFilter, setBoardFilter] = useState("")
   const [boardsPending, setBoardsPending] = useState(false)
-  const [boardCodeNotice, setBoardCodeNotice] = useState<string | null>(null)
+  const [boardCodeNotice, setBoardCodeNotice] = useState<BoardCodeNotice | null>(null)
   const [formPending, setFormPending] = useState(false)
   const [sessionState, setSessionState] = useState<SessionState>(
     authClient ? "checking" : "signed-out",
@@ -462,6 +480,50 @@ export function TerminalShell({
     }
   }
 
+  const rotateSelectedJoinCode = async () => {
+    if (!boardClient || boardActionPendingRef.current) {
+      return
+    }
+
+    const board = boards[selectedBoardIndexRef.current]
+    if (!board) {
+      flushSync(() => {
+        setNotice({ kind: "error", message: "Select a Board before rotating its Join Code." })
+      })
+      return
+    }
+
+    flushSync(() => setBoardActionPending(true))
+    try {
+      const credential = await credentialStore.load()
+      if (!credential) {
+        throw new Error("No active Terminal Session. Sign in to continue.")
+      }
+      const response = await boardClient.rotateJoinCode(credential, board.id)
+      flushSync(() => {
+        setBoards((currentBoards) =>
+          currentBoards.map((currentBoard) =>
+            currentBoard.id === response.board.id ? response.board : currentBoard,
+          ),
+        )
+        setSelectedIndex(0)
+        setView("boards")
+        setBoardCodeNotice({ kind: "rotated", code: response.joinCode })
+        setNotice({
+          kind: "status",
+          message: `Join Code rotated for Board "${response.board.name}".`,
+        })
+        setBoardActionPending(false)
+      })
+      void loadBoards(boardFilterRef.current, false)
+    } catch (error) {
+      flushSync(() => {
+        setNotice({ kind: "error", message: formatBoardError(error) })
+        setBoardActionPending(false)
+      })
+    }
+  }
+
   const moveBoardSelection = (direction: -1 | 1) => {
     if (boards.length === 0) {
       return
@@ -536,6 +598,50 @@ export function TerminalShell({
       return
     }
 
+    if (formKind === "rename-board" && boardClient) {
+      const board = boards[selectedBoardIndexRef.current]
+      if (!board) {
+        flushSync(() => {
+          setNotice({ kind: "error", message: "Select a Board before renaming it." })
+        })
+        return
+      }
+
+      flushSync(() => setFormPending(true))
+      try {
+        const credential = await credentialStore.load()
+        if (!credential) {
+          throw new Error("No active Terminal Session. Sign in to continue.")
+        }
+        const response = await boardClient.renameBoard(credential, board.id, {
+          name: values.name,
+        })
+        flushSync(() => {
+          setBoards((currentBoards) =>
+            currentBoards.map((currentBoard) =>
+              currentBoard.id === response.board.id ? response.board : currentBoard,
+            ),
+          )
+          setView(formReturnView)
+          setFormKind(null)
+          setFormInitialKey(null)
+          setSelectedIndex(0)
+          setNotice({
+            kind: "status",
+            message: `Board renamed to "${response.board.name}".`,
+          })
+          setFormPending(false)
+        })
+        void loadBoards(boardFilterRef.current, false)
+      } catch (error) {
+        flushSync(() => {
+          setNotice({ kind: "error", message: formatBoardError(error) })
+          setFormPending(false)
+        })
+      }
+      return
+    }
+
     if (formKind === "create-board" && boardClient) {
       flushSync(() => setFormPending(true))
       try {
@@ -555,7 +661,7 @@ export function TerminalShell({
             response.board,
             ...currentBoards.filter((currentBoard) => currentBoard.id !== response.board.id),
           ])
-          setBoardCodeNotice(response.joinCode)
+          setBoardCodeNotice({ kind: "initial", code: response.joinCode })
           setNotice({
             kind: "status",
             message: `Board "${response.board.name}" created.`,
@@ -819,6 +925,14 @@ export function TerminalShell({
         moveSelection(1)
         return
       }
+      if (key.name === "r" || (key.name === "return" && selectedIndexRef.current === 2)) {
+        openForm("rename-board", "board-actions", key.name)
+        return
+      }
+      if (key.name === "t" || (key.name === "return" && selectedIndexRef.current === 3)) {
+        void rotateSelectedJoinCode()
+        return
+      }
       if (key.name === "d" || (key.name === "return" && selectedIndexRef.current === 0)) {
         openConfirmation("board-actions")
         return
@@ -1042,7 +1156,7 @@ function BoardList({
   filter: string
   pending: boolean
   notice: ShellNotice | null
-  joinCode: string | null
+  joinCode: BoardCodeNotice | null
   hasBoardClient: boolean
   sessionState: SessionState
 }) {
@@ -1086,7 +1200,9 @@ function BoardList({
           </text>
         ))}
         {joinCode ? (
-          <text fg={colors.success}>Initial Join Code (shown once): {joinCode}</text>
+          <text fg={colors.success}>
+            {joinCode.kind === "initial" ? "Initial" : "Rotated"} Join Code (shown once): {joinCode.code}
+          </text>
         ) : null}
         {boardMenu.map((item, index) => (
           <text key={item.key} fg={index === selectedIndex ? colors.accent : colors.text}>
@@ -1517,6 +1633,7 @@ function HelpOverlay() {
         <text fg={colors.text}>Edit mode     · type into the selected Sticky Note.</text>
         <text fg={colors.muted}>b boards · s sign in · r register</text>
         <text fg={colors.muted}>Boards: o open · c create · f filter · j join · a actions</text>
+        <text fg={colors.muted}>Owner actions: r rename · t rotate Join Code</text>
         <text fg={colors.muted}>Forms: Tab next field · Enter submit · Escape cancel</text>
         <text fg={colors.muted}>Confirmations: y confirm · n cancel</text>
         <text fg={colors.muted}>↑↓ / jk move · Enter choose · Escape back</text>

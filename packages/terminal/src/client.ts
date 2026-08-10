@@ -3,6 +3,8 @@ import {
   createBoardResponseSchema,
   joinBoardResponseSchema,
   leaveBoardResponseSchema,
+  renameBoardResponseSchema,
+  rotateJoinCodeResponseSchema,
   authResponseSchema,
   healthResponseSchema,
   signOutResponseSchema,
@@ -15,6 +17,9 @@ import {
   type JoinBoardRequest,
   type JoinBoardResponse,
   type LeaveBoardResponse,
+  type RenameBoardRequest,
+  type RenameBoardResponse,
+  type RotateJoinCodeResponse,
   type RegisterRequest,
   type SignOutResponse,
   type ServiceError,
@@ -36,6 +41,12 @@ export type BoardClient = {
   createBoard(credential: string, input: CreateBoardRequest): Promise<CreateBoardResponse>
   joinBoard(credential: string, input: JoinBoardRequest): Promise<JoinBoardResponse>
   leaveBoard(credential: string, boardId: string): Promise<LeaveBoardResponse>
+  renameBoard(
+    credential: string,
+    boardId: string,
+    input: RenameBoardRequest,
+  ): Promise<RenameBoardResponse>
+  rotateJoinCode(credential: string, boardId: string): Promise<RotateJoinCodeResponse>
   listBoards(credential: string, filter?: string): Promise<BoardListResponse>
 }
 
@@ -166,6 +177,24 @@ export function createBoardClient(
         new URL(`/boards/${encodeURIComponent(boardId)}/leave`, baseUrl),
       )
     },
+    renameBoard(credential, boardId, input) {
+      return requestBoard(
+        "POST",
+        credential,
+        input,
+        renameBoardResponseSchema,
+        new URL(`/boards/${encodeURIComponent(boardId)}/rename`, baseUrl),
+      )
+    },
+    rotateJoinCode(credential, boardId) {
+      return requestBoard(
+        "POST",
+        credential,
+        undefined,
+        rotateJoinCodeResponseSchema,
+        new URL(`/boards/${encodeURIComponent(boardId)}/rotate-join-code`, baseUrl),
+      )
+    },
     listBoards(credential, filter = "") {
       const url = new URL("/boards", baseUrl)
       if (filter.length > 0) {
@@ -178,7 +207,7 @@ export function createBoardClient(
   async function requestBoard<T>(
     method: "GET" | "POST",
     credential: string,
-    input: CreateBoardRequest | JoinBoardRequest | undefined,
+    input: CreateBoardRequest | JoinBoardRequest | RenameBoardRequest | undefined,
     schema: { parse(value: unknown): T },
     url = new URL("/boards", baseUrl),
   ): Promise<T> {

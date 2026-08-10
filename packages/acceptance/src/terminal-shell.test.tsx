@@ -5,6 +5,7 @@ import { act } from "react"
 
 import {
   TerminalShell,
+  ServiceRequestError,
   type AuthClient,
   type BoardClient,
   type CredentialStore,
@@ -95,6 +96,12 @@ test("redeems a Join Code from the keyboard form and renders the new Membership"
   const boardClient: BoardClient = {
     createBoard: async () => {
       throw new Error("create Board was not expected")
+    },
+    renameBoard: async () => {
+      throw new Error("rename Board was not expected")
+    },
+    rotateJoinCode: async () => {
+      throw new Error("rotate Join Code was not expected")
     },
     listBoards: async () => ({ boards: joinedInput ? [joinedBoard] : [] }),
     joinBoard: async (nextCredential, input) => {
@@ -194,6 +201,12 @@ test("confirms leaving a Board from Board actions and removes the Membership", a
   const boardClient: BoardClient = {
     createBoard: async () => {
       throw new Error("create Board was not expected")
+    },
+    renameBoard: async () => {
+      throw new Error("rename Board was not expected")
+    },
+    rotateJoinCode: async () => {
+      throw new Error("rotate Join Code was not expected")
     },
     listBoards: async () => ({ boards: left ? [] : [board] }),
     joinBoard: async () => {
@@ -295,6 +308,12 @@ test("clearly prevents the Owner from leaving a Board in Board actions", async (
     createBoard: async () => {
       throw new Error("create Board was not expected")
     },
+    renameBoard: async () => {
+      throw new Error("rename Board was not expected")
+    },
+    rotateJoinCode: async () => {
+      throw new Error("rotate Join Code was not expected")
+    },
     listBoards: async () => ({ boards: [board] }),
     joinBoard: async () => {
       throw new Error("join Board was not expected")
@@ -373,6 +392,245 @@ test("clearly prevents the Owner from leaving a Board in Board actions", async (
   const frame = await waitForFrame((value) => value.includes("The Owner cannot leave this Board."))
   expect(frame).toContain("Error: The Owner cannot leave this Board.")
   expect(leaveCalled).toBe(false)
+})
+
+test("renames a Board and rotates its Join Code from the rendered Owner actions", async () => {
+  const credential = "d".repeat(43)
+  const originalBoard = {
+    id: "Qx7u3nW8kM2pR5sT9vY4aB",
+    name: "Ideas",
+    role: "owner" as const,
+  }
+  const renamedBoard = { ...originalBoard, name: "Renamed Ideas" }
+  const rotatedJoinCode = "WXYZ-2345-6789-ABCD-EFGH-JKMN-PQ"
+  let boards = [originalBoard]
+  let renameInput: { credential: string; boardId: string; name: string } | undefined
+  let rotateInput: { credential: string; boardId: string } | undefined
+
+  const boardClient: BoardClient = {
+    createBoard: async () => {
+      throw new Error("create Board was not expected")
+    },
+    listBoards: async () => ({ boards }),
+    joinBoard: async () => {
+      throw new Error("join Board was not expected")
+    },
+    leaveBoard: async () => ({ status: "left" }),
+    renameBoard: async (nextCredential, boardId, input) => {
+      renameInput = { credential: nextCredential, boardId, name: input.name }
+      boards = [renamedBoard]
+      return { board: renamedBoard }
+    },
+    rotateJoinCode: async (nextCredential, boardId) => {
+      rotateInput = { credential: nextCredential, boardId }
+      return { board: renamedBoard, joinCode: rotatedJoinCode }
+    },
+  }
+  const authClient: AuthClient = {
+    register: async () => {
+      throw new Error("register was not expected")
+    },
+    signIn: async () => {
+      throw new Error("sign-in was not expected")
+    },
+    restore: async () => ({ user: { username: "owner_slice_user" } }),
+    signOut: async () => ({ status: "signed_out" }),
+  }
+  const credentialStore: CredentialStore = {
+    filePath: "memory://governance-form/session",
+    load: async () => credential,
+    save: async () => undefined,
+    remove: async () => undefined,
+  }
+
+  await act(async () => {
+    activeSetup = await testRender(
+      <TerminalShell
+        label="owner"
+        authClient={authClient}
+        boardClient={boardClient}
+        credentialStore={credentialStore}
+      />,
+      { width: 80, height: 24, kittyKeyboard: true },
+    )
+    await activeSetup.renderOnce()
+  })
+
+  const waitForFrame = async (predicate: (frame: string) => boolean): Promise<string> => {
+    let matchedFrame: string | undefined
+    let lastFrame = ""
+    await act(async () => {
+      for (let attempt = 0; attempt < 300; attempt += 1) {
+        await Bun.sleep(5)
+        await activeSetup?.renderOnce()
+        lastFrame = activeSetup?.captureCharFrame() ?? ""
+        if (predicate(lastFrame)) {
+          matchedFrame = lastFrame
+          return
+        }
+      }
+    })
+    if (matchedFrame !== undefined) {
+      return matchedFrame
+    }
+    throw new Error(`Timed out waiting for rendered frame\n${lastFrame}`)
+  }
+
+  await waitForFrame((value) => value.includes("Terminal Session restored"))
+  await act(async () => {
+    activeSetup?.mockInput.pressKey("b")
+    await activeSetup?.renderOnce()
+  })
+  await waitForFrame((value) => value.includes("Ideas · Owner"))
+  await act(async () => {
+    activeSetup?.mockInput.pressKey("a")
+    await activeSetup?.renderOnce()
+    activeSetup?.mockInput.pressKey("r")
+    await activeSetup?.renderOnce()
+  })
+  await waitForFrame((value) => value.includes("Rename Board"))
+  await act(async () => {
+    await activeSetup?.mockInput.typeText("Renamed Ideas")
+    activeSetup?.mockInput.pressEnter()
+    await activeSetup?.renderOnce()
+  })
+
+  await waitForFrame((value) => value.includes("Renamed Ideas · Owner"))
+  expect(renameInput).toEqual({
+    credential,
+    boardId: originalBoard.id,
+    name: "Renamed Ideas",
+  })
+
+  await act(async () => {
+    activeSetup?.mockInput.pressKey("t")
+    await activeSetup?.renderOnce()
+  })
+  const frame = await waitForFrame((value) => value.includes("Rotated Join Code"))
+  expect(frame).toContain(rotatedJoinCode)
+  expect(frame).not.toContain("Initial Join Code")
+  expect(rotateInput).toEqual({ credential, boardId: originalBoard.id })
+
+  await act(async () => {
+    activeSetup?.mockInput.pressKey("a")
+    await activeSetup?.renderOnce()
+  })
+  await waitForFrame((value) => value.includes("Board actions"))
+  await act(async () => {
+    activeSetup?.mockInput.pressEscape()
+    await activeSetup?.renderOnce()
+  })
+  const clearedFrame = await waitForFrame(
+    (value) => value.includes("Board list") && !value.includes(rotatedJoinCode),
+  )
+  expect(clearedFrame).not.toContain(rotatedJoinCode)
+})
+
+test("renders Owner-only authorization errors for Member Board actions", async () => {
+  const credential = "e".repeat(43)
+  const board = {
+    id: "Qx7u3nW8kM2pR5sT9vY4aB",
+    name: "Ideas",
+    role: "member" as const,
+  }
+  const boardClient: BoardClient = {
+    createBoard: async () => {
+      throw new Error("create Board was not expected")
+    },
+    listBoards: async () => ({ boards: [board] }),
+    joinBoard: async () => {
+      throw new Error("join Board was not expected")
+    },
+    leaveBoard: async () => ({ status: "left" }),
+    renameBoard: async () => {
+      throw new ServiceRequestError(403, {
+        error: "Only the Owner may rename this Board.",
+        code: "owner_required",
+      })
+    },
+    rotateJoinCode: async () => {
+      throw new ServiceRequestError(403, {
+        error: "Only the Owner may rotate this Join Code.",
+        code: "owner_required",
+      })
+    },
+  }
+  const authClient: AuthClient = {
+    register: async () => {
+      throw new Error("register was not expected")
+    },
+    signIn: async () => {
+      throw new Error("sign-in was not expected")
+    },
+    restore: async () => ({ user: { username: "member_slice_user" } }),
+    signOut: async () => ({ status: "signed_out" }),
+  }
+  const credentialStore: CredentialStore = {
+    filePath: "memory://member-governance/session",
+    load: async () => credential,
+    save: async () => undefined,
+    remove: async () => undefined,
+  }
+
+  await act(async () => {
+    activeSetup = await testRender(
+      <TerminalShell
+        label="member"
+        authClient={authClient}
+        boardClient={boardClient}
+        credentialStore={credentialStore}
+      />,
+      { width: 80, height: 24, kittyKeyboard: true },
+    )
+    await activeSetup.renderOnce()
+  })
+
+  const waitForFrame = async (predicate: (frame: string) => boolean): Promise<string> => {
+    let matchedFrame: string | undefined
+    let lastFrame = ""
+    await act(async () => {
+      for (let attempt = 0; attempt < 300; attempt += 1) {
+        await Bun.sleep(5)
+        await activeSetup?.renderOnce()
+        lastFrame = activeSetup?.captureCharFrame() ?? ""
+        if (predicate(lastFrame)) {
+          matchedFrame = lastFrame
+          return
+        }
+      }
+    })
+    if (matchedFrame !== undefined) {
+      return matchedFrame
+    }
+    throw new Error(`Timed out waiting for rendered frame\n${lastFrame}`)
+  }
+
+  await waitForFrame((value) => value.includes("Terminal Session restored"))
+  await act(async () => {
+    activeSetup?.mockInput.pressKey("b")
+    await activeSetup?.renderOnce()
+    activeSetup?.mockInput.pressKey("a")
+    await activeSetup?.renderOnce()
+    activeSetup?.mockInput.pressKey("r")
+    await activeSetup?.renderOnce()
+  })
+  await waitForFrame((value) => value.includes("Rename Board"))
+  await act(async () => {
+    await activeSetup?.mockInput.typeText("Nope")
+    activeSetup?.mockInput.pressEnter()
+    await activeSetup?.renderOnce()
+  })
+  const renameFrame = await waitForFrame((value) => value.includes("Only the Owner may rename"))
+  expect(renameFrame).toContain("Error: Only the Owner may rename this Board.")
+
+  await act(async () => {
+    activeSetup?.mockInput.pressEscape()
+    await activeSetup?.renderOnce()
+    activeSetup?.mockInput.pressKey("t")
+    await activeSetup?.renderOnce()
+  })
+  const rotateFrame = await waitForFrame((value) => value.includes("Only the Owner may rotate"))
+  expect(rotateFrame).toContain("Error: Only the Owner may rotate this Join Code.")
 })
 
 test("uses the reusable Register form with visible validation and status", async () => {

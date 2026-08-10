@@ -119,6 +119,60 @@ export function createServiceApp(options: ServiceAppOptions) {
     }
   })
 
+  app.post("/boards/:boardId/rename", async (context) => {
+    if (!authentication || !boards) {
+      return context.json(serviceErrorSchema.parse({ error: "service unavailable" }), 503)
+    }
+
+    const authenticated = await requireBoardUser(authentication, context.req.raw)
+    if (authenticated.kind !== "success") {
+      return context.json(authenticated.error, authenticated.status)
+    }
+
+    let input: unknown
+    try {
+      input = await context.req.json()
+    } catch {
+      input = undefined
+    }
+
+    try {
+      const result = await boards.renameBoard(
+        authenticated.user,
+        context.req.param("boardId"),
+        input,
+      )
+      return result.kind === "success"
+        ? context.json(result.response, 200)
+        : context.json(result.error, result.status)
+    } catch {
+      return context.json(serviceErrorSchema.parse({ error: "service unavailable" }), 503)
+    }
+  })
+
+  app.post("/boards/:boardId/rotate-join-code", async (context) => {
+    if (!authentication || !boards) {
+      return context.json(serviceErrorSchema.parse({ error: "service unavailable" }), 503)
+    }
+
+    const authenticated = await requireBoardUser(authentication, context.req.raw)
+    if (authenticated.kind !== "success") {
+      return context.json(authenticated.error, authenticated.status)
+    }
+
+    try {
+      const result = await boards.rotateJoinCode(
+        authenticated.user,
+        context.req.param("boardId"),
+      )
+      return result.kind === "success"
+        ? context.json(result.response, 200)
+        : context.json(result.error, result.status)
+    } catch {
+      return context.json(serviceErrorSchema.parse({ error: "service unavailable" }), 503)
+    }
+  })
+
   app.post("/boards/:boardId/leave", async (context) => {
     if (!authentication || !boards) {
       return context.json(serviceErrorSchema.parse({ error: "service unavailable" }), 503)

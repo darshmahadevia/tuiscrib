@@ -282,6 +282,147 @@ describe("Tuiscrib Board administration", () => {
     expect(await listBoardsFor(memberCredential)).toEqual({ boards: [] })
   })
 
+  test("renames as Owner, preserves Memberships, and serializes concurrent Join Code rotations", async () => {
+    if (!harness) {
+      throw new Error("acceptance harness did not start")
+    }
+    const baseUrl = harness.baseUrl
+
+    const ownerCredential = await registerUser("governance_owner")
+    const existingMemberCredential = await registerUser("governance_member")
+    const firstJoin = await fetch(`${harness.baseUrl}/boards`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${ownerCredential}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ name: "Governance Slice" }),
+    })
+    expect(firstJoin.status).toBe(201)
+    const created = await firstJoin.json() as {
+      board: { id: string; name: string; role: "owner" }
+      joinCode: string
+    }
+
+    const joined = await fetch(`${harness.baseUrl}/boards/join`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${existingMemberCredential}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ joinCode: created.joinCode }),
+    })
+    expect(joined.status).toBe(201)
+
+    const memberRename = await fetch(`${harness.baseUrl}/boards/${created.board.id}/rename`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${existingMemberCredential}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ name: "Member Must Not Rename" }),
+    })
+    expect(memberRename.status).toBe(403)
+
+    const memberRotate = await fetch(
+      `${harness.baseUrl}/boards/${created.board.id}/rotate-join-code`,
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${existingMemberCredential}` },
+      },
+    )
+    const memberRotateBody = await memberRotate.text()
+    expect(memberRotate.status).toBe(403)
+    expect(memberRotateBody).not.toContain(created.joinCode)
+
+    const renamed = await fetch(`${harness.baseUrl}/boards/${created.board.id}/rename`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${ownerCredential}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ name: "Renamed Governance Slice" }),
+    })
+    expect(renamed.status).toBe(200)
+    expect(await renamed.json()).toEqual({
+      board: {
+        ...created.board,
+        name: "Renamed Governance Slice",
+      },
+    })
+    expect(await listBoardsFor(existingMemberCredential)).toEqual({
+      boards: [{
+        id: created.board.id,
+        name: "Renamed Governance Slice",
+        role: "member",
+      }],
+    })
+
+    const secondMemberCredentials = await Promise.all([
+      registerUser("gov_rot_a"),
+      registerUser("gov_rot_b"),
+    ])
+    const rotations = await Promise.all(
+      ["198.51.100.61", "198.51.100.62"].map(async (networkKey) => {
+        const response = await fetch(
+          `${baseUrl}/boards/${created.board.id}/rotate-join-code`,
+          {
+            method: "POST",
+            headers: {
+              authorization: `Bearer ${ownerCredential}`,
+              "x-forwarded-for": networkKey,
+            },
+          },
+        )
+        return {
+          status: response.status,
+          body: await response.json() as { board: { name: string }; joinCode: string },
+        }
+      }),
+    )
+
+    expect(rotations).toHaveLength(2)
+    expect(rotations.every(({ status }) => status === 200)).toBe(true)
+    expect(rotations[0]?.body.joinCode).not.toBe(rotations[1]?.body.joinCode)
+    expect(rotations[0]?.body.joinCode).not.toBe(created.joinCode)
+    expect(rotations[1]?.body.joinCode).not.toBe(created.joinCode)
+
+    const oldCodeAttempt = await fetch(`${baseUrl}/boards/join`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${secondMemberCredentials[0]}`,
+        "content-type": "application/json",
+        "x-forwarded-for": "198.51.100.63",
+      },
+      body: JSON.stringify({ joinCode: created.joinCode }),
+    })
+    expect(oldCodeAttempt.status).toBe(404)
+    expect(await oldCodeAttempt.text()).not.toContain(created.joinCode)
+
+    const currentCodeAttempts = await Promise.all(
+      rotations.map(async ({ body }, index) => {
+        const response = await fetch(`${baseUrl}/boards/join`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${secondMemberCredentials[index]}`,
+            "content-type": "application/json",
+            "x-forwarded-for": `198.51.100.${64 + index}`,
+          },
+          body: JSON.stringify({ joinCode: body.joinCode }),
+        })
+        return response.status
+      }),
+    )
+    expect(currentCodeAttempts.sort()).toEqual([201, 404])
+    expect(await listBoardsFor(existingMemberCredential)).toEqual({
+      boards: [{
+        id: created.board.id,
+        name: "Renamed Governance Slice",
+        role: "member",
+      }],
+    })
+  })
+
   test("creates duplicate-named Boards, discloses a grouped Join Code once, and filters Memberships", async () => {
     if (!harness) {
       throw new Error("acceptance harness did not start")

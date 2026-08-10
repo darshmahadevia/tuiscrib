@@ -10,6 +10,8 @@ export {
   type RevokeTerminalSessionInput,
   type RegisterUserInput,
   type RegisteredUser,
+  type RenameBoardInput,
+  type RenameBoardResult,
   type CreateBoardInput,
   type CreateBoardResult,
   type JoinBoardInput,
@@ -17,6 +19,8 @@ export {
   type LeaveBoardInput,
   type LeaveBoardResult,
   type ListBoardsInput,
+  type RotateJoinCodeInput,
+  type RotateJoinCodeResult,
   type TerminalSessionAuthentication,
 } from "./client.ts"
 export { boards, memberships, serviceMetadata, terminalSessions, users } from "./schema.ts"

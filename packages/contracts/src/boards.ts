@@ -59,7 +59,20 @@ export const createBoardRequestSchema = z.object({
   name: boardNameSchema,
 })
 
+export const renameBoardRequestSchema = z.object({
+  name: boardNameSchema,
+})
+
 export const createBoardResponseSchema = z.object({
+  board: boardSummarySchema,
+  joinCode: joinCodeSchema,
+})
+
+export const renameBoardResponseSchema = z.object({
+  board: boardSummarySchema,
+})
+
+export const rotateJoinCodeResponseSchema = z.object({
   board: boardSummarySchema,
   joinCode: joinCodeSchema,
 })
@@ -84,6 +97,9 @@ export type BoardRole = z.infer<typeof boardRoleSchema>
 export type BoardSummary = z.infer<typeof boardSummarySchema>
 export type CreateBoardRequest = z.infer<typeof createBoardRequestSchema>
 export type CreateBoardResponse = z.infer<typeof createBoardResponseSchema>
+export type RenameBoardRequest = z.infer<typeof renameBoardRequestSchema>
+export type RenameBoardResponse = z.infer<typeof renameBoardResponseSchema>
+export type RotateJoinCodeResponse = z.infer<typeof rotateJoinCodeResponseSchema>
 export type BoardListResponse = z.infer<typeof boardListResponseSchema>
 export type JoinBoardRequest = z.infer<typeof joinBoardRequestSchema>
 export type JoinBoardResponse = z.infer<typeof joinBoardResponseSchema>

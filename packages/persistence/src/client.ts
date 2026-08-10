@@ -73,6 +73,28 @@ export type CreateBoardResult =
   | { kind: "created"; board: BoardSummaryRecord }
   | { kind: "owned_board_limit" }
 
+export type RenameBoardInput = {
+  userId: number
+  publicId: string
+  name: string
+}
+
+export type RenameBoardResult =
+  | { kind: "renamed"; board: BoardSummaryRecord }
+  | { kind: "not_found" }
+  | { kind: "not_owner" }
+
+export type RotateJoinCodeInput = {
+  userId: number
+  publicId: string
+  joinCodeHash: string
+}
+
+export type RotateJoinCodeResult =
+  | { kind: "rotated"; board: BoardSummaryRecord }
+  | { kind: "not_found" }
+  | { kind: "not_owner" }
+
 export type JoinBoardInput = {
   userId: number
   joinCodeHash: string
@@ -117,6 +139,8 @@ export type Persistence = {
   ): Promise<TerminalSessionAuthentication>
   revokeTerminalSession(input: RevokeTerminalSessionInput): Promise<void>
   createBoard(input: CreateBoardInput): Promise<CreateBoardResult>
+  renameBoard(input: RenameBoardInput): Promise<RenameBoardResult>
+  rotateJoinCode(input: RotateJoinCodeInput): Promise<RotateJoinCodeResult>
   joinBoard(input: JoinBoardInput): Promise<JoinBoardResult>
   leaveBoard(input: LeaveBoardInput): Promise<LeaveBoardResult>
   listBoards(input: ListBoardsInput): Promise<BoardSummaryRecord[]>
@@ -221,6 +245,90 @@ export function createPersistence(options: PersistenceOptions): Persistence {
         return {
           kind: "created" as const,
           board: { id: board.publicId, name: board.name, role: "owner" as const },
+        }
+      })
+    },
+
+    async renameBoard(input) {
+      return database.transaction(async (transaction) => {
+        const boardRows = await transaction
+          .select({
+            id: boards.id,
+            publicId: boards.publicId,
+            name: boards.name,
+            ownerUserId: boards.ownerUserId,
+          })
+          .from(boards)
+          .where(eq(boards.publicId, input.publicId))
+          .for("update")
+
+        const board = boardRows[0]
+        if (!board) {
+          return { kind: "not_found" as const }
+        }
+        if (board.ownerUserId !== input.userId) {
+          return { kind: "not_owner" as const }
+        }
+
+        const updatedBoards = await transaction
+          .update(boards)
+          .set({ name: input.name })
+          .where(eq(boards.id, board.id))
+          .returning({ publicId: boards.publicId, name: boards.name })
+        const updatedBoard = updatedBoards[0]
+        if (!updatedBoard) {
+          throw new Error("Board could not be renamed")
+        }
+
+        return {
+          kind: "renamed" as const,
+          board: {
+            id: updatedBoard.publicId,
+            name: updatedBoard.name,
+            role: "owner" as const,
+          },
+        }
+      })
+    },
+
+    async rotateJoinCode(input) {
+      return database.transaction(async (transaction) => {
+        const boardRows = await transaction
+          .select({
+            id: boards.id,
+            publicId: boards.publicId,
+            name: boards.name,
+            ownerUserId: boards.ownerUserId,
+          })
+          .from(boards)
+          .where(eq(boards.publicId, input.publicId))
+          .for("update")
+
+        const board = boardRows[0]
+        if (!board) {
+          return { kind: "not_found" as const }
+        }
+        if (board.ownerUserId !== input.userId) {
+          return { kind: "not_owner" as const }
+        }
+
+        const updatedBoards = await transaction
+          .update(boards)
+          .set({ joinCodeHash: input.joinCodeHash })
+          .where(eq(boards.id, board.id))
+          .returning({ publicId: boards.publicId, name: boards.name })
+        const updatedBoard = updatedBoards[0]
+        if (!updatedBoard) {
+          throw new Error("Join Code could not be rotated")
+        }
+
+        return {
+          kind: "rotated" as const,
+          board: {
+            id: updatedBoard.publicId,
+            name: updatedBoard.name,
+            role: "owner" as const,
+          },
         }
       })
     },

@@ -9,6 +9,9 @@ import {
   joinBoardResponseSchema,
   joinCodeSchema,
   leaveBoardResponseSchema,
+  renameBoardRequestSchema,
+  renameBoardResponseSchema,
+  rotateJoinCodeResponseSchema,
 } from "./boards.ts"
 
 test("Board names trim surrounding whitespace and count user-perceived characters", () => {
@@ -68,4 +71,24 @@ test("Join and leave contracts carry Membership state without returning a Join C
   expect(joinBoardResponseSchema.parse({ board })).toEqual({ board })
   expect(leaveBoardResponseSchema.parse({ status: "left" })).toEqual({ status: "left" })
   expect(joinBoardResponseSchema.parse({ board, joinCode: "secret" })).toEqual({ board })
+})
+
+test("Owner governance contracts validate Board rename and one-time Join Code rotation", () => {
+  const ownerBoard = {
+    id: "Qx7u3nW8kM2pR5sT9vY4aB",
+    name: "Renamed Ideas",
+    role: "owner" as const,
+  }
+  const joinCode = "WXYZ-2345-6789-ABCD-EFGH-JKMN-PQ"
+
+  expect(renameBoardRequestSchema.parse({ name: " Renamed Ideas " })).toEqual({
+    name: "Renamed Ideas",
+  })
+  expect(renameBoardResponseSchema.parse({ board: ownerBoard })).toEqual({
+    board: ownerBoard,
+  })
+  expect(rotateJoinCodeResponseSchema.parse({ board: ownerBoard, joinCode })).toEqual({
+    board: ownerBoard,
+    joinCode,
+  })
 })

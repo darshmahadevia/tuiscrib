@@ -253,3 +253,102 @@ test("prevents the Owner from leaving through authenticated HTTP", async () => {
     code: "owner_cannot_leave",
   })
 })
+
+test("renames a Board and rotates its Join Code through authenticated Owner HTTP", async () => {
+  const rotatedJoinCode = "WXYZ-2345-6789-ABCD-EFGH-JKMN-PQ"
+  let renameInput: Record<string, unknown> | undefined
+  let rotateInput: Record<string, unknown> | undefined
+  const app = createServiceApp({
+    persistence: persistenceForBoards({
+      renameBoard: async (input: Record<string, unknown>) => {
+        renameInput = input
+        return {
+          kind: "renamed" as const,
+          board: { ...board, name: "Renamed Ideas" },
+        }
+      },
+      rotateJoinCode: async (input: Record<string, unknown>) => {
+        rotateInput = input
+        return {
+          kind: "rotated" as const,
+          board: { ...board },
+        }
+      },
+    }),
+    clock: () => new Date("2026-08-10T00:00:00.000Z"),
+    joinCodeGenerator: () => rotatedJoinCode.replaceAll("-", ""),
+  })
+
+  const renamed = await app.request(`http://tuiscrib.test/boards/${board.id}/rename`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${credential}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ name: " Renamed Ideas " }),
+  })
+  const rotated = await app.request(
+    `http://tuiscrib.test/boards/${board.id}/rotate-join-code`,
+    {
+      method: "POST",
+      headers: { authorization: `Bearer ${credential}` },
+    },
+  )
+
+  expect(renamed.status).toBe(200)
+  expect(await renamed.json()).toEqual({
+    board: { ...board, name: "Renamed Ideas" },
+  })
+  expect(rotated.status).toBe(200)
+  expect(await rotated.json()).toEqual({ board, joinCode: rotatedJoinCode })
+  expect(renameInput).toEqual({
+    userId: 7,
+    publicId: board.id,
+    name: "Renamed Ideas",
+  })
+  expect(rotateInput).toEqual({
+    userId: 7,
+    publicId: board.id,
+    joinCodeHash: "f8f346a3921d1694def514b86136e345d16ada41aa4b7ef35ac0e2f5e6bfb45d",
+  })
+  expect(JSON.stringify(rotateInput)).not.toContain(rotatedJoinCode)
+})
+
+test("rejects non-Owner Board governance without disclosing Join Code values", async () => {
+  const app = createServiceApp({
+    persistence: persistenceForBoards({
+      renameBoard: async () => ({ kind: "not_owner" as const }),
+      rotateJoinCode: async () => ({ kind: "not_owner" as const }),
+    }),
+    joinCodeGenerator: () => joinCode,
+  })
+
+  const renamed = await app.request(`http://tuiscrib.test/boards/${board.id}/rename`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${credential}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ name: "Nope" }),
+  })
+  const rotated = await app.request(
+    `http://tuiscrib.test/boards/${board.id}/rotate-join-code`,
+    {
+      method: "POST",
+      headers: { authorization: `Bearer ${credential}` },
+    },
+  )
+
+  expect(renamed.status).toBe(403)
+  expect(await renamed.json()).toEqual({
+    error: "Only the Owner may rename this Board.",
+    code: "owner_required",
+  })
+  expect(rotated.status).toBe(403)
+  const rotatedBody = await rotated.text()
+  expect(JSON.parse(rotatedBody)).toEqual({
+    error: "Only the Owner may rotate this Join Code.",
+    code: "owner_required",
+  })
+  expect(rotatedBody).not.toContain(joinCode)
+})

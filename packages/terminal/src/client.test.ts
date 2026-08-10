@@ -198,3 +198,67 @@ test("Board client joins and leaves through the public HTTP actions", async () =
     },
   ])
 })
+
+test("Board client renames and rotates a Board through Owner HTTP actions", async () => {
+  const credential = "a".repeat(43)
+  const rotatedJoinCode = "WXYZ-2345-6789-ABCD-EFGH-JKMN-PQ"
+  const requests: Array<{ path: string; method?: string; body?: string }> = []
+  const client = createBoardClient("http://tuiscrib.test", async (input, init) => {
+    const url = new URL(String(input))
+    requests.push({
+      path: url.pathname,
+      method: init?.method,
+      body: typeof init?.body === "string" ? init.body : undefined,
+    })
+
+    if (url.pathname.endsWith("/rename")) {
+      return new Response(JSON.stringify({
+        board: {
+          id: "Qx7u3nW8kM2pR5sT9vY4aB",
+          name: "Renamed Ideas",
+          role: "owner",
+        },
+      }), { status: 200 })
+    }
+
+    return new Response(JSON.stringify({
+      board: {
+        id: "Qx7u3nW8kM2pR5sT9vY4aB",
+        name: "Renamed Ideas",
+        role: "owner",
+      },
+      joinCode: rotatedJoinCode,
+    }), { status: 200 })
+  })
+
+  await expect(client.renameBoard(credential, "Qx7u3nW8kM2pR5sT9vY4aB", {
+    name: "Renamed Ideas",
+  })).resolves.toEqual({
+    board: {
+      id: "Qx7u3nW8kM2pR5sT9vY4aB",
+      name: "Renamed Ideas",
+      role: "owner",
+    },
+  })
+  await expect(client.rotateJoinCode(credential, "Qx7u3nW8kM2pR5sT9vY4aB")).resolves.toEqual({
+    board: {
+      id: "Qx7u3nW8kM2pR5sT9vY4aB",
+      name: "Renamed Ideas",
+      role: "owner",
+    },
+    joinCode: rotatedJoinCode,
+  })
+
+  expect(requests).toEqual([
+    {
+      path: "/boards/Qx7u3nW8kM2pR5sT9vY4aB/rename",
+      method: "POST",
+      body: JSON.stringify({ name: "Renamed Ideas" }),
+    },
+    {
+      path: "/boards/Qx7u3nW8kM2pR5sT9vY4aB/rotate-join-code",
+      method: "POST",
+      body: undefined,
+    },
+  ])
+})

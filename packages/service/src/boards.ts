@@ -9,6 +9,9 @@ import {
   joinBoardRequestSchema,
   joinBoardResponseSchema,
   leaveBoardResponseSchema,
+  renameBoardRequestSchema,
+  renameBoardResponseSchema,
+  rotateJoinCodeResponseSchema,
   JOIN_CODE_ALPHABET,
   JOIN_CODE_UNGROUPED_LENGTH,
   MAX_BOARD_MEMBERS,
@@ -18,6 +21,8 @@ import {
   type CreateBoardResponse,
   type JoinBoardResponse,
   type LeaveBoardResponse,
+  type RenameBoardResponse,
+  type RotateJoinCodeResponse,
   type ServiceError,
 } from "@tuiscrib/contracts"
 
@@ -40,6 +45,28 @@ export type CreateBoardPersistenceResult =
   | { kind: "created"; board: BoardSummary }
   | { kind: "owned_board_limit" }
 
+export type RenameBoardPersistenceInput = {
+  userId: number
+  publicId: string
+  name: string
+}
+
+export type RenameBoardPersistenceResult =
+  | { kind: "renamed"; board: BoardSummary }
+  | { kind: "not_found" }
+  | { kind: "not_owner" }
+
+export type RotateJoinCodePersistenceInput = {
+  userId: number
+  publicId: string
+  joinCodeHash: string
+}
+
+export type RotateJoinCodePersistenceResult =
+  | { kind: "rotated"; board: BoardSummary }
+  | { kind: "not_found" }
+  | { kind: "not_owner" }
+
 export type ListBoardsPersistenceInput = {
   userId: number
   nameFilter: string
@@ -47,6 +74,8 @@ export type ListBoardsPersistenceInput = {
 
 export type BoardPersistence = {
   createBoard(input: CreateBoardPersistenceInput): Promise<CreateBoardPersistenceResult>
+  renameBoard?(input: RenameBoardPersistenceInput): Promise<RenameBoardPersistenceResult>
+  rotateJoinCode?(input: RotateJoinCodePersistenceInput): Promise<RotateJoinCodePersistenceResult>
   joinBoard?(input: JoinBoardPersistenceInput): Promise<JoinBoardPersistenceResult>
   leaveBoard?(input: LeaveBoardPersistenceInput): Promise<LeaveBoardPersistenceResult>
   listBoards(input: ListBoardsPersistenceInput): Promise<BoardSummary[]>
@@ -154,6 +183,14 @@ export type BoardJoinOperationResult =
   | { kind: "success"; response: JoinBoardResponse }
   | { kind: "failure"; status: 400 | 404 | 409 | 429 | 503; error: ServiceError }
 
+export type BoardRenameOperationResult =
+  | { kind: "success"; response: RenameBoardResponse }
+  | { kind: "failure"; status: 400 | 403 | 404 | 503; error: ServiceError }
+
+export type BoardRotateJoinCodeOperationResult =
+  | { kind: "success"; response: RotateJoinCodeResponse }
+  | { kind: "failure"; status: 403 | 404 | 503; error: ServiceError }
+
 export type BoardLeaveOperationResult =
   | { kind: "success"; response: LeaveBoardResponse }
   | { kind: "failure"; status: 404 | 409 | 503; error: ServiceError }
@@ -251,6 +288,81 @@ export function createBoardAdministration(options: BoardAdministrationOptions) {
           board: result.board,
           joinCode: formattedJoinCode,
         }),
+      }
+    },
+
+    async renameBoard(
+      user: BoardUser,
+      publicId: string,
+      input: unknown,
+    ): Promise<BoardRenameOperationResult> {
+      if (!options.persistence.renameBoard) {
+        return unavailableRename()
+      }
+      if (!boardIdentifierSchema.safeParse(publicId).success) {
+        return boardNotFoundRename()
+      }
+
+      const parsed = renameBoardRequestSchema.safeParse(input)
+      if (!parsed.success) {
+        return invalidRenameInput(parsed.error)
+      }
+
+      const result = await options.persistence.renameBoard({
+        userId: user.id,
+        publicId,
+        name: parsed.data.name,
+      })
+
+      switch (result.kind) {
+        case "renamed":
+          return {
+            kind: "success",
+            response: renameBoardResponseSchema.parse({ board: result.board }),
+          }
+        case "not_owner":
+          return ownerRequiredRename()
+        case "not_found":
+          return boardNotFoundRename()
+      }
+    },
+
+    async rotateJoinCode(
+      user: BoardUser,
+      publicId: string,
+    ): Promise<BoardRotateJoinCodeOperationResult> {
+      if (!options.persistence.rotateJoinCode) {
+        return unavailableRotateJoinCode()
+      }
+      if (!boardIdentifierSchema.safeParse(publicId).success) {
+        return boardNotFoundRotateJoinCode()
+      }
+
+      const joinCode = joinCodeGenerator()
+      const formattedJoinCode = formatJoinCode(joinCode)
+      if (!joinCodeSchema.safeParse(formattedJoinCode).success) {
+        throw new Error("join code generator returned an invalid Join Code")
+      }
+
+      const result = await options.persistence.rotateJoinCode({
+        userId: user.id,
+        publicId,
+        joinCodeHash: hashJoinCode(joinCode),
+      })
+
+      switch (result.kind) {
+        case "rotated":
+          return {
+            kind: "success",
+            response: rotateJoinCodeResponseSchema.parse({
+              board: result.board,
+              joinCode: formattedJoinCode,
+            }),
+          }
+        case "not_owner":
+          return ownerRequiredRotateJoinCode()
+        case "not_found":
+          return boardNotFoundRotateJoinCode()
       }
     },
 
@@ -415,6 +527,86 @@ function unavailableLeave(): BoardLeaveOperationResult {
     kind: "failure",
     status: 503,
     error: serviceErrorSchema.parse({ error: "service unavailable" }),
+  }
+}
+
+function invalidRenameInput(error: {
+  issues: Array<{ path: PropertyKey[]; message: string }>
+}): BoardRenameOperationResult {
+  const fieldErrors: Record<string, string> = {}
+  for (const issue of error.issues) {
+    const field = String(issue.path[0] ?? "form")
+    fieldErrors[field] ??= issue.message
+  }
+
+  return {
+    kind: "failure",
+    status: 400,
+    error: serviceErrorSchema.parse({
+      error: "Check the highlighted fields.",
+      code: "invalid_input",
+      fieldErrors,
+    }),
+  }
+}
+
+function unavailableRename(): BoardRenameOperationResult {
+  return {
+    kind: "failure",
+    status: 503,
+    error: serviceErrorSchema.parse({ error: "service unavailable" }),
+  }
+}
+
+function ownerRequiredRename(): BoardRenameOperationResult {
+  return {
+    kind: "failure",
+    status: 403,
+    error: serviceErrorSchema.parse({
+      error: "Only the Owner may rename this Board.",
+      code: "owner_required",
+    }),
+  }
+}
+
+function boardNotFoundRename(): BoardRenameOperationResult {
+  return {
+    kind: "failure",
+    status: 404,
+    error: serviceErrorSchema.parse({
+      error: "Board was not found.",
+      code: "board_not_found",
+    }),
+  }
+}
+
+function unavailableRotateJoinCode(): BoardRotateJoinCodeOperationResult {
+  return {
+    kind: "failure",
+    status: 503,
+    error: serviceErrorSchema.parse({ error: "service unavailable" }),
+  }
+}
+
+function ownerRequiredRotateJoinCode(): BoardRotateJoinCodeOperationResult {
+  return {
+    kind: "failure",
+    status: 403,
+    error: serviceErrorSchema.parse({
+      error: "Only the Owner may rotate this Join Code.",
+      code: "owner_required",
+    }),
+  }
+}
+
+function boardNotFoundRotateJoinCode(): BoardRotateJoinCodeOperationResult {
+  return {
+    kind: "failure",
+    status: 404,
+    error: serviceErrorSchema.parse({
+      error: "Board was not found.",
+      code: "board_not_found",
+    }),
   }
 }
 

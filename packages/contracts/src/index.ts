@@ -46,6 +46,9 @@ export {
   joinBoardResponseSchema,
   joinCodeSchema,
   leaveBoardResponseSchema,
+  renameBoardRequestSchema,
+  renameBoardResponseSchema,
+  rotateJoinCodeResponseSchema,
   type BoardListResponse,
   type BoardRole,
   type BoardSummary,
@@ -54,4 +57,7 @@ export {
   type JoinBoardRequest,
   type JoinBoardResponse,
   type LeaveBoardResponse,
+  type RenameBoardRequest,
+  type RenameBoardResponse,
+  type RotateJoinCodeResponse,
 } from "./boards.ts"
