@@ -32,7 +32,11 @@ test("uses the protected platform config location for a Terminal Session", () =>
     getTerminalSessionCredentialPath({ platform: "darwin", homeDirectory: "/Users/alice" }),
   ).toBe("/Users/alice/Library/Application Support/Tuiscrib/session")
   expect(
-    getTerminalSessionCredentialPath({ platform: "linux", homeDirectory: "/home/alice" }),
+    getTerminalSessionCredentialPath({
+      platform: "linux",
+      homeDirectory: "/home/alice",
+      env: {},
+    }),
   ).toBe("/home/alice/.config/tuiscrib/session")
   expect(
     getTerminalSessionCredentialPath({
