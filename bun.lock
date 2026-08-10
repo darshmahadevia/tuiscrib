@@ -17,6 +17,7 @@
       "dependencies": {
         "@opentui/core": "0.5.1",
         "@opentui/react": "0.5.1",
+        "@tuiscrib/contracts": "workspace:*",
         "@tuiscrib/persistence": "workspace:*",
         "@tuiscrib/service": "workspace:*",
         "@tuiscrib/terminal": "workspace:*",

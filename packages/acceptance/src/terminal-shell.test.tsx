@@ -954,3 +954,94 @@ test("returns to sign-in with a clear error when no local Terminal Session exist
   expect(frame).toContain("s sign in")
   expect(restoreCalled).toBe(false)
 })
+
+test("opens the selected Board through its WebSocket and renders authoritative viewing Presence", async () => {
+  const credential = "d".repeat(43)
+  const board = {
+    id: "Qx7u3nW8kM2pR5sT9vY4aB",
+    name: "Ideas",
+    role: "member" as const,
+  }
+  let opened: { credential: string; boardId: string } | undefined
+  const boardClient: BoardClient = {
+    createBoard: async () => {
+      throw new Error("create Board was not expected")
+    },
+    renameBoard: async () => {
+      throw new Error("rename Board was not expected")
+    },
+    rotateJoinCode: async () => {
+      throw new Error("rotate Join Code was not expected")
+    },
+    listBoards: async () => ({ boards: [board] }),
+    joinBoard: async () => {
+      throw new Error("join Board was not expected")
+    },
+    leaveBoard: async () => ({ status: "left" }),
+    openBoard: async (nextCredential, boardId, handlers) => {
+      opened = { credential: nextCredential, boardId }
+      handlers.onSnapshot({
+        type: "snapshot",
+        board,
+        revision: 3,
+        presence: [
+          { member: { username: "ada_lovelace" }, activity: "viewing" },
+          { member: { username: "grace_hopper" }, activity: "viewing" },
+        ],
+      })
+      return { close: () => undefined }
+    },
+  }
+  const authClient: AuthClient = {
+    register: async () => {
+      throw new Error("register was not expected")
+    },
+    signIn: async () => {
+      throw new Error("sign-in was not expected")
+    },
+    restore: async () => ({ user: { username: "ada_lovelace" } }),
+    signOut: async () => ({ status: "signed_out" }),
+  }
+  const credentialStore: CredentialStore = {
+    filePath: "memory://board-open/session",
+    load: async () => credential,
+    save: async () => undefined,
+    remove: async () => undefined,
+  }
+
+  await act(async () => {
+    activeSetup = await testRender(
+      <TerminalShell
+        label="member"
+        authClient={authClient}
+        boardClient={boardClient}
+        credentialStore={credentialStore}
+      />,
+      { width: 80, height: 24, kittyKeyboard: true },
+    )
+    await activeSetup.renderOnce()
+  })
+
+  const setup = activeSetup
+  if (!setup) {
+    throw new Error("terminal renderer did not start")
+  }
+  await setup.waitForFrame((frame) => frame.includes("Terminal Session restored"))
+  await act(async () => {
+    activeSetup?.mockInput.pressKey("b")
+    await activeSetup?.renderOnce()
+  })
+  await setup.waitForFrame((frame) => frame.includes("Ideas · Member"))
+  await act(async () => {
+    activeSetup?.mockInput.pressKey("o")
+    await activeSetup?.renderOnce()
+  })
+
+  const frame = await setup.waitForFrame((value) => value.includes("grace_hopper"))
+  expect(opened).toEqual({ credential, boardId: board.id })
+  expect(frame).toContain("Board canvas")
+  expect(frame).toContain("Navigate mode · cursor at the stable origin")
+  expect(frame).toContain("Board revision: 3")
+  expect(frame).toContain("ada_lovelace · viewing")
+  expect(frame).toContain("grace_hopper · viewing")
+})

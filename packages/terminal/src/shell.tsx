@@ -5,12 +5,14 @@ import { useEffect, useRef, useState, type ReactNode } from "react"
 import {
   countUserPerceivedCharacters,
   splitUserPerceivedCharacters,
+  type BoardSnapshot,
   type BoardSummary,
 } from "@tuiscrib/contracts"
 
 import {
   ServiceRequestError,
   type AuthClient,
+  type BoardConnection,
   type BoardClient,
 } from "./client.ts"
 import {
@@ -208,6 +210,8 @@ export function TerminalShell({
   const [boardFilter, setBoardFilter] = useState("")
   const [boardsPending, setBoardsPending] = useState(false)
   const [boardCodeNotice, setBoardCodeNotice] = useState<BoardCodeNotice | null>(null)
+  const [boardSnapshot, setBoardSnapshot] = useState<BoardSnapshot | null>(null)
+  const [boardOpenPending, setBoardOpenPending] = useState(false)
   const [formPending, setFormPending] = useState(false)
   const [sessionState, setSessionState] = useState<SessionState>(
     authClient ? "checking" : "signed-out",
@@ -225,6 +229,8 @@ export function TerminalShell({
   const signOutPendingRef = useRef(signOutPending)
   const confirmationActionRef = useRef(confirmationAction)
   const boardActionPendingRef = useRef(boardActionPending)
+  const boardConnectionRef = useRef<BoardConnection | null>(null)
+  const activeBoardIdRef = useRef<string | null>(null)
   overlayRef.current = overlay
   viewRef.current = view
   modeRef.current = mode
@@ -359,7 +365,25 @@ export function TerminalShell({
     }
   }
 
+  const closeBoardConnection = () => {
+    activeBoardIdRef.current = null
+    const connection = boardConnectionRef.current
+    boardConnectionRef.current = null
+    connection?.close()
+  }
+
+  useEffect(() => {
+    return () => {
+      activeBoardIdRef.current = null
+      boardConnectionRef.current?.close()
+      boardConnectionRef.current = null
+    }
+  }, [])
+
   const openView = (nextView: ShellView) => {
+    if (nextView !== "canvas") {
+      closeBoardConnection()
+    }
     flushSync(() => {
       setView(nextView)
       setMode("navigate")
@@ -371,12 +395,105 @@ export function TerminalShell({
       setConfirmationAction("placeholder")
       setNotice(null)
       setFormPending(false)
+      if (nextView !== "canvas") {
+        setBoardSnapshot(null)
+        setBoardOpenPending(false)
+      }
       if (nextView !== "boards") {
         setBoardCodeNotice(null)
       }
     })
     if (nextView === "boards") {
       void loadBoards(boardFilterRef.current)
+    }
+  }
+
+  const openSelectedBoard = async () => {
+    const openBoard = boardClient?.openBoard
+    if (!openBoard) {
+      openView("canvas")
+      return
+    }
+
+    const board = boards[selectedBoardIndexRef.current]
+    if (!board) {
+      flushSync(() => {
+        setNotice({ kind: "error", message: "Select a Board before opening it." })
+      })
+      return
+    }
+
+    const credential = await credentialStore.load()
+    if (!credential) {
+      flushSync(() => {
+        setNotice({ kind: "error", message: "No active Terminal Session. Sign in to continue." })
+      })
+      return
+    }
+
+    closeBoardConnection()
+    activeBoardIdRef.current = board.id
+    flushSync(() => {
+      setView("canvas")
+      setMode("navigate")
+      setBoardSnapshot(null)
+      setBoardOpenPending(true)
+      setNotice(null)
+    })
+
+    try {
+      const connection = await openBoard(credential, board.id, {
+        onSnapshot: (snapshot) => {
+          if (activeBoardIdRef.current !== board.id) {
+            return
+          }
+          flushSync(() => {
+            setBoardSnapshot(snapshot)
+            setBoardOpenPending(false)
+            setNotice(null)
+          })
+        },
+        onError: (error) => {
+          if (activeBoardIdRef.current !== board.id) {
+            return
+          }
+          flushSync(() => {
+            setBoardSnapshot(null)
+            setBoardOpenPending(false)
+            setNotice({ kind: "error", message: formatBoardError(error) })
+          })
+        },
+        onClose: () => {
+          if (activeBoardIdRef.current !== board.id) {
+            return
+          }
+          flushSync(() => {
+            setBoardSnapshot(null)
+            setBoardOpenPending(false)
+            setNotice({
+              kind: "error",
+              message: "Board collaboration disconnected. Return to the Board list and reopen it.",
+            })
+          })
+        },
+      })
+      if (activeBoardIdRef.current !== board.id) {
+        connection.close()
+        return
+      }
+      boardConnectionRef.current = connection
+    } catch (error) {
+      if (activeBoardIdRef.current !== board.id) {
+        return
+      }
+      flushSync(() => {
+        setView("boards")
+        setMode("navigate")
+        setBoardSnapshot(null)
+        setBoardOpenPending(false)
+        setNotice({ kind: "error", message: formatBoardError(error) })
+      })
+      activeBoardIdRef.current = null
     }
   }
 
@@ -878,7 +995,7 @@ export function TerminalShell({
         return
       }
       if (key.name === "o") {
-        openView("canvas")
+        void openSelectedBoard()
         return
       }
       if (key.name === "return" && selectedIndexRef.current === 1) {
@@ -894,7 +1011,7 @@ export function TerminalShell({
         return
       }
       if (key.name === "return" && selectedIndexRef.current === 0) {
-        openView("canvas")
+        void openSelectedBoard()
         return
       }
     }
@@ -1006,7 +1123,12 @@ export function TerminalShell({
   ) : view === "confirmation" ? (
     <ShellConfirmation action={confirmationAction} />
   ) : view === "canvas" ? (
-    <CanvasSurface mode={mode} />
+    <CanvasSurface
+      mode={mode}
+      snapshot={boardSnapshot}
+      pending={boardOpenPending}
+      error={notice?.kind === "error" ? notice.message : undefined}
+    />
   ) : view === "form" && formKind ? (
     <ShellForm
       key={formKind}
@@ -1288,7 +1410,17 @@ function ShellConfirmation({ action }: { action: ConfirmationAction }) {
   )
 }
 
-function CanvasSurface({ mode }: { mode: ShellMode }) {
+function CanvasSurface({
+  mode,
+  snapshot,
+  pending,
+  error,
+}: {
+  mode: ShellMode
+  snapshot: BoardSnapshot | null
+  pending: boolean
+  error?: string
+}) {
   return (
     <box
       style={{
@@ -1310,7 +1442,30 @@ function CanvasSurface({ mode }: { mode: ShellMode }) {
         }}
       >
         <text fg={colors.text}>Board canvas</text>
-        {mode === "navigate" ? (
+        {pending ? (
+          <>
+            <text fg={colors.accent}>Opening Board over WebSocket…</text>
+            <text fg={colors.muted}>Loading one authoritative snapshot.</text>
+          </>
+        ) : error && !snapshot ? (
+          <text fg={colors.error}>Error: {error}</text>
+        ) : snapshot ? (
+          <>
+            <text fg={colors.text}>Board: {snapshot.board.name}</text>
+            <text fg={colors.accent}>Board revision: {snapshot.revision}</text>
+            <text fg={colors.text}>Viewing Presence</text>
+            {snapshot.presence.map((presence) => (
+              <text key={presence.member.username} fg={colors.muted}>
+                {presence.member.username} · {presence.activity}
+              </text>
+            ))}
+            {mode === "navigate" ? (
+              <text fg={colors.accent}>Navigate mode · cursor at the stable origin</text>
+            ) : (
+              <text fg={colors.warning}>Edit mode · keyboard text editing active</text>
+            )}
+          </>
+        ) : mode === "navigate" ? (
           <>
             <text fg={colors.accent}>Navigate mode · cursor at the stable origin</text>
             <text fg={colors.muted}>Enter edit · arrows / hjkl move the canvas cursor</text>

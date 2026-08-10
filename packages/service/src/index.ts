@@ -43,3 +43,13 @@ export {
   type LeaveBoardPersistenceResult,
   type ListBoardsPersistenceInput,
 } from "./boards.ts"
+export {
+  boardOpenReadyResponse,
+  createBoardCollaboration,
+  type BoardCollaboration,
+  type BoardCollaborationOptions,
+  type BoardCollaborationPersistence,
+  type BoardOpenOperationResult,
+  type BoardWebSocket,
+  type BoardWebSocketData,
+} from "./collaboration.ts"

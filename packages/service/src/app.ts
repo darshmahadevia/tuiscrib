@@ -20,11 +20,18 @@ import {
   type BoardRateLimitOptions,
   type BoardPersistence,
 } from "./boards.ts"
+import {
+  boardOpenReadyResponse,
+  createBoardCollaboration,
+  type BoardCollaboration,
+  type BoardCollaborationPersistence,
+} from "./collaboration.ts"
 
 export type ServiceAppOptions = {
   persistence: Pick<Persistence, "healthCheck"> &
     Partial<AuthPersistence> &
-    Partial<BoardPersistence>
+    Partial<BoardPersistence> &
+    Partial<BoardCollaborationPersistence>
   clock?: () => Date
   passwordHasher?: PasswordHasher
   credentialGenerator?: () => string
@@ -33,6 +40,7 @@ export type ServiceAppOptions = {
   authRateLimit?: AuthRateLimitOptions
   boardRateLimit?: BoardRateLimitOptions
   networkKey?: (request: Request) => string
+  collaboration?: Pick<BoardCollaboration, "openBoard">
 }
 
 export function createServiceApp(options: ServiceAppOptions) {
@@ -40,6 +48,7 @@ export function createServiceApp(options: ServiceAppOptions) {
   const clock = options.clock ?? (() => new Date())
   const authentication = createAuthenticationIfAvailable(options, clock)
   const boards = createBoardAdministrationIfAvailable(options, clock)
+  const collaboration = options.collaboration ?? createBoardCollaborationIfAvailable(options, clock)
 
   app.get("/health", async (context) => {
     const request = healthRequestSchema.safeParse(
@@ -59,6 +68,30 @@ export function createServiceApp(options: ServiceAppOptions) {
         checkedAt: clock().toISOString(),
       })
       return context.json(response, 200)
+    } catch {
+      return context.json(serviceErrorSchema.parse({ error: "service unavailable" }), 503)
+    }
+  })
+
+  app.get("/boards/:boardId/collaboration", async (context) => {
+    context.header("cache-control", "no-store")
+    if (!authentication || !collaboration) {
+      return context.json(serviceErrorSchema.parse({ error: "service unavailable" }), 503)
+    }
+
+    const authenticated = await requireBoardUser(authentication, context.req.raw)
+    if (authenticated.kind !== "success") {
+      return context.json(authenticated.error, authenticated.status)
+    }
+
+    try {
+      const result = await collaboration.openBoard(
+        authenticated.user,
+        context.req.param("boardId"),
+      )
+      return result.kind === "success"
+        ? context.json(boardOpenReadyResponse(), 200)
+        : context.json(result.error, result.status)
     } catch {
       return context.json(serviceErrorSchema.parse({ error: "service unavailable" }), 503)
     }
@@ -309,6 +342,20 @@ function createBoardAdministrationIfAvailable(
     boardIdGenerator: options.boardIdGenerator,
     joinCodeGenerator: options.joinCodeGenerator,
     rateLimit: options.boardRateLimit,
+  })
+}
+
+function createBoardCollaborationIfAvailable(
+  options: ServiceAppOptions,
+  clock: () => Date,
+) {
+  if (typeof options.persistence.openBoard !== "function") {
+    return null
+  }
+
+  return createBoardCollaboration({
+    persistence: options.persistence as BoardCollaborationPersistence,
+    clock,
   })
 }
 

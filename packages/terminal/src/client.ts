@@ -1,5 +1,7 @@
 import {
+  boardOpenReadyResponseSchema,
   boardListResponseSchema,
+  boardSocketMessageSchema,
   createBoardResponseSchema,
   joinBoardResponseSchema,
   leaveBoardResponseSchema,
@@ -11,6 +13,7 @@ import {
   serviceErrorSchema,
   terminalSessionResponseSchema,
   type AuthResponse,
+  type BoardSnapshot,
   type BoardListResponse,
   type CreateBoardRequest,
   type CreateBoardResponse,
@@ -48,6 +51,33 @@ export type BoardClient = {
   ): Promise<RenameBoardResponse>
   rotateJoinCode(credential: string, boardId: string): Promise<RotateJoinCodeResponse>
   listBoards(credential: string, filter?: string): Promise<BoardListResponse>
+  openBoard?(
+    credential: string,
+    boardId: string,
+    handlers: BoardConnectionHandlers,
+  ): Promise<BoardConnection>
+}
+
+export type BoardSocket = {
+  onmessage: ((event: { data: unknown }) => void) | null
+  onerror: (() => void) | null
+  onclose: (() => void) | null
+  close(): void
+}
+
+export type BoardWebSocketFactory = (
+  url: string,
+  options: { headers: Record<string, string> },
+) => BoardSocket
+
+export type BoardConnectionHandlers = {
+  onSnapshot(snapshot: BoardSnapshot): void
+  onError(error: Error): void
+  onClose(): void
+}
+
+export type BoardConnection = {
+  close(): void
 }
 
 export class ServiceRequestError extends Error {
@@ -154,6 +184,7 @@ export function createAuthClient(
 export function createBoardClient(
   baseUrl: string,
   fetcher: Fetcher = fetch,
+  webSocketFactory: BoardWebSocketFactory = defaultBoardWebSocketFactory,
 ): BoardClient {
   return {
     createBoard(credential, input) {
@@ -202,6 +233,64 @@ export function createBoardClient(
       }
       return requestBoard("GET", credential, undefined, boardListResponseSchema, url)
     },
+    async openBoard(credential, boardId, handlers) {
+      const httpUrl = new URL(
+        `/boards/${encodeURIComponent(boardId)}/collaboration`,
+        baseUrl,
+      )
+      await requestBoard(
+        "GET",
+        credential,
+        undefined,
+        boardOpenReadyResponseSchema,
+        httpUrl,
+      )
+
+      const socket = webSocketFactory(toWebSocketUrl(httpUrl), {
+        headers: { authorization: `Bearer ${credential}` },
+      })
+      let closedByCaller = false
+      socket.onmessage = (event) => {
+        let payload: unknown
+        try {
+          payload = JSON.parse(decodeSocketMessage(event.data))
+        } catch {
+          closedByCaller = true
+          handlers.onError(new Error("Board collaboration sent an invalid snapshot."))
+          socket.close()
+          return
+        }
+
+        const parsed = boardSocketMessageSchema.safeParse(payload)
+        if (!parsed.success) {
+          closedByCaller = true
+          handlers.onError(new Error("Board collaboration sent an invalid snapshot."))
+          socket.close()
+          return
+        }
+
+        if (parsed.data.type === "snapshot") {
+          handlers.onSnapshot(parsed.data)
+        }
+      }
+      socket.onerror = () => {
+        if (!closedByCaller) {
+          handlers.onError(new Error("Board collaboration is unavailable."))
+        }
+      }
+      socket.onclose = () => {
+        if (!closedByCaller) {
+          handlers.onClose()
+        }
+      }
+
+      return {
+        close() {
+          closedByCaller = true
+          socket.close()
+        },
+      }
+    },
   }
 
   async function requestBoard<T>(
@@ -231,4 +320,28 @@ export function createBoardClient(
 
     return schema.parse(payload)
   }
+}
+
+const defaultBoardWebSocketFactory: BoardWebSocketFactory = (url, options) => {
+  const WebSocketConstructor = WebSocket as unknown as new (
+    url: string,
+    options: { headers: Record<string, string> },
+  ) => BoardSocket
+  return new WebSocketConstructor(url, options)
+}
+
+function toWebSocketUrl(url: URL): string {
+  const websocketUrl = new URL(url.toString())
+  websocketUrl.protocol = websocketUrl.protocol === "https:" ? "wss:" : "ws:"
+  return websocketUrl.toString()
+}
+
+function decodeSocketMessage(data: unknown): string {
+  if (typeof data === "string") {
+    return data
+  }
+  if (data instanceof ArrayBuffer) {
+    return new TextDecoder().decode(data)
+  }
+  return String(data)
 }

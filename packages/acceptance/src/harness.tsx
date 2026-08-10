@@ -4,8 +4,17 @@ import postgres from "postgres"
 import { act } from "react"
 
 import { createPersistence, type Persistence } from "@tuiscrib/persistence"
-import { createServiceApp } from "@tuiscrib/service"
-import { HealthScreen, TerminalShell, type CredentialStore } from "@tuiscrib/terminal"
+import {
+  createBoardCollaboration,
+  createServiceApp,
+  type BoardWebSocketData,
+} from "@tuiscrib/service"
+import {
+  HealthScreen,
+  TerminalShell,
+  type BoardClient,
+  type CredentialStore,
+} from "@tuiscrib/terminal"
 import {
   createAuthClient,
   createBoardClient,
@@ -132,10 +141,13 @@ export type TerminalClient = {
   credentialStore?: CredentialStore
 }
 
-function createMemoryCredentialStore(): CredentialStore {
-  let credential: string | null = null
+export function createMemoryCredentialStore(
+  initialCredential: string | null = null,
+  filePath = "memory://tuiscrib/session",
+): CredentialStore {
+  let credential = initialCredential
   return {
-    filePath: "memory://tuiscrib/session",
+    filePath,
     load: async () => credential,
     save: async (nextCredential) => {
       credential = nextCredential
@@ -152,28 +164,41 @@ export class AcceptanceHarness {
   private constructor(
     readonly clock: ManualClock,
     private readonly persistence: Persistence,
-    private readonly server: Bun.Server<unknown>,
+    private readonly server: Bun.Server<BoardWebSocketData>,
     private readonly database: DisposablePostgres,
   ) {}
 
   static async start(): Promise<AcceptanceHarness> {
     const database = await startDisposablePostgres()
     const persistence = createPersistence({ databaseUrl: database.databaseUrl })
-    let server: Bun.Server<unknown> | undefined
+    let server: Bun.Server<BoardWebSocketData> | undefined
 
     try {
       await persistence.migrate()
       const clock = new ManualClock()
       clock.setTime(Date.parse("2026-08-10T00:00:00.000Z"))
+      const collaboration = createBoardCollaboration({
+        persistence,
+        clock: () => new Date(clock.now()),
+      })
+      const app = createServiceApp({
+        persistence,
+        collaboration,
+        clock: () => new Date(clock.now()),
+        authRateLimit: { maxAttempts: 100 },
+        boardRateLimit: { maxAttempts: 1_000 },
+      })
       server = Bun.serve({
         hostname: "127.0.0.1",
         port: 0,
-        fetch: createServiceApp({
-          persistence,
-          clock: () => new Date(clock.now()),
-          authRateLimit: { maxAttempts: 100 },
-          boardRateLimit: { maxAttempts: 1_000 },
-        }).fetch,
+        async fetch(request, bunServer) {
+          const result = await collaboration.handleUpgrade(request, bunServer)
+          if (result !== null) {
+            return result
+          }
+          return app.fetch(request)
+        },
+        websocket: collaboration.websocket,
       })
 
       return new AcceptanceHarness(clock, persistence, server, database)
@@ -190,6 +215,7 @@ export class AcceptanceHarness {
   }
 
   async addClient(label: string): Promise<TerminalClient> {
+    enableActEnvironment()
     const setup = await testRender(
       <HealthScreen client={createHealthClient(this.baseUrl)} label={label} />,
       {
@@ -209,14 +235,16 @@ export class AcceptanceHarness {
   async addShellClient(
     label: string,
     credentialStore: CredentialStore = createMemoryCredentialStore(),
+    boardClient: BoardClient = createBoardClient(this.baseUrl),
   ): Promise<TerminalClient> {
+    enableActEnvironment()
     let setup!: TestRendererSetup
     await act(async () => {
       setup = await testRender(
         <TerminalShell
           label={label}
           authClient={createAuthClient(this.baseUrl)}
-          boardClient={createBoardClient(this.baseUrl)}
+          boardClient={boardClient}
           credentialStore={credentialStore}
         />,
         {
@@ -233,17 +261,25 @@ export class AcceptanceHarness {
     return client
   }
 
+  async disposeClient(client: TerminalClient): Promise<void> {
+    const index = this.clients.indexOf(client)
+    if (index >= 0) {
+      this.clients.splice(index, 1)
+    }
+
+    enableActEnvironment()
+    await act(async () => {
+      client.setup.renderer.destroy()
+    })
+    enableActEnvironment()
+  }
+
   async dispose(): Promise<void> {
     let cleanupError: unknown
 
-    for (const client of this.clients) {
+    for (const client of [...this.clients]) {
       try {
-        ;(globalThis as typeof globalThis & {
-          IS_REACT_ACT_ENVIRONMENT?: boolean
-        }).IS_REACT_ACT_ENVIRONMENT = true
-        await act(async () => {
-          client.setup.renderer.destroy()
-        })
+        await this.disposeClient(client)
       } catch (error) {
         cleanupError ??= error
       }
@@ -277,4 +313,10 @@ export class AcceptanceHarness {
       throw cleanupError
     }
   }
+}
+
+function enableActEnvironment(): void {
+  ;(globalThis as typeof globalThis & {
+    IS_REACT_ACT_ENVIRONMENT?: boolean
+  }).IS_REACT_ACT_ENVIRONMENT = true
 }

@@ -29,6 +29,13 @@
       "when": 1786389734736,
       "tag": "0003_board_join_code_lookup",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1786398651369,
+      "tag": "0004_solid_swordsman",
+      "breakpoints": true
     }
   ]
 }

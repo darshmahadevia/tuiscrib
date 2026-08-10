@@ -6,6 +6,10 @@ export {
   ServiceRequestError,
   type AuthClient,
   type BoardClient,
+  type BoardConnection,
+  type BoardConnectionHandlers,
+  type BoardSocket,
+  type BoardWebSocketFactory,
   type HealthClient,
 } from "./client.ts"
 export {

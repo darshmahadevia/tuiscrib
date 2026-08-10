@@ -61,3 +61,15 @@ export {
   type RenameBoardResponse,
   type RotateJoinCodeResponse,
 } from "./boards.ts"
+export {
+  boardOpenReadyResponseSchema,
+  boardPresenceSchema,
+  boardSnapshotSchema,
+  boardSocketMessageSchema,
+  presenceActivitySchema,
+  type BoardOpenReadyResponse,
+  type BoardPresence,
+  type BoardSnapshot,
+  type BoardSocketMessage,
+  type PresenceActivity,
+} from "./collaboration.ts"

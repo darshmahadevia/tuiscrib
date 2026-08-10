@@ -76,6 +76,7 @@ export const boards = pgTable(
       .notNull()
       .references(() => users.id, { onDelete: "restrict" }),
     joinCodeHash: text("join_code_hash").notNull(),
+    revision: integer("revision").default(0).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
   },
   (table) => [
@@ -94,6 +95,10 @@ export const boards = pgTable(
     check(
       "boards_join_code_hash_format_check",
       sql`${table.joinCodeHash} ~ '^[0-9a-f]{64}$'`,
+    ),
+    check(
+      "boards_revision_nonnegative_check",
+      sql`${table.revision} >= 0`,
     ),
   ],
 )

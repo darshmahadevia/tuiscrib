@@ -123,6 +123,16 @@ export type ListBoardsInput = {
   nameFilter: string
 }
 
+export type OpenBoardInput = {
+  userId: number
+  publicId: string
+}
+
+export type OpenBoardRecord = {
+  board: BoardSummaryRecord
+  revision: number
+}
+
 export type RegisteredUser = {
   user: Pick<AuthUserRecord, "id" | "username">
   sessionId: number
@@ -144,6 +154,7 @@ export type Persistence = {
   joinBoard(input: JoinBoardInput): Promise<JoinBoardResult>
   leaveBoard(input: LeaveBoardInput): Promise<LeaveBoardResult>
   listBoards(input: ListBoardsInput): Promise<BoardSummaryRecord[]>
+  openBoard(input: OpenBoardInput): Promise<OpenBoardRecord | null>
   reset(): Promise<void>
   close(): Promise<void>
 }
@@ -461,6 +472,39 @@ export function createPersistence(options: PersistenceOptions): Persistence {
         name: board.name,
         role: board.role as "owner" | "member",
       }))
+    },
+
+    async openBoard(input) {
+      const result = await database
+        .select({
+          id: boards.publicId,
+          name: boards.name,
+          role: memberships.role,
+          revision: boards.revision,
+        })
+        .from(memberships)
+        .innerJoin(boards, eq(memberships.boardId, boards.id))
+        .where(
+          and(
+            eq(memberships.userId, input.userId),
+            eq(boards.publicId, input.publicId),
+          ),
+        )
+        .limit(1)
+
+      const board = result[0]
+      if (!board) {
+        return null
+      }
+
+      return {
+        board: {
+          id: board.id,
+          name: board.name,
+          role: board.role as "owner" | "member",
+        },
+        revision: board.revision,
+      }
     },
 
     async registerUser(input) {

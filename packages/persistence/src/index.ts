@@ -19,6 +19,8 @@ export {
   type LeaveBoardInput,
   type LeaveBoardResult,
   type ListBoardsInput,
+  type OpenBoardInput,
+  type OpenBoardRecord,
   type RotateJoinCodeInput,
   type RotateJoinCodeResult,
   type TerminalSessionAuthentication,

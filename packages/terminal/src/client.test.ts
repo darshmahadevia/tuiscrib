@@ -1,6 +1,10 @@
 import { expect, test } from "bun:test"
 
-import { createAuthClient, createBoardClient } from "./client.ts"
+import {
+  createAuthClient,
+  createBoardClient,
+  type BoardSocket,
+} from "./client.ts"
 
 test("auth client sends registration through the public HTTP contract", async () => {
   let requestBody = ""
@@ -261,4 +265,122 @@ test("Board client renames and rotates a Board through Owner HTTP actions", asyn
       body: undefined,
     },
   ])
+})
+
+test("Board client preflights Membership, opens the authenticated WebSocket, and delivers snapshots", async () => {
+  const credential = "a".repeat(43)
+  const boardId = "Qx7u3nW8kM2pR5sT9vY4aB"
+  const requests: Array<{ path: string; method?: string; authorization?: string }> = []
+  let socketUrl = ""
+  let socketHeaders: Record<string, string> | undefined
+  let socket: BoardSocket | undefined
+  const client = createBoardClient(
+    "http://tuiscrib.test",
+    async (input, init) => {
+      const url = new URL(String(input))
+      requests.push({
+        path: url.pathname,
+        method: init?.method,
+        authorization: new Headers(init?.headers).get("authorization") ?? undefined,
+      })
+      return new Response(JSON.stringify({ status: "ready" }), { status: 200 })
+    },
+    (url, options) => {
+      socketUrl = url
+      socketHeaders = options.headers
+      socket = {
+        onmessage: null,
+        onerror: null,
+        onclose: null,
+        close: () => undefined,
+      }
+      return socket
+    },
+  )
+  let receivedSnapshot: unknown
+  let closed = false
+  const openBoard = client.openBoard
+  if (!openBoard) {
+    throw new Error("Board client does not support Board collaboration")
+  }
+  const connection = await openBoard(credential, boardId, {
+    onSnapshot: (snapshot) => {
+      receivedSnapshot = snapshot
+    },
+    onError: (error) => {
+      throw error
+    },
+    onClose: () => {
+      closed = true
+    },
+  })
+
+  expect(requests).toEqual([{
+    path: `/boards/${boardId}/collaboration`,
+    method: "GET",
+    authorization: `Bearer ${credential}`,
+  }])
+  expect(socketUrl).toBe(`ws://tuiscrib.test/boards/${boardId}/collaboration`)
+  expect(socketHeaders).toEqual({ authorization: `Bearer ${credential}` })
+
+  socket?.onmessage?.({
+    data: JSON.stringify({
+      type: "snapshot",
+      board: { id: boardId, name: "Ideas", role: "owner" },
+      revision: 0,
+      presence: [{ member: { username: "ada_lovelace" }, activity: "viewing" }],
+    }),
+  })
+  expect(receivedSnapshot).toEqual({
+    type: "snapshot",
+    board: { id: boardId, name: "Ideas", role: "owner" },
+    revision: 0,
+    presence: [{ member: { username: "ada_lovelace" }, activity: "viewing" }],
+  })
+
+  socket?.onclose?.()
+  expect(closed).toBe(true)
+  connection.close()
+})
+
+test("Board client fails closed when a WebSocket sends malformed snapshot data", async () => {
+  const credential = "b".repeat(43)
+  let socket: BoardSocket | undefined
+  let closeCalled = false
+  let receivedError: Error | undefined
+  const client = createBoardClient(
+    "http://tuiscrib.test",
+    async () => new Response(JSON.stringify({ status: "ready" }), { status: 200 }),
+    () => {
+      socket = {
+        onmessage: null,
+        onerror: null,
+        onclose: null,
+        close: () => {
+          closeCalled = true
+        },
+      }
+      return socket
+    },
+  )
+  const openBoard = client.openBoard
+  if (!openBoard) {
+    throw new Error("Board client does not support Board collaboration")
+  }
+
+  await openBoard(credential, "Qx7u3nW8kM2pR5sT9vY4aB", {
+    onSnapshot: () => {
+      throw new Error("malformed snapshot was accepted")
+    },
+    onError: (error) => {
+      receivedError = error
+    },
+    onClose: () => {
+      throw new Error("malformed snapshot should not be reported as a clean close")
+    },
+  })
+
+  socket?.onmessage?.({ data: "not-json" })
+  expect(receivedError?.message).toBe("Board collaboration sent an invalid snapshot.")
+  expect(closeCalled).toBe(true)
 })
