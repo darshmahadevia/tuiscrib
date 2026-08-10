@@ -989,7 +989,7 @@ test("opens the selected Board through its WebSocket and renders authoritative v
           { member: { username: "grace_hopper" }, activity: "viewing" },
         ],
       })
-      return { close: () => undefined }
+      return { send: () => undefined, close: () => undefined }
     },
   }
   const authClient: AuthClient = {

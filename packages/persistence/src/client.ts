@@ -1,18 +1,31 @@
 import { drizzle } from "drizzle-orm/postgres-js"
 import { migrate } from "drizzle-orm/postgres-js/migrator"
-import { and, asc, eq, gt, isNull, lt, sql } from "drizzle-orm"
+import { aliasedTable, and, asc, eq, gt, isNull, lt, sql } from "drizzle-orm"
 import { fileURLToPath } from "node:url"
 import postgres from "postgres"
 
-import { MAX_BOARD_MEMBERS } from "@tuiscrib/contracts"
+import {
+  MAX_BOARD_MEMBERS,
+  MAX_STICKY_NOTES,
+  stickyNoteColorSchema,
+  stickyNotePositionSchema,
+  stickyNoteTextSchema,
+  type StickyNote,
+  type StickyNoteColor,
+  type StickyNotePosition,
+} from "@tuiscrib/contracts"
 
 import {
   boards,
   memberships,
   serviceMetadata,
+  stickyNotes,
   terminalSessions,
   users,
 } from "./schema.ts"
+
+const stickyNoteAuthors = aliasedTable(users, "sticky_note_authors")
+const stickyNoteEditors = aliasedTable(users, "sticky_note_editors")
 
 export type PersistenceHealth = {
   database: "ready"
@@ -131,7 +144,28 @@ export type OpenBoardInput = {
 export type OpenBoardRecord = {
   board: BoardSummaryRecord
   revision: number
+  stickyNotes?: StickyNoteRecord[]
 }
+
+export type StickyNoteRecord = StickyNote
+
+export type CreateStickyNoteInput = {
+  publicId: string
+  boardId: string
+  userId: number
+  text: string
+  position: StickyNotePosition
+  color: StickyNoteColor
+  now: Date
+}
+
+export type CreateStickyNoteResult =
+  | { kind: "created"; stickyNote: StickyNoteRecord; revision: number }
+  | { kind: "empty_text" }
+  | { kind: "invalid_text" }
+  | { kind: "not_found" }
+  | { kind: "not_member" }
+  | { kind: "board_capacity" }
 
 export type RegisteredUser = {
   user: Pick<AuthUserRecord, "id" | "username">
@@ -155,6 +189,7 @@ export type Persistence = {
   leaveBoard(input: LeaveBoardInput): Promise<LeaveBoardResult>
   listBoards(input: ListBoardsInput): Promise<BoardSummaryRecord[]>
   openBoard(input: OpenBoardInput): Promise<OpenBoardRecord | null>
+  createStickyNote(input: CreateStickyNoteInput): Promise<CreateStickyNoteResult>
   reset(): Promise<void>
   close(): Promise<void>
 }
@@ -166,6 +201,35 @@ export type PersistenceOptions = {
 }
 
 const defaultMigrationsFolder = fileURLToPath(new URL("../drizzle", import.meta.url))
+
+function toStickyNoteRecord(note: {
+  id: string
+  text: string
+  textVersion: number
+  positionX: number
+  positionY: number
+  color: string
+  stackingOrder: number
+  createdAt: Date
+  lastEditedAt: Date
+  authoredByUsername: string
+  lastEditedByUsername: string
+}): StickyNoteRecord {
+  return {
+    id: note.id,
+    text: note.text,
+    textVersion: note.textVersion,
+    position: { x: note.positionX, y: note.positionY },
+    color: stickyNoteColorSchema.parse(note.color),
+    stackingOrder: note.stackingOrder,
+    authorship: { member: { username: note.authoredByUsername } },
+    createdAt: note.createdAt.toISOString(),
+    lastEdit: {
+      member: { username: note.lastEditedByUsername },
+      at: note.lastEditedAt.toISOString(),
+    },
+  }
+}
 
 export function createPersistence(options: PersistenceOptions): Persistence {
   const client = postgres(options.databaseUrl, {
@@ -477,6 +541,7 @@ export function createPersistence(options: PersistenceOptions): Persistence {
     async openBoard(input) {
       const result = await database
         .select({
+          boardId: boards.id,
           id: boards.publicId,
           name: boards.name,
           role: memberships.role,
@@ -497,6 +562,26 @@ export function createPersistence(options: PersistenceOptions): Persistence {
         return null
       }
 
+      const noteRows = await database
+        .select({
+          id: stickyNotes.publicId,
+          text: stickyNotes.text,
+          textVersion: stickyNotes.textVersion,
+          positionX: stickyNotes.positionX,
+          positionY: stickyNotes.positionY,
+          color: stickyNotes.color,
+          stackingOrder: stickyNotes.stackingOrder,
+          createdAt: stickyNotes.createdAt,
+          lastEditedAt: stickyNotes.lastEditedAt,
+          authoredByUsername: stickyNoteAuthors.username,
+          lastEditedByUsername: stickyNoteEditors.username,
+        })
+        .from(stickyNotes)
+        .innerJoin(stickyNoteAuthors, eq(stickyNotes.authoredByUserId, stickyNoteAuthors.id))
+        .innerJoin(stickyNoteEditors, eq(stickyNotes.lastEditedByUserId, stickyNoteEditors.id))
+        .where(eq(stickyNotes.boardId, board.boardId))
+        .orderBy(asc(stickyNotes.stackingOrder), asc(stickyNotes.id))
+
       return {
         board: {
           id: board.id,
@@ -504,7 +589,102 @@ export function createPersistence(options: PersistenceOptions): Persistence {
           role: board.role as "owner" | "member",
         },
         revision: board.revision,
+        stickyNotes: noteRows.map(toStickyNoteRecord),
       }
+    },
+
+    async createStickyNote(input) {
+      if (input.text.length === 0) {
+        return { kind: "empty_text" as const }
+      }
+      if (
+        !stickyNoteTextSchema.safeParse(input.text).success ||
+        !stickyNotePositionSchema.safeParse(input.position).success ||
+        !stickyNoteColorSchema.safeParse(input.color).success
+      ) {
+        return { kind: "invalid_text" as const }
+      }
+
+      return database.transaction(async (transaction) => {
+        const boardRows = await transaction
+          .select({ id: boards.id })
+          .from(boards)
+          .where(eq(boards.publicId, input.boardId))
+          .for("update")
+        const board = boardRows[0]
+        if (!board) {
+          return { kind: "not_found" as const }
+        }
+
+        const memberRows = await transaction
+          .select({ username: users.username })
+          .from(memberships)
+          .innerJoin(users, eq(memberships.userId, users.id))
+          .where(
+            and(
+              eq(memberships.boardId, board.id),
+              eq(memberships.userId, input.userId),
+            ),
+          )
+          .limit(1)
+        const member = memberRows[0]
+        if (!member) {
+          return { kind: "not_member" as const }
+        }
+
+        const noteCountRows = await transaction
+          .select({ count: sql<number>`count(*)` })
+          .from(stickyNotes)
+          .where(eq(stickyNotes.boardId, board.id))
+        const noteCount = Number(noteCountRows[0]?.count ?? 0)
+        if (noteCount >= MAX_STICKY_NOTES) {
+          return { kind: "board_capacity" as const }
+        }
+
+        await transaction.insert(stickyNotes).values({
+          publicId: input.publicId,
+          boardId: board.id,
+          authoredByUserId: input.userId,
+          text: input.text,
+          textVersion: 1,
+          positionX: input.position.x,
+          positionY: input.position.y,
+          color: input.color,
+          stackingOrder: noteCount,
+          createdAt: input.now,
+          lastEditedByUserId: input.userId,
+          lastEditedAt: input.now,
+        })
+
+        const revisionRows = await transaction
+          .update(boards)
+          .set({ revision: sql`${boards.revision} + 1` })
+          .where(eq(boards.id, board.id))
+          .returning({ revision: boards.revision })
+        const revision = revisionRows[0]?.revision
+        if (revision === undefined) {
+          throw new Error("Board revision could not be advanced")
+        }
+
+        return {
+          kind: "created" as const,
+          revision,
+          stickyNote: {
+            id: input.publicId,
+            text: input.text,
+            textVersion: 1,
+            position: input.position,
+            color: input.color,
+            stackingOrder: noteCount,
+            authorship: { member: { username: member.username } },
+            createdAt: input.now.toISOString(),
+            lastEdit: {
+              member: { username: member.username },
+              at: input.now.toISOString(),
+            },
+          },
+        }
+      })
     },
 
     async registerUser(input) {

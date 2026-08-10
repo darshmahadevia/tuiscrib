@@ -262,3 +262,175 @@ test("sends one authoritative snapshot first, deduplicates duplicate Sessions, a
     await server.stop(true)
   }
 })
+
+test("grants creation authority before publication and broadcasts one durable revisioned Sticky Note", async () => {
+  const provisionalId = "71ed2c45-67be-4a55-a5ae-90aafc1ecb1c"
+  const note = {
+    id: "Lm7u3nW8kM2pR5sT9vY4aB",
+    text: "First durable note",
+    textVersion: 1,
+    position: { x: 3, y: -1 },
+    color: "yellow" as const,
+    stackingOrder: 0,
+    authorship: { member: { username: "ada_lovelace" } },
+    createdAt: "2026-08-10T00:00:00.000Z",
+    lastEdit: {
+      member: { username: "ada_lovelace" },
+      at: "2026-08-10T00:00:00.000Z",
+    },
+  }
+  const createInputs: Array<Record<string, unknown>> = []
+  let releaseCreation!: () => void
+  const creationMayCommit = new Promise<void>((resolve) => {
+    releaseCreation = resolve
+  })
+  let creationStarted!: () => void
+  const creationStartedPromise = new Promise<void>((resolve) => {
+    creationStarted = resolve
+  })
+  const collaboration = createBoardCollaboration({
+    clock: () => new Date("2026-08-10T00:00:00.000Z"),
+    persistence: {
+      openBoard: async ({ userId, publicId }) => ({
+        board: {
+          id: publicId,
+          name: "Creation Ideas",
+          role: userId === 7 ? "owner" : "member",
+        },
+        revision: 0,
+        stickyNotes: [],
+      }),
+      createStickyNote: async (input: Record<string, unknown>) => {
+        createInputs.push(input)
+        creationStarted()
+        await creationMayCommit
+        return { kind: "created" as const, revision: 1, stickyNote: note }
+      },
+    },
+    sessionAuthenticator: async (value) => {
+      if (value === credential) {
+        return { user: { id: 7, username: "ada_lovelace" } }
+      }
+      if (value === "b".repeat(43)) {
+        return { user: { id: 8, username: "grace_hopper" } }
+      }
+      return null
+    },
+    stickyNoteIdGenerator: () => note.id,
+  })
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request, bunServer) {
+      const result = await collaboration.handleUpgrade(request, bunServer)
+      if (result !== null) {
+        return result
+      }
+      return new Response("not found", { status: 404 })
+    },
+    websocket: collaboration.websocket,
+  })
+  const url = `ws://127.0.0.1:${server.port}/boards/${boardId}/collaboration`
+  const owner = createSocketClient(url, credential)
+  const member = createSocketClient(url, "b".repeat(43))
+
+  try {
+    await Promise.all([waitForSocketOpen(owner.socket), waitForSocketOpen(member.socket)])
+    await owner.nextMessage()
+    await member.nextMessage()
+    await nextMessageMatching(owner, (message) => (message.presence as unknown[]).length === 2)
+
+    owner.socket.send(JSON.stringify({
+      type: "begin_sticky_note",
+      provisionalId,
+      position: { x: 3, y: -1 },
+      color: "yellow",
+    }))
+
+    const claim = await nextMessageMatching(
+      owner,
+      (message) => message.type === "sticky_note_creation_claim_granted",
+    )
+    const claimId = String(claim.claimId)
+    expect(claim).toMatchObject({
+      type: "sticky_note_creation_claim_granted",
+      provisionalId,
+      position: { x: 3, y: -1 },
+      color: "yellow",
+    })
+    const creatingPresence = await nextMessageMatching(
+      member,
+      (message) =>
+        message.type === "snapshot" &&
+        (message.presence as Array<{ member: { username: string }; activity: string }>).some(
+          (presence) => presence.member.username === "ada_lovelace" && presence.activity === "creating",
+        ),
+    )
+    expect(creatingPresence).toMatchObject({ type: "snapshot", revision: 0 })
+    expect(createInputs).toHaveLength(0)
+
+    const privateText = "do not echo this text"
+    member.socket.send(JSON.stringify({
+      type: "publish_sticky_note",
+      claimId: "invalid-claim",
+      provisionalId,
+      text: privateText,
+    }))
+    const invalidPayloadError = await nextMessageMatching(member, (message) => message.type === "error")
+    expect(invalidPayloadError).toMatchObject({ type: "error", code: "invalid_command" })
+    expect(JSON.stringify(invalidPayloadError)).not.toContain(privateText)
+
+    member.socket.send(JSON.stringify({
+      type: "begin_sticky_note",
+      provisionalId,
+      position: { x: 3, y: -1 },
+      color: "yellow",
+    }))
+    await expect(nextMessageMatching(member, (message) => message.type === "error"))
+      .resolves.toMatchObject({
+        type: "error",
+        code: "creation_claim_unavailable",
+      })
+
+    const publish = JSON.stringify({
+      type: "publish_sticky_note",
+      claimId,
+      provisionalId,
+      text: note.text,
+    })
+    owner.socket.send(publish)
+    owner.socket.send(publish)
+    const duplicateErrorPromise = nextMessageMatching(owner, (message) => message.type === "error")
+    await creationStartedPromise
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(createInputs).toHaveLength(1)
+    releaseCreation()
+
+    await expect(duplicateErrorPromise)
+      .resolves.toMatchObject({ type: "error", code: "invalid_creation_claim" })
+    const [ownerCreated, memberCreated] = await Promise.all([
+      nextMessageMatching(owner, (message) => message.type === "sticky_note_created"),
+      nextMessageMatching(member, (message) => message.type === "sticky_note_created"),
+    ])
+    expect(ownerCreated).toEqual({
+      type: "sticky_note_created",
+      revision: 1,
+      provisionalId,
+      stickyNote: note,
+    })
+    expect(memberCreated).toEqual(ownerCreated)
+    expect(createInputs).toHaveLength(1)
+    expect(createInputs[0]).toMatchObject({
+      boardId,
+      userId: 7,
+      text: note.text,
+      position: note.position,
+      color: note.color,
+    })
+    expect(createInputs).toHaveLength(1)
+  } finally {
+    releaseCreation()
+    await Promise.all([closeSocket(owner.socket), closeSocket(member.socket)])
+    server.stop(true)
+  }
+})

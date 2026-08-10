@@ -36,6 +36,20 @@
       "when": 1786398651369,
       "tag": "0004_solid_swordsman",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1786400953255,
+      "tag": "0005_lethal_bastion",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1786402890282,
+      "tag": "0006_secret_zaladane",
+      "breakpoints": true
     }
   ]
 }

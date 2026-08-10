@@ -11,6 +11,7 @@ import {
 } from "@tuiscrib/service"
 import {
   HealthScreen,
+  type StickyNoteTimer,
   TerminalShell,
   type BoardClient,
   type CredentialStore,
@@ -236,6 +237,7 @@ export class AcceptanceHarness {
     label: string,
     credentialStore: CredentialStore = createMemoryCredentialStore(),
     boardClient: BoardClient = createBoardClient(this.baseUrl),
+    stickyNoteTimer?: StickyNoteTimer,
   ): Promise<TerminalClient> {
     enableActEnvironment()
     let setup!: TestRendererSetup
@@ -246,6 +248,7 @@ export class AcceptanceHarness {
           authClient={createAuthClient(this.baseUrl)}
           boardClient={boardClient}
           credentialStore={credentialStore}
+          stickyNoteTimer={stickyNoteTimer}
         />,
         {
           width: 80,

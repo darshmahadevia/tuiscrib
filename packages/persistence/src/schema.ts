@@ -11,6 +11,12 @@ import {
   uniqueIndex,
 } from "drizzle-orm/pg-core"
 
+import {
+  MAX_STICKY_NOTE_CHARACTERS,
+  MAX_STICKY_NOTES,
+  stickyNoteColorSchema,
+} from "@tuiscrib/contracts"
+
 export const serviceMetadata = pgTable("service_metadata", {
   key: text("key").primaryKey(),
   value: text("value").notNull(),
@@ -121,6 +127,65 @@ export const memberships = pgTable(
     check("memberships_role_check", sql`${table.role} IN ('owner', 'member')`),
     uniqueIndex("memberships_one_owner_per_board").on(table.boardId).where(
       sql`${table.role} = 'owner'`,
+    ),
+  ],
+)
+
+export const stickyNotes = pgTable(
+  "sticky_notes",
+  {
+    id: bigint("id", { mode: "number" }).generatedAlwaysAsIdentity().primaryKey(),
+    publicId: text("public_id").notNull(),
+    boardId: bigint("board_id", { mode: "number" })
+      .notNull()
+      .references(() => boards.id, { onDelete: "cascade" }),
+    authoredByUserId: bigint("authored_by_user_id", { mode: "number" })
+      .notNull()
+      .references(() => users.id, { onDelete: "restrict" }),
+    text: text("text").notNull(),
+    textVersion: integer("text_version").default(1).notNull(),
+    positionX: integer("position_x").notNull(),
+    positionY: integer("position_y").notNull(),
+    color: text("color").notNull(),
+    stackingOrder: integer("stacking_order").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    lastEditedByUserId: bigint("last_edited_by_user_id", { mode: "number" })
+      .notNull()
+      .references(() => users.id, { onDelete: "restrict" }),
+    lastEditedAt: timestamp("last_edited_at", { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    uniqueIndex("sticky_notes_public_id_unique").on(table.publicId),
+    index("sticky_notes_board_id_idx").on(table.boardId),
+    index("sticky_notes_authored_by_user_id_idx").on(table.authoredByUserId),
+    index("sticky_notes_last_edited_by_user_id_idx").on(table.lastEditedByUserId),
+    check(
+      "sticky_notes_public_id_format_check",
+      sql`${table.publicId} ~ '^[A-Za-z0-9_-]{22}$'`,
+    ),
+    check(
+      "sticky_notes_text_length_check",
+      sql`char_length(${table.text}) > 0 AND char_length(${table.text}) <= ${sql.raw(String(MAX_STICKY_NOTE_CHARACTERS))}`,
+    ),
+    check(
+      "sticky_notes_text_version_check",
+      sql`${table.textVersion} >= 1`,
+    ),
+    check(
+      "sticky_notes_position_x_check",
+      sql`${table.positionX} >= -1000000 AND ${table.positionX} <= 1000000`,
+    ),
+    check(
+      "sticky_notes_position_y_check",
+      sql`${table.positionY} >= -1000000 AND ${table.positionY} <= 1000000`,
+    ),
+    check(
+      "sticky_notes_color_check",
+      sql`${table.color} IN (${sql.join(stickyNoteColorSchema.options.map((color) => sql.raw(`'${color}'`)), sql`, `)})`,
+    ),
+    check(
+      "sticky_notes_stacking_order_check",
+      sql`${table.stackingOrder} >= 0 AND ${table.stackingOrder} < ${sql.raw(String(MAX_STICKY_NOTES))}`,
     ),
   ],
 )

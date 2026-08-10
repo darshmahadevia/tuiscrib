@@ -1,4 +1,5 @@
 import {
+  boardCommandSchema,
   boardOpenReadyResponseSchema,
   boardListResponseSchema,
   boardSocketMessageSchema,
@@ -14,6 +15,10 @@ import {
   terminalSessionResponseSchema,
   type AuthResponse,
   type BoardSnapshot,
+  type BoardCommand,
+  type BoardCommandError,
+  type StickyNoteCreated,
+  type StickyNoteCreationClaimGranted,
   type BoardListResponse,
   type CreateBoardRequest,
   type CreateBoardResponse,
@@ -62,6 +67,7 @@ export type BoardSocket = {
   onmessage: ((event: { data: unknown }) => void) | null
   onerror: (() => void) | null
   onclose: (() => void) | null
+  send(data: string): void
   close(): void
 }
 
@@ -74,9 +80,13 @@ export type BoardConnectionHandlers = {
   onSnapshot(snapshot: BoardSnapshot): void
   onError(error: Error): void
   onClose(): void
+  onStickyNoteCreationClaimGranted?(claim: StickyNoteCreationClaimGranted): void
+  onStickyNoteCreated?(event: StickyNoteCreated): void
+  onCommandError?(error: BoardCommandError): void
 }
 
 export type BoardConnection = {
+  send(command: BoardCommand): void
   close(): void
 }
 
@@ -250,6 +260,7 @@ export function createBoardClient(
         headers: { authorization: `Bearer ${credential}` },
       })
       let closedByCaller = false
+      let lastRevision: number | null = null
       socket.onmessage = (event) => {
         let payload: unknown
         try {
@@ -270,7 +281,36 @@ export function createBoardClient(
         }
 
         if (parsed.data.type === "snapshot") {
+          if (lastRevision !== null && parsed.data.revision < lastRevision) {
+            return
+          }
+          lastRevision = parsed.data.revision
           handlers.onSnapshot(parsed.data)
+          return
+        }
+
+        if (parsed.data.type === "sticky_note_creation_claim_granted") {
+          handlers.onStickyNoteCreationClaimGranted?.(parsed.data)
+          return
+        }
+
+        if (parsed.data.type === "sticky_note_created") {
+          if (lastRevision !== null && parsed.data.revision <= lastRevision) {
+            return
+          }
+          if (lastRevision !== null && parsed.data.revision !== lastRevision + 1) {
+            closedByCaller = true
+            handlers.onError(new Error("Board collaboration revision gap detected."))
+            socket.close()
+            return
+          }
+          lastRevision = parsed.data.revision
+          handlers.onStickyNoteCreated?.(parsed.data)
+          return
+        }
+
+        if (parsed.data.type === "error") {
+          handlers.onCommandError?.(parsed.data)
         }
       }
       socket.onerror = () => {
@@ -285,6 +325,13 @@ export function createBoardClient(
       }
 
       return {
+        send(command) {
+          const parsed = boardCommandSchema.parse(command)
+          if (closedByCaller) {
+            throw new Error("Board collaboration is closed.")
+          }
+          socket.send(JSON.stringify(parsed))
+        },
         close() {
           closedByCaller = true
           socket.close()

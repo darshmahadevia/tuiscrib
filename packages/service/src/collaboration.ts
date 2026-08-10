@@ -1,15 +1,24 @@
+import { randomBytes } from "node:crypto"
+
 import {
+  boardCommandErrorSchema,
+  boardCommandSchema,
   boardIdentifierSchema,
   boardOpenReadyResponseSchema,
   boardSnapshotSchema,
+  stickyNoteCreationClaimGrantedSchema,
+  stickyNoteCreatedSchema,
   serviceErrorSchema,
+  type BoardCommand,
   type BoardSnapshot,
   type BoardOpenReadyResponse,
   type ServiceError,
 } from "@tuiscrib/contracts"
 import type {
+  CreateStickyNoteResult,
   OpenBoardRecord,
   Persistence,
+  StickyNoteRecord,
   TerminalSessionAuthentication,
 } from "@tuiscrib/persistence"
 
@@ -24,7 +33,11 @@ const BOARD_COLLABORATION_PATH = /^\/boards\/([^/]+)\/collaboration$/
 export type BoardCollaborationPersistence = Pick<Persistence, "openBoard"> &
   Partial<Pick<
     Persistence,
-    "findUserByUsername" | "registerUser" | "createTerminalSession" | "authenticateTerminalSession"
+    | "createStickyNote"
+    | "findUserByUsername"
+    | "registerUser"
+    | "createTerminalSession"
+    | "authenticateTerminalSession"
   >>
 
 export type BoardOpenOperationResult =
@@ -59,12 +72,28 @@ type ActiveConnection = {
 
 type BoardPresenceState = {
   connections: Map<string, ActiveConnection>
-  members: Map<number, { username: string; connections: Set<string> }>
+  members: Map<number, {
+    username: string
+    connections: Set<string>
+    activityByConnection: Map<string, "viewing" | "creating" | "editing" | "moving">
+  }>
+}
+
+type StickyNoteCreationClaim = {
+  claimId: string
+  boardId: string
+  connectionId: string
+  provisionalId: string
+  position: { x: number; y: number }
+  color: "amber" | "blue" | "cyan" | "green" | "magenta" | "red" | "violet" | "yellow"
+  status: "creating" | "publishing" | "editing"
+  stickyNoteId?: string
 }
 
 export type BoardCollaborationOptions = {
   persistence: BoardCollaborationPersistence
   clock?: () => Date
+  stickyNoteIdGenerator?: () => string
   sessionAuthenticator?: (
     credential: string | null,
   ) => Promise<TerminalSessionAuthentication | undefined>
@@ -75,7 +104,10 @@ export function createBoardCollaboration(
 ): BoardCollaboration {
   const clock = options.clock ?? (() => new Date())
   const authenticate = options.sessionAuthenticator ?? createSessionAuthenticator(options, clock)
+  const stickyNoteIdGenerator = options.stickyNoteIdGenerator ?? defaultStickyNoteIdGenerator
   const presenceByBoard = new Map<string, BoardPresenceState>()
+  const creationClaimsById = new Map<string, StickyNoteCreationClaim>()
+  const creationClaimIdByKey = new Map<string, string>()
 
   const collaboration: BoardCollaboration = {
     async openBoard(user, publicId) {
@@ -143,8 +175,8 @@ export function createBoardCollaboration(
       close(socket) {
         disconnect(socket)
       },
-      message() {
-        // Board commands are introduced by later collaboration slices.
+      message(socket, message) {
+        void handleCommand(socket, message)
       },
     },
   }
@@ -160,15 +192,21 @@ export function createBoardCollaboration(
     }
     const state = presenceByBoard.get(boardId) ?? {
       connections: new Map<string, ActiveConnection>(),
-      members: new Map<number, { username: string; connections: Set<string> }>(),
+      members: new Map<number, {
+        username: string
+        connections: Set<string>
+        activityByConnection: Map<string, "viewing" | "creating" | "editing" | "moving">
+      }>(),
     }
     const member = state.members.get(user.id) ?? {
       username: user.username,
       connections: new Set<string>(),
+      activityByConnection: new Map(),
     }
 
     state.connections.set(connection.id, connection)
     member.connections.add(connection.id)
+    member.activityByConnection.set(connection.id, "viewing")
     state.members.set(user.id, member)
     presenceByBoard.set(boardId, state)
 
@@ -186,8 +224,16 @@ export function createBoardCollaboration(
     const member = state.members.get(user.id)
     if (member) {
       member.connections.delete(connectionId)
+      member.activityByConnection.delete(connectionId)
       if (member.connections.size === 0) {
         state.members.delete(user.id)
+      }
+    }
+
+    for (const claim of creationClaimsById.values()) {
+      if (claim.connectionId === connectionId) {
+        creationClaimsById.delete(claim.claimId)
+        creationClaimIdByKey.delete(creationClaimKey(claim.boardId, claim.provisionalId))
       }
     }
 
@@ -202,7 +248,7 @@ export function createBoardCollaboration(
     const presence = [...state.members.values()]
       .map((member) => ({
         member: { username: member.username },
-        activity: "viewing" as const,
+        activity: activityForMember(member),
       }))
       .sort((left, right) => left.member.username < right.member.username ? -1 : 1)
 
@@ -211,6 +257,7 @@ export function createBoardCollaboration(
       board: connection.board.board,
       revision: connection.board.revision,
       presence,
+      stickyNotes: connection.board.stickyNotes ?? [],
     })
   }
 
@@ -226,7 +273,299 @@ export function createBoardCollaboration(
     }
   }
 
+  async function handleCommand(socket: BoardWebSocket, rawMessage: unknown): Promise<void> {
+    let payload: unknown
+    try {
+      payload = JSON.parse(decodeSocketMessage(rawMessage))
+    } catch {
+      sendCommandError(socket, "invalid_command", "The Board command was invalid.")
+      return
+    }
+
+    const parsed = boardCommandSchema.safeParse(payload)
+    if (!parsed.success) {
+      sendCommandError(socket, "invalid_command", "The Board command was invalid.")
+      return
+    }
+
+    try {
+      switch (parsed.data.type) {
+        case "begin_sticky_note":
+          beginStickyNote(socket, parsed.data)
+          return
+        case "publish_sticky_note":
+          await publishStickyNote(socket, parsed.data)
+          return
+        case "release_sticky_note_creation":
+          releaseStickyNoteCreation(socket, parsed.data.claimId, parsed.data.provisionalId)
+          return
+      }
+    } catch {
+      sendCommandError(socket, "sticky_note_rejected", "Sticky Note creation was rejected.")
+    }
+  }
+
+  function beginStickyNote(
+    socket: BoardWebSocket,
+    command: Extract<BoardCommand, { type: "begin_sticky_note" }>,
+  ): void {
+    if (typeof options.persistence.createStickyNote !== "function") {
+      sendCommandError(socket, "sticky_note_rejected", "Sticky Note creation is unavailable.")
+      return
+    }
+
+    const key = creationClaimKey(socket.data.boardId, command.provisionalId)
+    const existingClaimId = creationClaimIdByKey.get(key)
+    if (existingClaimId) {
+      const existingClaim = creationClaimsById.get(existingClaimId)
+      if (existingClaim?.connectionId === socket.data.connectionId) {
+        sendClaimAcknowledgement(socket, existingClaim)
+      } else {
+        sendCommandError(
+          socket,
+          "creation_claim_unavailable",
+          "Another Terminal Session already holds this creation authority.",
+        )
+      }
+      return
+    }
+
+    const claim: StickyNoteCreationClaim = {
+      claimId: crypto.randomUUID(),
+      boardId: socket.data.boardId,
+      connectionId: socket.data.connectionId,
+      provisionalId: command.provisionalId,
+      position: command.position,
+      color: command.color,
+      status: "creating",
+    }
+    creationClaimsById.set(claim.claimId, claim)
+    creationClaimIdByKey.set(key, claim.claimId)
+    setActivity(socket, "creating")
+
+    const state = presenceByBoard.get(socket.data.boardId)
+    if (state) {
+      broadcastSnapshot(state)
+    }
+    sendClaimAcknowledgement(socket, claim)
+  }
+
+  async function publishStickyNote(
+    socket: BoardWebSocket,
+    command: Extract<BoardCommand, { type: "publish_sticky_note" }>,
+  ): Promise<void> {
+    const claim = creationClaimsById.get(command.claimId)
+    if (
+      !claim ||
+      claim.connectionId !== socket.data.connectionId ||
+      claim.boardId !== socket.data.boardId ||
+      claim.provisionalId !== command.provisionalId ||
+      claim.status !== "creating"
+    ) {
+      sendCommandError(
+        socket,
+        "invalid_creation_claim",
+        "Sticky Note creation authority is invalid or already used.",
+      )
+      return
+    }
+
+    const createStickyNote = options.persistence.createStickyNote
+    if (typeof createStickyNote !== "function") {
+      sendCommandError(socket, "sticky_note_rejected", "Sticky Note creation is unavailable.")
+      return
+    }
+
+    claim.status = "publishing"
+    try {
+      const result = await createStickyNote({
+        publicId: stickyNoteIdGenerator(),
+        boardId: socket.data.boardId,
+        userId: socket.data.user.id,
+        text: command.text,
+        position: claim.position,
+        color: claim.color,
+        now: clock(),
+      })
+      if (result.kind !== "created") {
+        claim.status = "creating"
+        sendPersistenceError(socket, result)
+        return
+      }
+
+      const event = stickyNoteCreatedSchema.parse({
+        type: "sticky_note_created",
+        revision: result.revision,
+        provisionalId: claim.provisionalId,
+        stickyNote: result.stickyNote,
+      })
+      claim.status = "editing"
+      claim.stickyNoteId = result.stickyNote.id
+
+      const state = presenceByBoard.get(socket.data.boardId)
+      if (!state) {
+        return
+      }
+      setActivity(socket, "editing")
+      applyCreatedNote(state, result.stickyNote, result.revision)
+      broadcastStickyNoteCreated(state, event)
+      broadcastSnapshot(state)
+    } catch (error) {
+      if (claim.status === "publishing") {
+        claim.status = "creating"
+      }
+      throw error
+    }
+  }
+
+  function releaseStickyNoteCreation(
+    socket: BoardWebSocket,
+    claimId: string,
+    provisionalId: string,
+  ): void {
+    const claim = creationClaimsById.get(claimId)
+    if (
+      !claim ||
+      claim.connectionId !== socket.data.connectionId ||
+      claim.boardId !== socket.data.boardId ||
+      claim.provisionalId !== provisionalId
+    ) {
+      sendCommandError(
+        socket,
+        "invalid_creation_claim",
+        "Sticky Note creation authority is invalid or already used.",
+      )
+      return
+    }
+
+    creationClaimsById.delete(claim.claimId)
+    creationClaimIdByKey.delete(creationClaimKey(claim.boardId, claim.provisionalId))
+    setActivity(socket, "viewing")
+    const state = presenceByBoard.get(socket.data.boardId)
+    if (state) {
+      broadcastSnapshot(state)
+    }
+  }
+
+  function setActivity(
+    socket: BoardWebSocket,
+    activity: "viewing" | "creating" | "editing" | "moving",
+  ): void {
+    const state = presenceByBoard.get(socket.data.boardId)
+    const member = state?.members.get(socket.data.user.id)
+    if (!member) {
+      return
+    }
+    member.activityByConnection.set(socket.data.connectionId, activity)
+  }
+
+  function applyCreatedNote(
+    state: BoardPresenceState,
+    note: StickyNoteRecord,
+    revision: number,
+  ): void {
+    for (const connection of state.connections.values()) {
+      const stickyNotes = [...(connection.board.stickyNotes ?? [])]
+        .filter((currentNote) => currentNote.id !== note.id)
+      stickyNotes.push(note)
+      stickyNotes.sort((left, right) =>
+        left.stackingOrder - right.stackingOrder || left.id.localeCompare(right.id))
+      connection.board = {
+        ...connection.board,
+        revision,
+        stickyNotes,
+      }
+    }
+  }
+
+  function broadcastStickyNoteCreated(
+    state: BoardPresenceState,
+    event: ReturnType<typeof stickyNoteCreatedSchema.parse>,
+  ): void {
+    const serialized = JSON.stringify(event)
+    for (const connection of state.connections.values()) {
+      connection.socket.send(serialized)
+    }
+  }
+
+  function sendClaimAcknowledgement(
+    socket: BoardWebSocket,
+    claim: StickyNoteCreationClaim,
+  ): void {
+    socket.send(JSON.stringify(stickyNoteCreationClaimGrantedSchema.parse({
+      type: "sticky_note_creation_claim_granted",
+      provisionalId: claim.provisionalId,
+      claimId: claim.claimId,
+      position: claim.position,
+      color: claim.color,
+    })))
+  }
+
+  function sendPersistenceError(socket: BoardWebSocket, result: CreateStickyNoteResult): void {
+    switch (result.kind) {
+      case "empty_text":
+        sendCommandError(socket, "empty_sticky_note", "A new Sticky Note needs non-empty text.")
+        return
+      case "board_capacity":
+        sendCommandError(socket, "sticky_note_capacity", "This Board cannot hold more Sticky Notes.")
+        return
+      case "invalid_text":
+        sendCommandError(socket, "sticky_note_rejected", "Sticky Note text was rejected.")
+        return
+      case "not_found":
+      case "not_member":
+        sendCommandError(socket, "sticky_note_rejected", "Sticky Note creation was rejected.")
+        return
+      case "created":
+        return
+    }
+  }
+
+  function sendCommandError(
+    socket: BoardWebSocket,
+    code: "invalid_command" | "creation_claim_unavailable" | "invalid_creation_claim" | "empty_sticky_note" | "sticky_note_capacity" | "sticky_note_rejected" | "revision_conflict",
+    error: string,
+  ): void {
+    socket.send(JSON.stringify(boardCommandErrorSchema.parse({
+      type: "error",
+      code,
+      error,
+    })))
+  }
+
   return collaboration
+}
+
+function activityForMember(member: {
+  activityByConnection: Map<string, "viewing" | "creating" | "editing" | "moving">
+}): "viewing" | "creating" | "editing" | "moving" {
+  for (const activity of ["creating", "editing", "moving", "viewing"] as const) {
+    if ([...member.activityByConnection.values()].includes(activity)) {
+      return activity
+    }
+  }
+  return "viewing"
+}
+
+function creationClaimKey(boardId: string, provisionalId: string): string {
+  return `${boardId}:${provisionalId}`
+}
+
+function decodeSocketMessage(message: unknown): string {
+  if (typeof message === "string") {
+    return message
+  }
+  if (message instanceof ArrayBuffer) {
+    return new TextDecoder().decode(message)
+  }
+  if (message instanceof Uint8Array) {
+    return new TextDecoder().decode(message)
+  }
+  return String(message)
+}
+
+function defaultStickyNoteIdGenerator(): string {
+  return randomBytes(16).toString("base64url")
 }
 
 export function boardOpenReadyResponse(): BoardOpenReadyResponse {

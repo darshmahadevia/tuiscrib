@@ -292,6 +292,7 @@ test("Board client preflights Membership, opens the authenticated WebSocket, and
         onmessage: null,
         onerror: null,
         onclose: null,
+        send: () => undefined,
         close: () => undefined,
       }
       return socket
@@ -356,6 +357,7 @@ test("Board client fails closed when a WebSocket sends malformed snapshot data",
         onmessage: null,
         onerror: null,
         onclose: null,
+        send: () => undefined,
         close: () => {
           closeCalled = true
         },
@@ -383,4 +385,130 @@ test("Board client fails closed when a WebSocket sends malformed snapshot data",
   socket?.onmessage?.({ data: "not-json" })
   expect(receivedError?.message).toBe("Board collaboration sent an invalid snapshot.")
   expect(closeCalled).toBe(true)
+})
+
+test("Board client sends creation commands and rejects stale or gapped durable revisions", async () => {
+  const credential = "c".repeat(43)
+  const boardId = "Qx7u3nW8kM2pR5sT9vY4aB"
+  let socket: BoardSocket | undefined
+  const sent: string[] = []
+  const received: string[] = []
+  let revisionError: Error | undefined
+  const client = createBoardClient(
+    "http://tuiscrib.test",
+    async () => new Response(JSON.stringify({ status: "ready" }), { status: 200 }),
+    () => {
+      socket = {
+        onmessage: null,
+        onerror: null,
+        onclose: null,
+        send: (data) => sent.push(data),
+        close: () => undefined,
+      }
+      return socket
+    },
+  )
+  const openBoard = client.openBoard
+  if (!openBoard) {
+    throw new Error("Board client does not support Board collaboration")
+  }
+
+  const connection = await openBoard(credential, boardId, {
+    onSnapshot: () => undefined,
+    onError: (error) => {
+      revisionError = error
+    },
+    onClose: () => undefined,
+    onStickyNoteCreated: (event) => received.push(`${event.stickyNote.text}@${event.revision}`),
+  })
+
+  const provisionalId = "71ed2c45-67be-4a55-a5ae-90aafc1ecb1c"
+  connection.send({
+    type: "begin_sticky_note",
+    provisionalId,
+    position: { x: 0, y: 0 },
+    color: "yellow",
+  })
+  expect(JSON.parse(sent[0] ?? "{}" )).toMatchObject({
+    type: "begin_sticky_note",
+    provisionalId,
+  })
+
+  socket?.onmessage?.({
+    data: JSON.stringify({
+      type: "snapshot",
+      board: { id: boardId, name: "Ideas", role: "member" },
+      revision: 0,
+      presence: [{ member: { username: "ada_lovelace" }, activity: "viewing" }],
+      stickyNotes: [],
+    }),
+  })
+  socket?.onmessage?.({
+    data: JSON.stringify({
+      type: "sticky_note_created",
+      revision: 1,
+      provisionalId,
+      stickyNote: {
+        id: "Lm7u3nW8kM2pR5sT9vY4aB",
+        text: "one",
+        textVersion: 1,
+        position: { x: 0, y: 0 },
+        color: "yellow",
+        stackingOrder: 0,
+        authorship: { member: { username: "ada_lovelace" } },
+        createdAt: "2026-08-10T00:00:00.000Z",
+        lastEdit: {
+          member: { username: "ada_lovelace" },
+          at: "2026-08-10T00:00:00.000Z",
+        },
+      },
+    }),
+  })
+  socket?.onmessage?.({
+    data: JSON.stringify({
+      type: "sticky_note_created",
+      revision: 1,
+      provisionalId,
+      stickyNote: {
+        id: "Lm7u3nW8kM2pR5sT9vY4aB",
+        text: "stale",
+        textVersion: 1,
+        position: { x: 0, y: 0 },
+        color: "yellow",
+        stackingOrder: 0,
+        authorship: { member: { username: "ada_lovelace" } },
+        createdAt: "2026-08-10T00:00:00.000Z",
+        lastEdit: {
+          member: { username: "ada_lovelace" },
+          at: "2026-08-10T00:00:00.000Z",
+        },
+      },
+    }),
+  })
+
+  expect(received).toEqual(["one@1"])
+  expect(revisionError).toBeUndefined()
+
+  socket?.onmessage?.({
+    data: JSON.stringify({
+      type: "sticky_note_created",
+      revision: 3,
+      provisionalId,
+      stickyNote: {
+        id: "Lm7u3nW8kM2pR5sT9vY4aB",
+        text: "gap",
+        textVersion: 1,
+        position: { x: 0, y: 0 },
+        color: "yellow",
+        stackingOrder: 0,
+        authorship: { member: { username: "ada_lovelace" } },
+        createdAt: "2026-08-10T00:00:00.000Z",
+        lastEdit: {
+          member: { username: "ada_lovelace" },
+          at: "2026-08-10T00:00:00.000Z",
+        },
+      },
+    }),
+  })
+  expect(revisionError?.message).toContain("revision gap")
 })

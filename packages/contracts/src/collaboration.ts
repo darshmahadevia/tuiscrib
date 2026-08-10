@@ -2,6 +2,12 @@ import { z } from "zod"
 
 import { usernameSchema } from "./auth.ts"
 import { boardSummarySchema } from "./boards.ts"
+import {
+  boardCommandErrorSchema,
+  stickyNoteCreatedSchema,
+  stickyNoteCreationClaimGrantedSchema,
+  type StickyNote,
+} from "./sticky-notes.ts"
 
 export const presenceActivitySchema = z.enum([
   "viewing",
@@ -20,6 +26,7 @@ export const boardSnapshotSchema = z.object({
   board: boardSummarySchema,
   revision: z.number().int().nonnegative(),
   presence: z.array(boardPresenceSchema),
+  stickyNotes: z.array(stickyNoteCreatedSchema.shape.stickyNote).optional(),
 }).superRefine((snapshot, context) => {
   const seenMembers = new Set<string>()
   for (const [index, presence] of snapshot.presence.entries()) {
@@ -34,10 +41,25 @@ export const boardSnapshotSchema = z.object({
     }
     seenMembers.add(username)
   }
+  const seenNotes = new Set<string>()
+  for (const [index, note] of (snapshot.stickyNotes ?? []).entries()) {
+    if (seenNotes.has(note.id)) {
+      context.addIssue({
+        code: "custom",
+        path: ["stickyNotes", index, "id"],
+        message: "Each Sticky Note must appear only once in an authoritative snapshot.",
+      })
+      continue
+    }
+    seenNotes.add(note.id)
+  }
 })
 
 export const boardSocketMessageSchema = z.discriminatedUnion("type", [
   boardSnapshotSchema,
+  stickyNoteCreationClaimGrantedSchema,
+  stickyNoteCreatedSchema,
+  boardCommandErrorSchema,
 ])
 
 export const boardOpenReadyResponseSchema = z.object({
@@ -49,3 +71,5 @@ export type BoardPresence = z.infer<typeof boardPresenceSchema>
 export type BoardSnapshot = z.infer<typeof boardSnapshotSchema>
 export type BoardSocketMessage = z.infer<typeof boardSocketMessageSchema>
 export type BoardOpenReadyResponse = z.infer<typeof boardOpenReadyResponseSchema>
+
+export type BoardSnapshotStickyNote = StickyNote

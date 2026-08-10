@@ -29,3 +29,11 @@ export {
   type ShellMode,
   type TerminalShellProps,
 } from "./shell.tsx"
+export {
+  STICKY_NOTE_TEXT_DEBOUNCE_MS,
+  createStickyNoteDebouncer,
+  type StickyNoteDebouncer,
+  type StickyNoteDebouncerOptions,
+  type StickyNoteTimer,
+} from "./sticky-note-editor.ts"
+export { STICKY_NOTE_WIDTH, wrapStickyNoteText } from "./sticky-notes.ts"

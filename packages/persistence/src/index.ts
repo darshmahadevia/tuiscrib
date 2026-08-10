@@ -21,8 +21,11 @@ export {
   type ListBoardsInput,
   type OpenBoardInput,
   type OpenBoardRecord,
+  type StickyNoteRecord,
+  type CreateStickyNoteInput,
+  type CreateStickyNoteResult,
   type RotateJoinCodeInput,
   type RotateJoinCodeResult,
   type TerminalSessionAuthentication,
 } from "./client.ts"
-export { boards, memberships, serviceMetadata, terminalSessions, users } from "./schema.ts"
+export { boards, memberships, serviceMetadata, stickyNotes, terminalSessions, users } from "./schema.ts"
