@@ -10,10 +10,11 @@ Tuiscrib ships one Bun standalone executable per supported platform architecture
 | macOS | x64 (Intel) | `bun-darwin-x64` | `tuiscrib-darwin-x64` | — | native CI runner |
 | Linux | arm64 | `bun-linux-arm64` | `tuiscrib-linux-arm64` | glibc | native CI runner |
 | Linux | x64 | `bun-linux-x64-baseline` | `tuiscrib-linux-x64` | glibc | native CI runner |
-| Windows | arm64 | `bun-windows-arm64` | `tuiscrib-windows-arm64.exe` | — | native CI runner |
-| Windows | x64 | `bun-windows-x64-baseline` | `tuiscrib-windows-x64.exe` | — | native CI runner |
+| Windows | x64 | `bun-windows-x64` | `tuiscrib-windows-x64.exe` | — | native CI runner |
 
-The x64 artifacts use Bun's baseline target for older CPU compatibility. Linux release artifacts target glibc. OpenTUI also provides musl packages, but musl is not part of the published Tuiscrib matrix yet.
+Linux x64 uses Bun's baseline target for older CPU compatibility. Windows x64 uses Bun's standard target because the Windows baseline runtime cannot be reliably extracted by the hosted build runner. Linux release artifacts target glibc. OpenTUI also provides musl packages, but musl is not part of the published Tuiscrib matrix yet.
+
+Windows arm64 is intentionally outside the supported release matrix: Bun 1.3.14 standalone Windows arm64 cannot initialize OpenTUI's native FFI runtime (`dlopen()` is unavailable in that build), so it cannot satisfy the startup smoke contract.
 
 Every artifact supports a terminal of at least 80 by 24 cells, Unicode text, keyboard-only input, and an ANSI 256-color baseline. OpenTUI may use truecolor when the terminal advertises it; truecolor is an enhancement rather than a release requirement.
 
@@ -37,7 +38,7 @@ Builds use the Bun version pinned by `package.json` (`1.3.14`) and the checked-i
 bun install --frozen-lockfile --os="*" --cpu="*"
 ```
 
-Build all six artifacts into a directory:
+Build all five artifacts into a directory:
 
 ```bash
 bun run build:release -- --all --output dist/releases
@@ -53,7 +54,7 @@ The build disables `.env` and `bunfig.toml` autoloading so local development con
 
 ## Platform smoke test
 
-The smoke test launches the compiled executable with an isolated config home and a `PATH` containing no development tools. It captures the first rendered output, waits for the keyboard-only shell markers, sends `q`, and requires a clean exit plus ANSI 256-color output:
+The smoke test launches the compiled executable with an isolated config home, `TERM=xterm-256color`, and a `PATH` containing no development tools. It captures the first rendered output from a controlled terminal stream, waits for the keyboard-only shell markers, sends `q`, and requires a clean exit plus ANSI 256-color output:
 
 ```bash
 bun run smoke:release -- --binary dist/releases/tuiscrib-darwin-arm64

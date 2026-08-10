@@ -20,7 +20,6 @@ test("defines reproducible standalone targets for every supported platform archi
     "darwin-x64",
     "linux-arm64",
     "linux-x64",
-    "win32-arm64",
     "win32-x64",
   ])
 
@@ -36,8 +35,7 @@ test("defines reproducible standalone targets for every supported platform archi
     ["darwin-x64", "bun-darwin-x64", "tuiscrib-darwin-x64", "darwin", "x64", null],
     ["linux-arm64", "bun-linux-arm64", "tuiscrib-linux-arm64", "linux", "arm64", "glibc"],
     ["linux-x64", "bun-linux-x64-baseline", "tuiscrib-linux-x64", "linux", "x64", "glibc"],
-    ["win32-arm64", "bun-windows-arm64", "tuiscrib-windows-arm64.exe", "win32", "arm64", null],
-    ["win32-x64", "bun-windows-x64-baseline", "tuiscrib-windows-x64.exe", "win32", "x64", null],
+    ["win32-x64", "bun-windows-x64", "tuiscrib-windows-x64.exe", "win32", "x64", null],
   ])
 })
 
@@ -49,7 +47,9 @@ test("resolves target ids and the host target without inventing a platform", () 
   })
   expect(getCurrentReleaseTarget("darwin", "arm64").id).toBe("darwin-arm64")
   expect(getCurrentReleaseTarget("linux", "x64").id).toBe("linux-x64")
-  expect(getCurrentReleaseTarget("win32", "arm64").id).toBe("win32-arm64")
+  expect(() => getCurrentReleaseTarget("win32", "arm64")).toThrow(
+    "No standalone release target is defined for win32-arm64",
+  )
   expect(() => getCurrentReleaseTarget("freebsd", "x64")).toThrow(
     "No standalone release target is defined for freebsd-x64",
   )

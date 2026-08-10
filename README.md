@@ -46,7 +46,7 @@ bun run test:acceptance
 
 For environments with an existing disposable PostgreSQL database, set `TEST_DATABASE_URL`; otherwise the acceptance harness uses `postgres:16-alpine` through Docker automatically.
 
-Standalone release builds for macOS, Linux, and Windows are documented in [docs/release.md](docs/release.md). With Bun 1.3.14 and the locked dependencies installed for every target, build all six artifacts with:
+Standalone release builds for macOS, Linux, and Windows are documented in [docs/release.md](docs/release.md). With Bun 1.3.14 and the locked dependencies installed for every target, build all five artifacts with:
 
 ```bash
 bun install --frozen-lockfile --os="*" --cpu="*"

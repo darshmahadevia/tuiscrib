@@ -25,7 +25,7 @@ export type TerminalSmokeOutput = {
   stderr: string
   exitCode: number | null
   signalCode: NodeJS.Signals | null
-  transport: "pty" | "pipe"
+  transport: "pipe"
 }
 
 export type TerminalSmokeOptions = {
@@ -44,9 +44,7 @@ export async function runTerminalSmokeTest(
 
   try {
     const environment = createSmokeEnvironment(smokeDirectory, emptyPath, options.environment)
-    const result = process.platform === "win32"
-      ? await runPipedSmoke(options.binaryPath, environment, timeoutMs)
-      : await runPtySmoke(options.binaryPath, environment, timeoutMs)
+    const result = await runPipedSmoke(options.binaryPath, environment, timeoutMs)
     assertTerminalFirstRender(result)
     return result
   } finally {
@@ -91,7 +89,10 @@ async function runPipedSmoke(
     clearTimeout(timeout)
     await Promise.all([stdoutReader, stderrReader])
     if (timedOut) {
-      throw new Error(`standalone binary did not complete within ${timeoutMs}ms`)
+      throw new Error(
+        `standalone binary did not complete within ${timeoutMs}ms` +
+        ` (captured ${stdout.length} bytes of stdout)`,
+      )
     }
     return {
       stdout,
@@ -103,63 +104,6 @@ async function runPipedSmoke(
   } finally {
     if (!child.killed) {
       child.kill()
-    }
-  }
-}
-
-async function runPtySmoke(
-  binaryPath: string,
-  environment: NodeJS.ProcessEnv,
-  timeoutMs: number,
-): Promise<TerminalSmokeOutput> {
-  let output = ""
-  let sentQuit = false
-  let timedOut = false
-  const decoder = new TextDecoder()
-  const child = Bun.spawn([resolve(binaryPath)], {
-    env: environment,
-    terminal: {
-      cols: 80,
-      rows: 24,
-      name: "xterm-256color",
-      data: (terminal, data) => {
-        output += decoder.decode(data, { stream: true })
-        if (!sentQuit && hasTerminalFirstRender(output)) {
-          sentQuit = true
-          terminal.write("q")
-        }
-      },
-    },
-  })
-  const terminal = child.terminal
-  if (!terminal) {
-    throw new Error("Bun did not attach the platform smoke test PTY")
-  }
-
-  try {
-    const timeout = setTimeout(() => {
-      timedOut = true
-      child.kill()
-    }, timeoutMs)
-    const exitCode = await child.exited
-    clearTimeout(timeout)
-    output += decoder.decode()
-    if (timedOut) {
-      throw new Error(`standalone binary did not complete within ${timeoutMs}ms`)
-    }
-    return {
-      stdout: output,
-      stderr: "",
-      exitCode,
-      signalCode: child.signalCode,
-      transport: "pty",
-    }
-  } finally {
-    if (!child.killed) {
-      child.kill()
-    }
-    if (!terminal.closed) {
-      terminal.close()
     }
   }
 }

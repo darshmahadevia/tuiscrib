@@ -11,8 +11,7 @@ export type ReleaseTarget = {
     | "bun-darwin-x64"
     | "bun-linux-arm64"
     | "bun-linux-x64-baseline"
-    | "bun-windows-arm64"
-    | "bun-windows-x64-baseline"
+    | "bun-windows-x64"
   readonly artifactFile: string
   readonly libc?: ReleaseLibc
 }
@@ -49,17 +48,10 @@ export const RELEASE_TARGETS = [
     libc: "glibc",
   },
   {
-    id: "win32-arm64",
-    platform: "win32",
-    architecture: "arm64",
-    bunTarget: "bun-windows-arm64",
-    artifactFile: "tuiscrib-windows-arm64.exe",
-  },
-  {
     id: "win32-x64",
     platform: "win32",
     architecture: "x64",
-    bunTarget: "bun-windows-x64-baseline",
+    bunTarget: "bun-windows-x64",
     artifactFile: "tuiscrib-windows-x64.exe",
   },
 ] as const satisfies readonly ReleaseTarget[]
