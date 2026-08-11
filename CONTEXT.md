@@ -8,9 +8,9 @@ Tuiscrib is a terminal-based collaborative sticky-note editor. It gives small gr
 The single hosted environment that holds the authoritative users, boards, and live collaboration state.
 _Avoid_: Server, instance, network
 
-**Public Portfolio Release**:
-The openly downloadable, best-effort Tuiscrib passion project for evaluators and small technical teams using non-sensitive collaboration data; it carries no production availability, backup, support, or recovery guarantee.
-_Avoid_: Production service, startup beta, general availability
+**Source-First Portfolio Demo**:
+The source checkout is Tuiscrib's distribution surface for now. Users clone the repository, run the Bun terminal client, and connect to the hosted Tuiscrib Service by default; the hosted path is a best-effort demonstration for evaluators and small technical teams using non-sensitive collaboration data, with no production availability, backup, support, or recovery guarantee.
+_Avoid_: production service, startup beta, general availability
 
 **Board**:
 A named freeform canvas of sticky notes that forms the boundary of collaboration.

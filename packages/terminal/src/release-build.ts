@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto"
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, mkdir, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -15,7 +15,7 @@ const RELEASE_SOURCE_DIRECTORY = resolve(fileURLToPath(new URL(".", import.meta.
 
 export const RELEASE_ENTRYPOINT = resolve(RELEASE_SOURCE_DIRECTORY, "main.tsx")
 export const RELEASE_REPOSITORY_ROOT = resolve(RELEASE_SOURCE_DIRECTORY, "../../..")
-export const DEFAULT_RELEASE_OUTPUT_DIRECTORY = resolve(RELEASE_SOURCE_DIRECTORY, "../../../dist/releases")
+export const DEFAULT_RELEASE_OUTPUT_DIRECTORY = resolve(RELEASE_SOURCE_DIRECTORY, "../../../dist/standalone")
 
 export type ReleaseBuildArguments = {
   targetIds: ["current"] | ["all"] | [string]
@@ -26,7 +26,6 @@ export type ReleaseBuildArguments = {
 export type BuiltReleaseArtifact = {
   target: ReleaseTarget
   path: string
-  checksumPath: string
   bytes: number
   sha256: string
 }
@@ -124,12 +123,9 @@ export async function buildReleaseArtifact(
 
   const contents = await readFile(outputPath)
   const sha256 = createHash("sha256").update(contents).digest("hex")
-  const checksumPath = `${outputPath}.sha256`
-  await writeFile(checksumPath, `${sha256}  ${target.artifactFile}\n`, "utf8")
   return {
     target,
     path: outputPath,
-    checksumPath,
     bytes: contents.byteLength,
     sha256,
   }
@@ -140,7 +136,7 @@ export async function verifyReproducibleBuild(target: ReleaseTarget): Promise<{
   sha256: string
   bytes: number
 }> {
-  const temporaryRoot = await mkdtemp(join(tmpdir(), "tuiscrib-release-repro-"))
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "tuiscrib-standalone-repro-"))
   try {
     const firstDirectory = join(temporaryRoot, "first")
     const secondDirectory = join(temporaryRoot, "second")

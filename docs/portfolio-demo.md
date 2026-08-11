@@ -1,6 +1,6 @@
-# Portfolio demonstration
+# Source-first portfolio demo
 
-This is the reproducible release demonstration for the focused Tuiscrib MVP. It uses the same public HTTP and WebSocket clients as the terminal shell; it does not add a browser client, a hidden admin API, or a compatibility layer.
+This is the reproducible Source-First Portfolio Demo for the focused Tuiscrib MVP. It uses the same HTTP and WebSocket clients as the terminal shell; it does not add a browser client, a hidden admin API, or a compatibility layer. The primary path is a cloned source checkout running against the hosted Tuiscrib Service.
 
 ## Local deterministic acceptance seam
 
@@ -39,15 +39,15 @@ The command creates two throwaway Users, creates one Board, redeems the Join Cod
 
 The hosted smoke deletes its Board on success and in best-effort failure cleanup. Tuiscrib intentionally has no identity-closure workflow, so the two generated User rows remain as harmless test data; use the repo-scoped disposable Supabase project for repeated runs. Local acceptance runs reset all disposable rows.
 
-## Free-tier release limits
+## Free-tier demo limits
 
 This URL is a portfolio demo, not a production guarantee:
 
 - Render Free can sleep after 15 minutes without inbound HTTP or WebSocket messages, may restart, has an ephemeral filesystem, and may exhaust its monthly free hours. An active client heartbeat keeps its connection active; it cannot wake a paused or idle service before the next request.
 - Supabase Free can pause a low-activity project after seven days. The owner must resume it in Supabase Studio; Tuiscrib cannot resume an unavailable database. Supabase documents a one-year restore window, but this repository has no application-managed backup or recovery workflow.
 - Terminal credentials are unrecoverable by design: losing both the password and the protected local Terminal Session credential permanently loses access. There is no email, password reset, identity closure, offline cache, or mutation queue.
-- The service is one Render instance with process-local Presence and Edit Claims. No uptime, horizontal scaling, outage durability, backup, restore, signing, notarization, or production support guarantee is claimed.
+- The service is one Render instance with process-local Presence and Edit Claims. No uptime, horizontal scaling, outage durability, backup, restore, or production support guarantee is claimed.
 
-The Public Portfolio Release is for non-sensitive data only. GitHub Issues is the reporting channel, with no response-time promise or support commitment. The free Render and Supabase plans may sleep, pause, restart, or lose data; Tuiscrib does not provide application-managed backups, recovery, monitoring, or uptime guarantees.
+The Source-First Portfolio Demo is for non-sensitive data only. [GitHub Issues](https://github.com/darshmahadevia/tuiscrib/issues) is the reporting channel, with no response-time promise or support commitment. The free Render and Supabase plans may sleep, pause, restart, or lose data; Tuiscrib does not provide application-managed backups, recovery, monitoring, or uptime guarantees.
 
-See [`docs/deployment.md`](deployment.md), [`docs/release.md`](release.md), and the ADRs for the complete provider and release constraints.
+See [`docs/deployment.md`](deployment.md), [`docs/standalone-verification.md`](standalone-verification.md) for optional local packaging checks, and the ADRs for the complete provider and source-first constraints.
