@@ -6,6 +6,8 @@ import {
   boardCommandErrorSchema,
   stickyNoteCreatedSchema,
   stickyNoteCreationClaimGrantedSchema,
+  stickyNoteEditClaimGrantedSchema,
+  stickyNoteUpdatedSchema,
   type StickyNote,
 } from "./sticky-notes.ts"
 
@@ -59,6 +61,8 @@ export const boardSocketMessageSchema = z.discriminatedUnion("type", [
   boardSnapshotSchema,
   stickyNoteCreationClaimGrantedSchema,
   stickyNoteCreatedSchema,
+  stickyNoteEditClaimGrantedSchema,
+  stickyNoteUpdatedSchema,
   boardCommandErrorSchema,
 ])
 

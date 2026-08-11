@@ -19,6 +19,8 @@ import {
   type BoardCommandError,
   type StickyNoteCreated,
   type StickyNoteCreationClaimGranted,
+  type StickyNoteEditClaimGranted,
+  type StickyNoteUpdated,
   type BoardListResponse,
   type CreateBoardRequest,
   type CreateBoardResponse,
@@ -82,6 +84,8 @@ export type BoardConnectionHandlers = {
   onClose(): void
   onStickyNoteCreationClaimGranted?(claim: StickyNoteCreationClaimGranted): void
   onStickyNoteCreated?(event: StickyNoteCreated): void
+  onStickyNoteEditClaimGranted?(claim: StickyNoteEditClaimGranted): void
+  onStickyNoteUpdated?(event: StickyNoteUpdated): void
   onCommandError?(error: BoardCommandError): void
 }
 
@@ -306,6 +310,26 @@ export function createBoardClient(
           }
           lastRevision = parsed.data.revision
           handlers.onStickyNoteCreated?.(parsed.data)
+          return
+        }
+
+        if (parsed.data.type === "sticky_note_edit_claim_granted") {
+          handlers.onStickyNoteEditClaimGranted?.(parsed.data)
+          return
+        }
+
+        if (parsed.data.type === "sticky_note_updated") {
+          if (lastRevision !== null && parsed.data.revision <= lastRevision) {
+            return
+          }
+          if (lastRevision !== null && parsed.data.revision !== lastRevision + 1) {
+            closedByCaller = true
+            handlers.onError(new Error("Board collaboration revision gap detected."))
+            socket.close()
+            return
+          }
+          lastRevision = parsed.data.revision
+          handlers.onStickyNoteUpdated?.(parsed.data)
           return
         }
 

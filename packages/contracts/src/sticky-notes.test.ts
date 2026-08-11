@@ -1,9 +1,12 @@
 import { expect, test } from "bun:test"
 
 import {
+  beginStickyNoteEditSchema,
   boardCommandSchema,
   DEFAULT_STICKY_NOTE_COLOR,
   MAX_STICKY_NOTE_CHARACTERS,
+  publishStickyNoteEditSchema,
+  releaseStickyNoteEditSchema,
   stickyNoteSchema,
 } from "./sticky-notes.ts"
 import { boardSocketMessageSchema } from "./collaboration.ts"
@@ -70,4 +73,75 @@ test("validates the claim acknowledgement and revisioned creation event at the p
     provisionalId: "71ed2c45-67be-4a55-a5ae-90aafc1ecb1c",
     stickyNote: note,
   })).toMatchObject({ type: "sticky_note_created", revision: 1 })
+})
+
+test("models established Edit Claim publication as a full-text expected-version compare-and-set", () => {
+  const claimId = "5ab7d4c2-2a35-4ee3-9f0f-9d0d2a92f36a"
+  const stickyNoteId = note.id
+
+  expect(boardCommandSchema.parse(beginStickyNoteEditSchema.parse({
+    type: "begin_sticky_note_edit",
+    stickyNoteId,
+  }))).toEqual({
+    type: "begin_sticky_note_edit",
+    stickyNoteId,
+  })
+
+  expect(boardCommandSchema.parse(publishStickyNoteEditSchema.parse({
+    type: "publish_sticky_note_edit",
+    claimId,
+    stickyNoteId,
+    text: "",
+    expectedTextVersion: 1,
+  }))).toEqual({
+    type: "publish_sticky_note_edit",
+    claimId,
+    stickyNoteId,
+    text: "",
+    expectedTextVersion: 1,
+  })
+
+  expect(boardCommandSchema.parse(releaseStickyNoteEditSchema.parse({
+    type: "release_sticky_note_edit",
+    claimId,
+    stickyNoteId,
+  }))).toEqual({
+    type: "release_sticky_note_edit",
+    claimId,
+    stickyNoteId,
+  })
+
+  expect(() => publishStickyNoteEditSchema.parse({
+    type: "publish_sticky_note_edit",
+    claimId,
+    stickyNoteId,
+    text: "stale",
+    expectedTextVersion: 0,
+  })).toThrow()
+})
+
+test("recognizes an established Edit Claim acknowledgement and committed text update", () => {
+  const claimId = "5ab7d4c2-2a35-4ee3-9f0f-9d0d2a92f36a"
+
+  expect(boardSocketMessageSchema.parse({
+    type: "sticky_note_edit_claim_granted",
+    stickyNoteId: note.id,
+    claimId,
+    stickyNote: note,
+  })).toMatchObject({
+    type: "sticky_note_edit_claim_granted",
+    stickyNoteId: note.id,
+    claimId,
+    stickyNote: { textVersion: 1 },
+  })
+
+  expect(boardSocketMessageSchema.parse({
+    type: "sticky_note_updated",
+    revision: 2,
+    stickyNote: { ...note, text: "" , textVersion: 2 },
+  })).toMatchObject({
+    type: "sticky_note_updated",
+    revision: 2,
+    stickyNote: { text: "", textVersion: 2 },
+  })
 })

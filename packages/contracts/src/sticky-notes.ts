@@ -121,10 +121,32 @@ export const releaseStickyNoteCreationSchema = z.object({
   provisionalId: provisionalStickyNoteIdSchema,
 })
 
+export const beginStickyNoteEditSchema = z.object({
+  type: z.literal("begin_sticky_note_edit"),
+  stickyNoteId: boardIdentifierSchema,
+})
+
+export const publishStickyNoteEditSchema = z.object({
+  type: z.literal("publish_sticky_note_edit"),
+  claimId: stickyNoteClaimIdSchema,
+  stickyNoteId: boardIdentifierSchema,
+  text: stickyNoteTextSchema,
+  expectedTextVersion: z.number().int().positive(),
+})
+
+export const releaseStickyNoteEditSchema = z.object({
+  type: z.literal("release_sticky_note_edit"),
+  claimId: stickyNoteClaimIdSchema,
+  stickyNoteId: boardIdentifierSchema,
+})
+
 export const boardCommandSchema = z.discriminatedUnion("type", [
   beginStickyNoteSchema,
   publishStickyNoteSchema,
   releaseStickyNoteCreationSchema,
+  beginStickyNoteEditSchema,
+  publishStickyNoteEditSchema,
+  releaseStickyNoteEditSchema,
 ])
 
 export const stickyNoteCreationClaimGrantedSchema = z.object({
@@ -142,14 +164,30 @@ export const stickyNoteCreatedSchema = z.object({
   stickyNote: stickyNoteSchema,
 })
 
+export const stickyNoteEditClaimGrantedSchema = z.object({
+  type: z.literal("sticky_note_edit_claim_granted"),
+  stickyNoteId: boardIdentifierSchema,
+  claimId: stickyNoteClaimIdSchema,
+  stickyNote: stickyNoteSchema,
+})
+
+export const stickyNoteUpdatedSchema = z.object({
+  type: z.literal("sticky_note_updated"),
+  revision: z.number().int().positive(),
+  stickyNote: stickyNoteSchema,
+})
+
 export const boardCommandErrorCodeSchema = z.enum([
   "invalid_command",
   "creation_claim_unavailable",
   "invalid_creation_claim",
+  "edit_claim_unavailable",
+  "invalid_edit_claim",
   "empty_sticky_note",
   "sticky_note_text_limit",
   "sticky_note_capacity",
   "sticky_note_rejected",
+  "text_version_conflict",
   "revision_conflict",
 ])
 
@@ -166,6 +204,11 @@ export type BoardCommand = z.infer<typeof boardCommandSchema>
 export type BeginStickyNote = z.infer<typeof beginStickyNoteSchema>
 export type PublishStickyNote = z.infer<typeof publishStickyNoteSchema>
 export type ReleaseStickyNoteCreation = z.infer<typeof releaseStickyNoteCreationSchema>
+export type BeginStickyNoteEdit = z.infer<typeof beginStickyNoteEditSchema>
+export type PublishStickyNoteEdit = z.infer<typeof publishStickyNoteEditSchema>
+export type ReleaseStickyNoteEdit = z.infer<typeof releaseStickyNoteEditSchema>
 export type StickyNoteCreationClaimGranted = z.infer<typeof stickyNoteCreationClaimGrantedSchema>
 export type StickyNoteCreated = z.infer<typeof stickyNoteCreatedSchema>
+export type StickyNoteEditClaimGranted = z.infer<typeof stickyNoteEditClaimGrantedSchema>
+export type StickyNoteUpdated = z.infer<typeof stickyNoteUpdatedSchema>
 export type BoardCommandError = z.infer<typeof boardCommandErrorSchema>

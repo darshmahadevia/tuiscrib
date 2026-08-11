@@ -842,6 +842,157 @@ test("lost in-flight cleanup cannot erase a replacement creation claim", async (
   }
 })
 
+test("holds a distinct established Edit Claim and broadcasts only its committed full-text update", async () => {
+  const note = {
+    id: "Lm7u3nW8kM2pR5sT9vY4aB",
+    text: "durable note",
+    textVersion: 1,
+    position: { x: 0, y: 0 },
+    color: "yellow" as const,
+    stackingOrder: 0,
+    authorship: { member: { username: "ada_lovelace" } },
+    createdAt: "2026-08-10T00:00:00.000Z",
+    lastEdit: {
+      member: { username: "ada_lovelace" },
+      at: "2026-08-10T00:00:00.000Z",
+    },
+  }
+  const updatedNote = {
+    ...note,
+    text: "changed after commit",
+    textVersion: 2,
+    lastEdit: {
+      member: { username: "grace_hopper" },
+      at: "2026-08-10T00:00:01.000Z",
+    },
+  }
+  const updateInputs: Array<Record<string, unknown>> = []
+  const updateStarted = Promise.withResolvers<void>()
+  const commitUpdate = Promise.withResolvers<void>()
+  const collaboration = createBoardCollaboration({
+    clock: () => new Date("2026-08-10T00:00:01.000Z"),
+    persistence: {
+      openBoard: async ({ userId, publicId }) => ({
+        board: {
+          id: publicId,
+          name: "Edit Ideas",
+          role: userId === 7 ? "owner" : "member",
+        },
+        revision: 1,
+        stickyNotes: [note],
+      }),
+      updateStickyNoteText: async (input: Record<string, unknown>) => {
+        updateInputs.push(input)
+        updateStarted.resolve()
+        await commitUpdate.promise
+        return { kind: "updated" as const, revision: 2, stickyNote: updatedNote }
+      },
+    },
+    sessionAuthenticator: async (value) => {
+      if (value === credential) {
+        return { user: { id: 7, username: "ada_lovelace" } }
+      }
+      if (value === "b".repeat(43)) {
+        return { user: { id: 8, username: "grace_hopper" } }
+      }
+      return null
+    },
+  })
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request, bunServer) {
+      const result = await collaboration.handleUpgrade(request, bunServer)
+      return result === null ? new Response("not found", { status: 404 }) : result
+    },
+    websocket: collaboration.websocket,
+  })
+  const url = `ws://127.0.0.1:${server.port}/boards/${boardId}/collaboration`
+  const owner = createSocketClient(url, credential)
+  const member = createSocketClient(url, "b".repeat(43))
+
+  try {
+    await Promise.all([waitForSocketOpen(owner.socket), waitForSocketOpen(member.socket)])
+    await owner.nextMessage()
+    await member.nextMessage()
+    await nextMessageMatching(owner, (message) => (message.presence as unknown[]).length === 2)
+
+    owner.socket.send(JSON.stringify({
+      type: "begin_sticky_note_edit",
+      stickyNoteId: note.id,
+    }))
+    const claim = await nextMessageMatching(
+      owner,
+      (message) => message.type === "sticky_note_edit_claim_granted",
+    )
+    expect(claim).toMatchObject({
+      type: "sticky_note_edit_claim_granted",
+      stickyNoteId: note.id,
+      stickyNote: note,
+    })
+    await nextMessageMatching(
+      member,
+      (message) => presenceFor(message, "ada_lovelace") === "editing",
+    )
+
+    member.socket.send(JSON.stringify({
+      type: "begin_sticky_note_edit",
+      stickyNoteId: note.id,
+    }))
+    await expect(nextMessageMatching(member, (message) => message.type === "error"))
+      .resolves.toMatchObject({ type: "error", code: "edit_claim_unavailable" })
+
+    const claimId = String(claim.claimId)
+    const publication = {
+      type: "publish_sticky_note_edit",
+      claimId,
+      stickyNoteId: note.id,
+      text: updatedNote.text,
+      expectedTextVersion: note.textVersion,
+    }
+    owner.socket.send(JSON.stringify(publication))
+    owner.socket.send(JSON.stringify(publication))
+    const duplicateErrorPromise = nextMessageMatching(owner, (message) => message.type === "error")
+    await updateStarted.promise
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(updateInputs).toHaveLength(1)
+    expect(updateInputs[0]).toMatchObject({
+      boardId,
+      userId: 7,
+      stickyNoteId: note.id,
+      text: updatedNote.text,
+      expectedTextVersion: note.textVersion,
+    })
+    expect(owner.socket.readyState).toBe(WebSocket.OPEN)
+    commitUpdate.resolve()
+
+    await expect(duplicateErrorPromise)
+      .resolves.toMatchObject({ type: "error", code: "invalid_edit_claim" })
+    const [ownerUpdated, memberUpdated] = await Promise.all([
+      nextMessageMatching(owner, (message) => message.type === "sticky_note_updated"),
+      nextMessageMatching(member, (message) => message.type === "sticky_note_updated"),
+    ])
+    expect(ownerUpdated).toEqual({
+      type: "sticky_note_updated",
+      revision: 2,
+      stickyNote: updatedNote,
+    })
+    expect(memberUpdated).toEqual(ownerUpdated)
+
+    owner.socket.send(JSON.stringify({
+      type: "release_sticky_note_edit",
+      claimId,
+      stickyNoteId: note.id,
+    }))
+    await expect(nextMessageMatching(member, (message) => presenceFor(message, "ada_lovelace") === "viewing"))
+      .resolves.toMatchObject({ type: "snapshot", revision: 2 })
+  } finally {
+    commitUpdate.resolve()
+    await Promise.all([closeSocket(owner.socket), closeSocket(member.socket)])
+    await server.stop(true)
+  }
+})
+
 function presenceFor(message: Record<string, unknown>, username: string): string | undefined {
   const presence = message.presence as Array<{ member: { username: string }; activity: string }> | undefined
   return presence?.find((entry) => entry.member.username === username)?.activity

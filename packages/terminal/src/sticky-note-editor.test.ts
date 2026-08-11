@@ -58,6 +58,22 @@ test("flushes one pending full-text snapshot immediately and cancels its timer",
   expect(cancelled).toBe(1)
 })
 
+test("does not treat an empty established-text snapshot as a cancelled publication", () => {
+  const published: string[] = []
+  const debouncer = createStickyNoteDebouncer({
+    schedule: (callback) => {
+      callback()
+      return 1
+    },
+    cancel: () => undefined,
+    publish: (text) => published.push(text),
+  })
+
+  debouncer.schedule("")
+
+  expect(published).toEqual([""])
+})
+
 test("rejects over-limit editor text with a user-perceived Unicode error", () => {
   expect(validateStickyNoteEditorText("a".repeat(MAX_STICKY_NOTE_CHARACTERS))).toEqual({
     accepted: true,

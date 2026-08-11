@@ -512,3 +512,115 @@ test("Board client sends creation commands and rejects stale or gapped durable r
   })
   expect(revisionError?.message).toContain("revision gap")
 })
+
+test("Board client sends established Edit Claim commands and delivers committed text updates", async () => {
+  const credential = "d".repeat(43)
+  const boardId = "Qx7u3nW8kM2pR5sT9vY4aB"
+  const sent: string[] = []
+  let socket: BoardSocket | undefined
+  let granted: unknown
+  let updated: unknown
+  const client = createBoardClient(
+    "http://tuiscrib.test",
+    async () => new Response(JSON.stringify({ status: "ready" }), { status: 200 }),
+    () => {
+      socket = {
+        onmessage: null,
+        onerror: null,
+        onclose: null,
+        send: (data) => sent.push(data),
+        close: () => undefined,
+      }
+      return socket
+    },
+  )
+  const openBoard = client.openBoard
+  if (!openBoard) {
+    throw new Error("Board client does not support Board collaboration")
+  }
+
+  const connection = await openBoard(credential, boardId, {
+    onSnapshot: () => undefined,
+    onError: (error) => {
+      throw error
+    },
+    onClose: () => undefined,
+    onStickyNoteEditClaimGranted: (claim) => {
+      granted = claim
+    },
+    onStickyNoteUpdated: (event) => {
+      updated = event
+    },
+  })
+  const note = {
+    id: "Lm7u3nW8kM2pR5sT9vY4aB",
+    text: "",
+    textVersion: 2,
+    position: { x: 0, y: 0 },
+    color: "yellow" as const,
+    stackingOrder: 0,
+    authorship: { member: { username: "ada_lovelace" } },
+    createdAt: "2026-08-10T00:00:00.000Z",
+    lastEdit: {
+      member: { username: "grace_hopper" },
+      at: "2026-08-10T00:00:01.000Z",
+    },
+  }
+  const claimId = "5ab7d4c2-2a35-4ee3-9f0f-9d0d2a92f36a"
+
+  connection.send({ type: "begin_sticky_note_edit", stickyNoteId: note.id })
+  connection.send({
+    type: "publish_sticky_note_edit",
+    claimId,
+    stickyNoteId: note.id,
+    text: "",
+    expectedTextVersion: 1,
+  })
+  connection.send({
+    type: "release_sticky_note_edit",
+    claimId,
+    stickyNoteId: note.id,
+  })
+  expect(sent.map((value) => JSON.parse(value))).toEqual([
+    { type: "begin_sticky_note_edit", stickyNoteId: note.id },
+    {
+      type: "publish_sticky_note_edit",
+      claimId,
+      stickyNoteId: note.id,
+      text: "",
+      expectedTextVersion: 1,
+    },
+    { type: "release_sticky_note_edit", claimId, stickyNoteId: note.id },
+  ])
+
+  socket?.onmessage?.({
+    data: JSON.stringify({
+      type: "snapshot",
+      board: { id: boardId, name: "Ideas", role: "member" },
+      revision: 1,
+      presence: [{ member: { username: "ada_lovelace" }, activity: "viewing" }],
+      stickyNotes: [{ ...note, text: "before edit", textVersion: 1, lastEdit: {
+        member: { username: "ada_lovelace" },
+        at: "2026-08-10T00:00:00.000Z",
+      } }],
+    }),
+  })
+  socket?.onmessage?.({
+    data: JSON.stringify({
+      type: "sticky_note_edit_claim_granted",
+      stickyNoteId: note.id,
+      claimId,
+      stickyNote: { ...note, text: "before edit", textVersion: 1, lastEdit: {
+        member: { username: "ada_lovelace" },
+        at: "2026-08-10T00:00:00.000Z",
+      } },
+    }),
+  })
+  socket?.onmessage?.({
+    data: JSON.stringify({ type: "sticky_note_updated", revision: 2, stickyNote: note }),
+  })
+
+  expect(granted).toMatchObject({ type: "sticky_note_edit_claim_granted", claimId })
+  expect(updated).toMatchObject({ type: "sticky_note_updated", revision: 2, stickyNote: { text: "" } })
+  connection.close()
+})

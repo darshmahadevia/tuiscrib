@@ -113,6 +113,162 @@ test("renders one durable Sticky Note and its attribution in two live terminals"
   expect(memberFrame).toContain("Board revision: 1")
 })
 
+test("edits an established Sticky Note with debounce, flush, attribution, empty text, and restart durability", async () => {
+  if (!harness) {
+    throw new Error("acceptance harness did not start")
+  }
+
+  const ownerCredential = await registerUser("edit_owner")
+  const memberCredential = await registerUser("edit_member")
+  const created = await requestJson<{ board: BoardSummary; joinCode: string }>(
+    "/boards",
+    ownerCredential,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Established Edit Board" }),
+    },
+  )
+  const joined = await requestJson<{ board: BoardSummary }>(
+    "/boards/join",
+    memberCredential,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ joinCode: created.body.joinCode }),
+    },
+  )
+  expect(created.status).toBe(201)
+  expect(joined.status).toBe(201)
+
+  const owner = await harness.addShellClient(
+    "edit-owner",
+    createMemoryCredentialStore(ownerCredential, "memory://sticky/edit-owner"),
+    undefined,
+    {
+      schedule: (callback, delayMs) => harness?.clock.setTimeout(callback, delayMs),
+      cancel: (handle) => harness?.clock.clearTimeout(handle as number),
+    },
+  )
+  const member = await harness.addShellClient(
+    "edit-member",
+    createMemoryCredentialStore(memberCredential, "memory://sticky/edit-member"),
+  )
+
+  await waitForFrame(owner, (frame) => frame.includes("Terminal Session restored"))
+  await waitForFrame(member, (frame) => frame.includes("Terminal Session restored"))
+  await openSelectedBoard(owner, created.body.board.name)
+  await openSelectedBoard(member, created.body.board.name)
+  await waitForFrame(owner, (frame) => frame.includes("edit_owner · viewing") && frame.includes("Sticky Notes: 0"))
+  await waitForFrame(member, (frame) => frame.includes("edit_owner · viewing") && frame.includes("Sticky Notes: 0"))
+
+  await act(async () => {
+    owner.setup.mockInput.pressKey("n")
+    await owner.setup.renderOnce()
+    await owner.setup.mockInput.typeText("durable edit text")
+    await owner.setup.renderOnce()
+  })
+  await waitForFrame(owner, (frame) => frame.includes("edit_owner · creating"))
+  expect(owner.setup.captureCharFrame()).toContain("Sticky Notes: 0")
+  await act(async () => {
+    harness?.clock.advance(150)
+    await owner.setup.renderOnce()
+  })
+  await waitForFrame(owner, (frame) => frame.includes("durable edit text") && frame.includes("v1"))
+  await waitForFrame(member, (frame) => frame.includes("durable edit text") && frame.includes("v1"))
+
+  await act(async () => {
+    owner.setup.mockInput.pressEscape()
+    await owner.setup.renderOnce()
+  })
+  await waitForFrame(owner, (frame) => frame.includes("› Sticky Note · (0, 0) · v1") && frame.includes("edit_owner · viewing"))
+  await waitForFrame(member, (frame) => frame.includes("edit_owner · viewing") && frame.includes("v1"))
+
+  await act(async () => {
+    owner.setup.mockInput.pressEnter()
+    await owner.setup.renderOnce()
+  })
+  await waitForFrame(owner, (frame) =>
+    frame.includes("Established Sticky Note") && frame.includes("Claim") && frame.includes("granted"),
+  )
+  await waitForFrame(member, (frame) => frame.includes("edit_owner · editing"))
+
+  await act(async () => {
+    await owner.setup.mockInput.typeText(" revised")
+    await owner.setup.renderOnce()
+  })
+  expect(owner.setup.captureCharFrame()).toContain("durable edit text revised")
+  expect(member.setup.captureCharFrame()).toContain("durable edit text")
+  await act(async () => {
+    harness?.clock.advance(149)
+    await owner.setup.renderOnce()
+    await member.setup.renderOnce()
+  })
+  expect(member.setup.captureCharFrame()).toContain("durable edit text")
+  expect(member.setup.captureCharFrame()).not.toContain("durable edit text revised")
+  await act(async () => {
+    owner.setup.mockInput.pressEscape()
+    await owner.setup.renderOnce()
+  })
+  const published = await waitForFrame(
+    member,
+    (frame) => frame.includes("durable edit text revised") && frame.includes("v2"),
+  )
+  expect(published).toContain("Last edit by edit_owner")
+  expect(published).toContain("Board revision: 2")
+  await waitForFrame(owner, (frame) => frame.includes("› Sticky Note · (0, 0) · v2") && frame.includes("edit_owner · viewing"))
+  await waitForFrame(member, (frame) => frame.includes("edit_owner · viewing") && frame.includes("v2"))
+
+  await act(async () => {
+    owner.setup.mockInput.pressEnter()
+    await owner.setup.renderOnce()
+  })
+  await waitForFrame(owner, (frame) =>
+    frame.includes("Established Sticky Note") && frame.includes("Claim") && frame.includes("granted"),
+  )
+  const textToClear = "durable edit text revised"
+  await act(async () => {
+    for (let index = 0; index < textToClear.length; index += 1) {
+      owner.setup.mockInput.pressBackspace()
+      await owner.setup.renderOnce()
+    }
+  })
+  expect(owner.setup.captureCharFrame()).toContain("Established Sticky Note")
+  expect(owner.setup.captureCharFrame()).not.toContain(textToClear)
+  await act(async () => {
+    harness?.clock.advance(150)
+    await owner.setup.renderOnce()
+  })
+  const publishedEmpty = await waitForFrame(
+    member,
+    (frame) => frame.includes("Board revision: 3") && frame.includes("v3") && frame.includes("Sticky Notes: 1"),
+  )
+  expect(publishedEmpty).toContain("Last edit by edit_owner")
+  expect(publishedEmpty).not.toContain(textToClear)
+
+  await act(async () => {
+    owner.setup.mockInput.pressEscape()
+    await owner.setup.renderOnce()
+  })
+  await waitForFrame(owner, (frame) => frame.includes("› Sticky Note · (0, 0) · v3") && frame.includes("edit_owner · viewing"))
+
+  await harness.restartService()
+  await harness.disposeClient(owner)
+  await harness.disposeClient(member)
+  const reopened = await harness.addShellClient(
+    "edit-owner-reopened",
+    createMemoryCredentialStore(ownerCredential, "memory://sticky/edit-owner-reopened"),
+  )
+  await waitForFrame(reopened, (frame) => frame.includes("Terminal Session restored"))
+  await openSelectedBoard(reopened, created.body.board.name)
+  const restarted = await waitForFrame(
+    reopened,
+    (frame) => frame.includes("Board revision: 3") && frame.includes("Sticky Notes: 1") && frame.includes("v3"),
+  )
+  expect(restarted).toContain("Last edit by edit_owner")
+  await harness.disposeClient(reopened)
+})
+
 test("discards an empty provisional Sticky Note and transitions Presence back to viewing", async () => {
   if (!harness) {
     throw new Error("acceptance harness did not start")

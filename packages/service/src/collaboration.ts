@@ -9,6 +9,8 @@ import {
   STICKY_NOTE_TEXT_LIMIT_ERROR,
   stickyNoteCreationClaimGrantedSchema,
   stickyNoteCreatedSchema,
+  stickyNoteEditClaimGrantedSchema,
+  stickyNoteUpdatedSchema,
   stickyNoteTextSchema,
   serviceErrorSchema,
   type BoardCommand,
@@ -22,6 +24,7 @@ import type {
   Persistence,
   StickyNoteRecord,
   TerminalSessionAuthentication,
+  UpdateStickyNoteTextResult,
 } from "@tuiscrib/persistence"
 
 import {
@@ -36,6 +39,7 @@ export type BoardCollaborationPersistence = Pick<Persistence, "openBoard"> &
   Partial<Pick<
     Persistence,
     | "createStickyNote"
+    | "updateStickyNoteText"
     | "findUserByUsername"
     | "registerUser"
     | "createTerminalSession"
@@ -93,6 +97,15 @@ type StickyNoteCreationClaim = {
   stickyNoteId?: string
 }
 
+type StickyNoteEditClaim = {
+  claimId: string
+  boardId: string
+  connectionId: string
+  stickyNoteId: string
+  status: "editing" | "publishing"
+  releaseRequested?: boolean
+}
+
 export type BoardCollaborationOptions = {
   persistence: BoardCollaborationPersistence
   clock?: () => Date
@@ -111,6 +124,8 @@ export function createBoardCollaboration(
   const presenceByBoard = new Map<string, BoardPresenceState>()
   const creationClaimsById = new Map<string, StickyNoteCreationClaim>()
   const creationClaimIdByKey = new Map<string, string>()
+  const editClaimsById = new Map<string, StickyNoteEditClaim>()
+  const editClaimIdByKey = new Map<string, string>()
 
   const collaboration: BoardCollaboration = {
     async openBoard(user, publicId) {
@@ -238,6 +253,11 @@ export function createBoardCollaboration(
         removeCreationClaim(claim)
       }
     }
+    for (const claim of editClaimsById.values()) {
+      if (claim.connectionId === connectionId) {
+        removeEditClaim(claim)
+      }
+    }
 
     if (state.connections.size === 0) {
       presenceByBoard.delete(boardId)
@@ -305,9 +325,23 @@ export function createBoardCollaboration(
         case "release_sticky_note_creation":
           releaseStickyNoteCreation(socket, parsed.data.claimId, parsed.data.provisionalId)
           return
+        case "begin_sticky_note_edit":
+          beginStickyNoteEdit(socket, parsed.data.stickyNoteId)
+          return
+        case "publish_sticky_note_edit":
+          await publishStickyNoteEdit(socket, parsed.data)
+          return
+        case "release_sticky_note_edit":
+          releaseStickyNoteEdit(socket, parsed.data.claimId, parsed.data.stickyNoteId)
+          return
       }
     } catch {
-      sendCommandError(socket, "sticky_note_rejected", "Sticky Note creation was rejected.")
+      const rejectedMessage = parsed.data.type === "begin_sticky_note_edit" ||
+        parsed.data.type === "publish_sticky_note_edit" ||
+        parsed.data.type === "release_sticky_note_edit"
+        ? "Sticky Note editing was rejected."
+        : "Sticky Note creation was rejected."
+      sendCommandError(socket, "sticky_note_rejected", rejectedMessage)
     }
   }
 
@@ -473,6 +507,177 @@ export function createBoardCollaboration(
     broadcastPresenceForBoard(socket.data.boardId)
   }
 
+  function beginStickyNoteEdit(socket: BoardWebSocket, stickyNoteId: string): void {
+    if (typeof options.persistence.updateStickyNoteText !== "function") {
+      sendCommandError(socket, "sticky_note_rejected", "Sticky Note editing is unavailable.")
+      return
+    }
+
+    const state = presenceByBoard.get(socket.data.boardId)
+    const connection = state?.connections.get(socket.data.connectionId)
+    const note = connection?.board.stickyNotes?.find((currentNote) => currentNote.id === stickyNoteId)
+    if (!note) {
+      sendCommandError(socket, "sticky_note_rejected", "Sticky Note was not found.")
+      return
+    }
+
+    const key = editClaimKey(socket.data.boardId, stickyNoteId)
+    const existingClaimId = editClaimIdByKey.get(key)
+    if (existingClaimId) {
+      const existingClaim = editClaimsById.get(existingClaimId)
+      if (existingClaim?.connectionId === socket.data.connectionId) {
+        sendEditClaimAcknowledgement(socket, existingClaim, note)
+      } else {
+        sendCommandError(
+          socket,
+          "edit_claim_unavailable",
+          "Another Terminal Session already holds this Edit Claim.",
+        )
+      }
+      return
+    }
+
+    const claim: StickyNoteEditClaim = {
+      claimId: crypto.randomUUID(),
+      boardId: socket.data.boardId,
+      connectionId: socket.data.connectionId,
+      stickyNoteId,
+      status: "editing",
+    }
+    editClaimsById.set(claim.claimId, claim)
+    editClaimIdByKey.set(key, claim.claimId)
+    setActivity(socket, "editing")
+    broadcastPresenceForBoard(socket.data.boardId)
+    sendEditClaimAcknowledgement(socket, claim, note)
+  }
+
+  async function publishStickyNoteEdit(
+    socket: BoardWebSocket,
+    command: Extract<BoardCommand, { type: "publish_sticky_note_edit" }>,
+  ): Promise<void> {
+    const claim = editClaimsById.get(command.claimId)
+    if (
+      !claim ||
+      claim.connectionId !== socket.data.connectionId ||
+      claim.boardId !== socket.data.boardId ||
+      claim.stickyNoteId !== command.stickyNoteId ||
+      claim.status !== "editing"
+    ) {
+      sendCommandError(
+        socket,
+        "invalid_edit_claim",
+        "Sticky Note Edit Claim is invalid or already publishing.",
+      )
+      return
+    }
+
+    const updateStickyNoteText = options.persistence.updateStickyNoteText
+    if (typeof updateStickyNoteText !== "function") {
+      sendCommandError(socket, "sticky_note_rejected", "Sticky Note editing is unavailable.")
+      return
+    }
+
+    claim.status = "publishing"
+    try {
+      const result = await updateStickyNoteText({
+        boardId: socket.data.boardId,
+        stickyNoteId: command.stickyNoteId,
+        userId: socket.data.user.id,
+        text: command.text,
+        expectedTextVersion: command.expectedTextVersion,
+        now: clock(),
+      })
+      if (result.kind === "updated") {
+        const event = stickyNoteUpdatedSchema.parse({
+          type: "sticky_note_updated",
+          revision: result.revision,
+          stickyNote: result.stickyNote,
+        })
+        const releaseRequested = claim.releaseRequested === true
+        if (releaseRequested) {
+          removeEditClaim(claim)
+        } else {
+          claim.status = "editing"
+        }
+
+        const state = presenceByBoard.get(socket.data.boardId)
+        if (!state) {
+          return
+        }
+        applyUpdatedNote(state, result.stickyNote, result.revision)
+        broadcastStickyNoteUpdated(state, event)
+        if (releaseRequested) {
+          setActivity(socket, "viewing")
+        }
+        broadcastSnapshot(state)
+        return
+      }
+
+      const releaseRequested = claim.releaseRequested === true
+      if (releaseRequested) {
+        removeEditClaim(claim)
+      } else {
+        claim.status = "editing"
+      }
+
+      const state = presenceByBoard.get(socket.data.boardId)
+      if (result.kind === "text_version_conflict" && state) {
+        applyUpdatedNote(state, result.stickyNote, result.revision)
+        broadcastSnapshot(state)
+      }
+      if (releaseRequested) {
+        setActivity(socket, "viewing")
+        broadcastPresenceForBoard(socket.data.boardId)
+      }
+      if (result.kind === "text_version_conflict") {
+        sendCommandError(
+          socket,
+          "text_version_conflict",
+          "Sticky Note text changed before this publication.",
+        )
+      } else {
+        sendEditPersistenceError(socket, result)
+      }
+    } catch {
+      if (claim.status === "publishing") {
+        if (claim.releaseRequested) {
+          removeEditClaim(claim)
+          setActivity(socket, "viewing")
+          broadcastPresenceForBoard(socket.data.boardId)
+        } else {
+          claim.status = "editing"
+        }
+      }
+      throw new Error("Sticky Note editing was rejected.")
+    }
+  }
+
+  function releaseStickyNoteEdit(
+    socket: BoardWebSocket,
+    claimId: string,
+    stickyNoteId: string,
+  ): void {
+    const claim = editClaimsById.get(claimId)
+    if (
+      !claim ||
+      claim.connectionId !== socket.data.connectionId ||
+      claim.boardId !== socket.data.boardId ||
+      claim.stickyNoteId !== stickyNoteId
+    ) {
+      sendCommandError(socket, "invalid_edit_claim", "Sticky Note Edit Claim is invalid or already released.")
+      return
+    }
+
+    if (claim.status === "publishing") {
+      claim.releaseRequested = true
+      return
+    }
+
+    removeEditClaim(claim)
+    setActivity(socket, "viewing")
+    broadcastPresenceForBoard(socket.data.boardId)
+  }
+
   function setActivity(
     socket: BoardWebSocket,
     activity: "viewing" | "creating" | "editing" | "moving",
@@ -492,6 +697,16 @@ export function createBoardCollaboration(
     const key = creationClaimKey(claim.boardId, claim.provisionalId)
     if (creationClaimIdByKey.get(key) === claim.claimId) {
       creationClaimIdByKey.delete(key)
+    }
+  }
+
+  function removeEditClaim(claim: StickyNoteEditClaim): void {
+    if (editClaimsById.get(claim.claimId) === claim) {
+      editClaimsById.delete(claim.claimId)
+    }
+    const key = editClaimKey(claim.boardId, claim.stickyNoteId)
+    if (editClaimIdByKey.get(key) === claim.claimId) {
+      editClaimIdByKey.delete(key)
     }
   }
 
@@ -521,9 +736,42 @@ export function createBoardCollaboration(
     }
   }
 
+  function applyUpdatedNote(
+    state: BoardPresenceState,
+    note: StickyNoteRecord,
+    revision: number,
+  ): void {
+    for (const connection of state.connections.values()) {
+      const stickyNotes = [...(connection.board.stickyNotes ?? [])]
+      const existingIndex = stickyNotes.findIndex((currentNote) => currentNote.id === note.id)
+      if (existingIndex === -1) {
+        stickyNotes.push(note)
+      } else {
+        stickyNotes[existingIndex] = note
+      }
+      stickyNotes.sort((left, right) =>
+        left.stackingOrder - right.stackingOrder || left.id.localeCompare(right.id))
+      connection.board = {
+        ...connection.board,
+        revision,
+        stickyNotes,
+      }
+    }
+  }
+
   function broadcastStickyNoteCreated(
     state: BoardPresenceState,
     event: ReturnType<typeof stickyNoteCreatedSchema.parse>,
+  ): void {
+    const serialized = JSON.stringify(event)
+    for (const connection of state.connections.values()) {
+      connection.socket.send(serialized)
+    }
+  }
+
+  function broadcastStickyNoteUpdated(
+    state: BoardPresenceState,
+    event: ReturnType<typeof stickyNoteUpdatedSchema.parse>,
   ): void {
     const serialized = JSON.stringify(event)
     for (const connection of state.connections.values()) {
@@ -541,6 +789,19 @@ export function createBoardCollaboration(
       claimId: claim.claimId,
       position: claim.position,
       color: claim.color,
+    })))
+  }
+
+  function sendEditClaimAcknowledgement(
+    socket: BoardWebSocket,
+    claim: StickyNoteEditClaim,
+    note: StickyNoteRecord,
+  ): void {
+    socket.send(JSON.stringify(stickyNoteEditClaimGrantedSchema.parse({
+      type: "sticky_note_edit_claim_granted",
+      stickyNoteId: claim.stickyNoteId,
+      claimId: claim.claimId,
+      stickyNote: note,
     })))
   }
 
@@ -564,9 +825,24 @@ export function createBoardCollaboration(
     }
   }
 
+  function sendEditPersistenceError(socket: BoardWebSocket, result: UpdateStickyNoteTextResult): void {
+    switch (result.kind) {
+      case "invalid_text":
+        sendCommandError(socket, "sticky_note_rejected", "Sticky Note text was rejected.")
+        return
+      case "not_found":
+      case "not_member":
+        sendCommandError(socket, "sticky_note_rejected", "Sticky Note editing was rejected.")
+        return
+      case "updated":
+      case "text_version_conflict":
+        return
+    }
+  }
+
   function sendCommandError(
     socket: BoardWebSocket,
-    code: "invalid_command" | "creation_claim_unavailable" | "invalid_creation_claim" | "empty_sticky_note" | "sticky_note_text_limit" | "sticky_note_capacity" | "sticky_note_rejected" | "revision_conflict",
+    code: "invalid_command" | "creation_claim_unavailable" | "invalid_creation_claim" | "edit_claim_unavailable" | "invalid_edit_claim" | "empty_sticky_note" | "sticky_note_text_limit" | "sticky_note_capacity" | "sticky_note_rejected" | "text_version_conflict" | "revision_conflict",
     error: string,
   ): void {
     socket.send(JSON.stringify(boardCommandErrorSchema.parse({
@@ -584,7 +860,10 @@ function isOverLimitStickyNotePublication(payload: unknown): boolean {
     return false
   }
   const candidate = payload as { type?: unknown; text?: unknown }
-  if (candidate.type !== "publish_sticky_note" || typeof candidate.text !== "string") {
+  if (
+    (candidate.type !== "publish_sticky_note" && candidate.type !== "publish_sticky_note_edit") ||
+    typeof candidate.text !== "string"
+  ) {
     return false
   }
 
@@ -607,6 +886,10 @@ function activityForMember(member: {
 
 function creationClaimKey(boardId: string, provisionalId: string): string {
   return `${boardId}:${provisionalId}`
+}
+
+function editClaimKey(boardId: string, stickyNoteId: string): string {
+  return `${boardId}:${stickyNoteId}`
 }
 
 function decodeSocketMessage(message: unknown): string {

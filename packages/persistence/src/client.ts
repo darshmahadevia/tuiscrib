@@ -167,6 +167,22 @@ export type CreateStickyNoteResult =
   | { kind: "not_member" }
   | { kind: "board_capacity" }
 
+export type UpdateStickyNoteTextInput = {
+  boardId: string
+  stickyNoteId: string
+  userId: number
+  text: string
+  expectedTextVersion: number
+  now: Date
+}
+
+export type UpdateStickyNoteTextResult =
+  | { kind: "updated"; stickyNote: StickyNoteRecord; revision: number }
+  | { kind: "text_version_conflict"; stickyNote: StickyNoteRecord; revision: number }
+  | { kind: "invalid_text" }
+  | { kind: "not_found" }
+  | { kind: "not_member" }
+
 export type RegisteredUser = {
   user: Pick<AuthUserRecord, "id" | "username">
   sessionId: number
@@ -190,6 +206,7 @@ export type Persistence = {
   listBoards(input: ListBoardsInput): Promise<BoardSummaryRecord[]>
   openBoard(input: OpenBoardInput): Promise<OpenBoardRecord | null>
   createStickyNote(input: CreateStickyNoteInput): Promise<CreateStickyNoteResult>
+  updateStickyNoteText(input: UpdateStickyNoteTextInput): Promise<UpdateStickyNoteTextResult>
   reset(): Promise<void>
   close(): Promise<void>
 }
@@ -683,6 +700,151 @@ export function createPersistence(options: PersistenceOptions): Persistence {
               at: input.now.toISOString(),
             },
           },
+        }
+      })
+    },
+
+    async updateStickyNoteText(input) {
+      if (
+        !Number.isInteger(input.expectedTextVersion) ||
+        input.expectedTextVersion < 1 ||
+        !stickyNoteTextSchema.safeParse(input.text).success
+      ) {
+        return { kind: "invalid_text" as const }
+      }
+
+      return database.transaction(async (transaction) => {
+        const boardRows = await transaction
+          .select({ id: boards.id, revision: boards.revision })
+          .from(boards)
+          .where(eq(boards.publicId, input.boardId))
+          .for("update")
+        const board = boardRows[0]
+        if (!board) {
+          return { kind: "not_found" as const }
+        }
+
+        const memberRows = await transaction
+          .select({ username: users.username })
+          .from(memberships)
+          .innerJoin(users, eq(memberships.userId, users.id))
+          .where(
+            and(
+              eq(memberships.boardId, board.id),
+              eq(memberships.userId, input.userId),
+            ),
+          )
+          .limit(1)
+        const member = memberRows[0]
+        if (!member) {
+          return { kind: "not_member" as const }
+        }
+
+        const noteRows = await transaction
+          .select({
+            internalId: stickyNotes.id,
+            publicId: stickyNotes.publicId,
+            text: stickyNotes.text,
+            textVersion: stickyNotes.textVersion,
+            positionX: stickyNotes.positionX,
+            positionY: stickyNotes.positionY,
+            color: stickyNotes.color,
+            stackingOrder: stickyNotes.stackingOrder,
+            createdAt: stickyNotes.createdAt,
+            authoredByUserId: stickyNotes.authoredByUserId,
+            lastEditedByUserId: stickyNotes.lastEditedByUserId,
+            lastEditedAt: stickyNotes.lastEditedAt,
+          })
+          .from(stickyNotes)
+          .where(
+            and(
+              eq(stickyNotes.boardId, board.id),
+              eq(stickyNotes.publicId, input.stickyNoteId),
+            ),
+          )
+          .for("update")
+        const note = noteRows[0]
+        if (!note) {
+          return { kind: "not_found" as const }
+        }
+
+        const authorRows = await transaction
+          .select({ username: users.username })
+          .from(users)
+          .where(eq(users.id, note.authoredByUserId))
+          .limit(1)
+        const lastEditorRows = await transaction
+          .select({ username: users.username })
+          .from(users)
+          .where(eq(users.id, note.lastEditedByUserId))
+          .limit(1)
+        const authoredByUsername = authorRows[0]?.username
+        const lastEditedByUsername = lastEditorRows[0]?.username
+        if (!authoredByUsername || !lastEditedByUsername) {
+          throw new Error("Sticky Note attribution could not be loaded")
+        }
+
+        const currentStickyNote = toStickyNoteRecord({
+          id: note.publicId,
+          text: note.text,
+          textVersion: note.textVersion,
+          positionX: note.positionX,
+          positionY: note.positionY,
+          color: note.color,
+          stackingOrder: note.stackingOrder,
+          createdAt: note.createdAt,
+          lastEditedAt: note.lastEditedAt,
+          authoredByUsername,
+          lastEditedByUsername,
+        })
+        if (note.textVersion !== input.expectedTextVersion) {
+          return {
+            kind: "text_version_conflict" as const,
+            stickyNote: currentStickyNote,
+            revision: board.revision,
+          }
+        }
+
+        const updatedRows = await transaction
+          .update(stickyNotes)
+          .set({
+            text: input.text,
+            textVersion: sql`${stickyNotes.textVersion} + 1`,
+            lastEditedByUserId: input.userId,
+            lastEditedAt: input.now,
+          })
+          .where(eq(stickyNotes.id, note.internalId))
+          .returning({ id: stickyNotes.id })
+        if (!updatedRows[0]) {
+          throw new Error("Sticky Note text could not be updated")
+        }
+
+        const revisionRows = await transaction
+          .update(boards)
+          .set({ revision: sql`${boards.revision} + 1` })
+          .where(eq(boards.id, board.id))
+          .returning({ revision: boards.revision })
+        const revision = revisionRows[0]?.revision
+        if (revision === undefined) {
+          throw new Error("Board revision could not be advanced")
+        }
+
+        return {
+          kind: "updated" as const,
+          revision,
+          stickyNote: toStickyNoteRecord({
+            id: note.publicId,
+            text: input.text,
+            textVersion: note.textVersion + 1,
+            positionX: note.positionX,
+            positionY: note.positionY,
+            color: note.color,
+            stackingOrder: note.stackingOrder,
+            createdAt: note.createdAt,
+            lastEditedAt: input.now,
+            authoredByUsername,
+            lastEditedByUsername: member.username,
+          }),
         }
       })
     },

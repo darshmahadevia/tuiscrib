@@ -24,6 +24,8 @@ export {
   type StickyNoteRecord,
   type CreateStickyNoteInput,
   type CreateStickyNoteResult,
+  type UpdateStickyNoteTextInput,
+  type UpdateStickyNoteTextResult,
   type RotateJoinCodeInput,
   type RotateJoinCodeResult,
   type TerminalSessionAuthentication,

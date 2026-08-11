@@ -311,6 +311,149 @@ integrationTest("accepts only one competing final-slot creation and preserves ex
   expect(opened?.stickyNotes?.some((note) => note.text === "existing 498")).toBe(true)
 })
 
+integrationTest("publishes an established Sticky Note as empty text with Last Edit and CAS conflict durability", async () => {
+  if (!persistence) {
+    throw new Error("persistence was not initialized")
+  }
+
+  const createdAt = new Date("2026-08-10T00:00:00.000Z")
+  const editedAt = new Date("2026-08-10T00:00:01.000Z")
+  const registered = await persistence.registerUser({
+    username: "edit_writer",
+    passwordHash: "$argon2id$v=19$m=65536,t=3,p=1$test$hash",
+    credentialHash: "k".repeat(64),
+    now: createdAt,
+    expiresAt: new Date(createdAt.getTime() + 30 * 24 * 60 * 60 * 1_000),
+  })
+  if (!registered) {
+    throw new Error("user was not registered")
+  }
+  const boardId = "KdeFgHiJkLmNoPqRsTuVwX"
+  await persistence.createBoard({
+    publicId: boardId,
+    name: "Established Empty",
+    ownerUserId: registered.user.id,
+    joinCodeHash: "a".repeat(64),
+    now: createdAt,
+  })
+  await expect(persistence.createStickyNote({
+    publicId: "LdeFgHiJkLmNoPqRsTuVwX",
+    boardId,
+    userId: registered.user.id,
+    text: "initial text",
+    position: { x: 0, y: 0 },
+    color: "yellow",
+    now: createdAt,
+  })).resolves.toMatchObject({ kind: "created", revision: 1 })
+
+  const updated = await persistence.updateStickyNoteText({
+    boardId,
+    stickyNoteId: "LdeFgHiJkLmNoPqRsTuVwX",
+    userId: registered.user.id,
+    text: "",
+    expectedTextVersion: 1,
+    now: editedAt,
+  })
+  expect(updated).toMatchObject({
+    kind: "updated",
+    revision: 2,
+    stickyNote: {
+      text: "",
+      textVersion: 2,
+      lastEdit: {
+        member: { username: "edit_writer" },
+        at: editedAt.toISOString(),
+      },
+    },
+  })
+
+  const stale = await persistence.updateStickyNoteText({
+    boardId,
+    stickyNoteId: "LdeFgHiJkLmNoPqRsTuVwX",
+    userId: registered.user.id,
+    text: "stale optimistic text",
+    expectedTextVersion: 1,
+    now: new Date("2026-08-10T00:00:02.000Z"),
+  })
+  expect(stale).toMatchObject({
+    kind: "text_version_conflict",
+    revision: 2,
+    stickyNote: { text: "", textVersion: 2 },
+  })
+
+  const opened = await persistence.openBoard({ userId: registered.user.id, publicId: boardId })
+  expect(opened).toMatchObject({
+    revision: 2,
+    stickyNotes: [{ id: "LdeFgHiJkLmNoPqRsTuVwX", text: "", textVersion: 2 }],
+  })
+})
+
+integrationTest("serializes competing established text publications by the locked Sticky Note version", async () => {
+  if (!persistence || !concurrentPersistence) {
+    throw new Error("persistence was not initialized")
+  }
+
+  const now = new Date("2026-08-10T00:00:00.000Z")
+  const registered = await persistence.registerUser({
+    username: "edit_racer",
+    passwordHash: "$argon2id$v=19$m=65536,t=3,p=1$test$hash",
+    credentialHash: "m".repeat(64),
+    now,
+    expiresAt: new Date(now.getTime() + 30 * 24 * 60 * 60 * 1_000),
+  })
+  if (!registered) {
+    throw new Error("user was not registered")
+  }
+  const boardId = "MdeFgHiJkLmNoPqRsTuVwX"
+  const noteId = "NdeFgHiJkLmNoPqRsTuVwX"
+  await persistence.createBoard({
+    publicId: boardId,
+    name: "Edit Race",
+    ownerUserId: registered.user.id,
+    joinCodeHash: "b".repeat(64),
+    now,
+  })
+  await persistence.createStickyNote({
+    publicId: noteId,
+    boardId,
+    userId: registered.user.id,
+    text: "race start",
+    position: { x: 0, y: 0 },
+    color: "yellow",
+    now,
+  })
+
+  const results = await Promise.all([
+    persistence.updateStickyNoteText({
+      boardId,
+      stickyNoteId: noteId,
+      userId: registered.user.id,
+      text: "first committed writer",
+      expectedTextVersion: 1,
+      now,
+    }),
+    concurrentPersistence.updateStickyNoteText({
+      boardId,
+      stickyNoteId: noteId,
+      userId: registered.user.id,
+      text: "second stale writer",
+      expectedTextVersion: 1,
+      now,
+    }),
+  ])
+
+  expect(results.filter((result) => result.kind === "updated")).toHaveLength(1)
+  expect(results.filter((result) => result.kind === "text_version_conflict")).toHaveLength(1)
+  const opened = await persistence.openBoard({ userId: registered.user.id, publicId: boardId })
+  expect(opened?.revision).toBe(2)
+  expect(opened?.stickyNotes).toMatchObject([{
+    id: noteId,
+    textVersion: 2,
+  }])
+  const finalText = opened?.stickyNotes?.[0]?.text
+  expect(finalText === "first committed writer" || finalText === "second stale writer").toBe(true)
+})
+
 function capacityNoteId(index: number): string {
   return `N${index.toString().padStart(21, "0")}`
 }

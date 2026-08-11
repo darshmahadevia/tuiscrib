@@ -163,12 +163,6 @@ export const stickyNotes = pgTable(
       sql`${table.publicId} ~ '^[A-Za-z0-9_-]{22}$'`,
     ),
     check(
-      "sticky_notes_text_length_check",
-      // PostgreSQL char_length counts code points, not user-perceived grapheme clusters.
-      // The persistence boundary revalidates the shared contract before its transaction.
-      sql`char_length(${table.text}) > 0`,
-    ),
-    check(
       "sticky_notes_text_version_check",
       sql`${table.textVersion} >= 1`,
     ),

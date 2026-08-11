@@ -40,3 +40,17 @@ test("rejects duplicate Member Presence in one authoritative snapshot", () => {
 test("recognizes the non-private Board collaboration preflight response", () => {
   expect(boardOpenReadyResponseSchema.parse({ status: "ready" })).toEqual({ status: "ready" })
 })
+
+test("keeps Edit Claim and text-version conflicts in the public Board command error vocabulary", () => {
+  expect(boardSocketMessageSchema.parse({
+    type: "error",
+    code: "edit_claim_unavailable",
+    error: "Another Terminal Session already holds this Edit Claim.",
+  })).toMatchObject({ code: "edit_claim_unavailable" })
+
+  expect(boardSocketMessageSchema.parse({
+    type: "error",
+    code: "text_version_conflict",
+    error: "Sticky Note text changed before this publication.",
+  })).toMatchObject({ code: "text_version_conflict" })
+})

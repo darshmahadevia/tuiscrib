@@ -57,6 +57,13 @@
       "when": 1786404560705,
       "tag": "0007_clean_junta",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1786406655966,
+      "tag": "0008_cold_hercules",
+      "breakpoints": true
     }
   ]
 }
