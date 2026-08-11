@@ -5,11 +5,13 @@ import {
   boardCommandSchema,
   DEFAULT_STICKY_NOTE_COLOR,
   MAX_STICKY_NOTE_CHARACTERS,
+  moveStickyNoteSchema,
   recolorStickyNoteSchema,
   reorderStickyNoteSchema,
   publishStickyNoteEditSchema,
   releaseStickyNoteEditSchema,
   stickyNoteSchema,
+  stickyNoteMovedSchema,
   stickyNoteRecoloredSchema,
   stickyNoteReorderedSchema,
 } from "./sticky-notes.ts"
@@ -170,6 +172,25 @@ test("models Color changes as independent revisioned mutations without an Edit C
     type: "sticky_note_recolored",
     revision: 3,
     stickyNote: { id: note.id, color: "magenta", text: note.text, textVersion: note.textVersion },
+  })
+})
+
+test("models Position changes as independent revisioned mutations without an Edit Claim", () => {
+  const command = {
+    type: "move_sticky_note" as const,
+    stickyNoteId: note.id,
+    direction: "right" as const,
+  }
+
+  expect(boardCommandSchema.parse(moveStickyNoteSchema.parse(command))).toEqual(command)
+  expect(stickyNoteMovedSchema.parse({
+    type: "sticky_note_moved",
+    revision: 4,
+    stickyNote: { ...note, position: { x: 5, y: -2 } },
+  })).toMatchObject({
+    type: "sticky_note_moved",
+    revision: 4,
+    stickyNote: { id: note.id, position: { x: 5, y: -2 }, text: note.text },
   })
 })
 

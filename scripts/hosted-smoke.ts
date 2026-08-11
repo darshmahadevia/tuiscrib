@@ -9,6 +9,7 @@ import type {
   BoardSnapshot,
   StickyNoteCreated,
   StickyNoteCreationClaimGranted,
+  StickyNoteMoved,
 } from "../packages/contracts/src/index.ts"
 
 type SmokeProbe = {
@@ -16,6 +17,7 @@ type SmokeProbe = {
   snapshots: BoardSnapshot[]
   claims: StickyNoteCreationClaimGranted[]
   created: StickyNoteCreated[]
+  moved: StickyNoteMoved[]
   errors: Error[]
 }
 
@@ -124,6 +126,35 @@ async function main(): Promise<void> {
       "durable Sticky Note observation by the second client",
     )
 
+    const createdNote = ownerProbe.created.find((event) => event.stickyNote.text === text)?.stickyNote ??
+      memberProbe.created.find((event) => event.stickyNote.text === text)?.stickyNote
+    if (!createdNote) {
+      throw new Error("Hosted smoke could not identify the durable Sticky Note.")
+    }
+    memberProbe.connection.send({
+      type: "move_sticky_note",
+      stickyNoteId: createdNote.id,
+      direction: "right",
+    })
+    await waitFor(
+      () => ownerProbe!.moved.some((event) =>
+        event.stickyNote.id === createdNote.id && event.stickyNote.position.x === 1),
+      timeoutMs,
+      "durable Sticky Note movement observation by the first client",
+    )
+    await waitFor(
+      () => ownerProbe!.snapshots.some((snapshot) => snapshot.presence.some((presence) =>
+        presence.member.username === memberUsername && presence.activity === "moving")),
+      timeoutMs,
+      "moving Presence",
+    )
+    await waitFor(
+      () => ownerProbe!.snapshots.some((snapshot) => snapshot.presence.some((presence) =>
+        presence.member.username === memberUsername && presence.activity === "viewing")),
+      timeoutMs,
+      "movement Presence expiry",
+    )
+
     memberProbe.connection.close()
     memberProbe = await openProbe(
       boards,
@@ -133,7 +164,7 @@ async function main(): Promise<void> {
     )
     await waitFor(
       () => memberProbe!.snapshots.some((snapshot) =>
-        snapshot.stickyNotes?.some((note) => note.text === text)),
+        snapshot.stickyNotes?.some((note) => note.text === text && note.position.x === 1)),
       timeoutMs,
       "durable Sticky Note after reconnect",
     )
@@ -166,6 +197,7 @@ async function openProbe(
     snapshots: [],
     claims: [],
     created: [],
+    moved: [],
     errors: [],
   }
   const connectionPromise = boards.openBoard(credential, boardId, {
@@ -174,6 +206,7 @@ async function openProbe(
     onClose: () => undefined,
     onStickyNoteCreationClaimGranted: (claim) => probe.claims.push(claim),
     onStickyNoteCreated: (event) => probe.created.push(event),
+    onStickyNoteMoved: (event) => probe.moved.push(event),
   })
   try {
     probe.connection = await withTimeout(connectionPromise, timeoutMs, "WebSocket upgrade")

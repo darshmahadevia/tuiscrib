@@ -1971,6 +1971,170 @@ test("persists Stacking Order before acknowledging a reorder and broadcasts its 
   }
 })
 
+test("persists Position before acknowledging a move and cancels stale moving Presence timers", async () => {
+  const note = {
+    id: "Lm7u3nW8kM2pR5sT9vY4aB",
+    text: "moving note",
+    textVersion: 1,
+    position: { x: 0, y: 0 },
+    color: "yellow" as const,
+    stackingOrder: 0,
+    authorship: { member: { username: "ada_lovelace" } },
+    createdAt: "2026-08-10T00:00:00.000Z",
+    lastEdit: {
+      member: { username: "ada_lovelace" },
+      at: "2026-08-10T00:00:00.000Z",
+    },
+  }
+  const manualScheduler = createManualScheduler()
+  let allowFirstCommit!: () => void
+  const firstCommit = new Promise<void>((resolve) => {
+    allowFirstCommit = resolve
+  })
+  const moveInputs: Array<Record<string, unknown>> = []
+  const movedNotes = [
+    { ...note, position: { x: 1, y: 0 } },
+    { ...note, position: { x: 1, y: -1 } },
+    { ...note, position: { x: 2, y: -1 } },
+  ]
+  const collaboration = createBoardCollaboration({
+    clock: () => new Date("2026-08-10T00:00:00.000Z"),
+    scheduler: manualScheduler,
+    persistence: {
+      openBoard: async ({ userId, publicId }) => ({
+        board: {
+          id: publicId,
+          name: "Movement Ideas",
+          role: userId === 7 ? "owner" : "member",
+        },
+        revision: 1,
+        stickyNotes: [note],
+      }),
+      moveStickyNote: async (input: Record<string, unknown>) => {
+        moveInputs.push(input)
+        if (moveInputs.length === 1) {
+          await firstCommit
+        }
+        return {
+          kind: "moved" as const,
+          revision: moveInputs.length + 1,
+          stickyNote: movedNotes[moveInputs.length - 1]!,
+        }
+      },
+      updateStickyNoteText: async () => ({ kind: "not_found" as const }),
+    },
+    sessionAuthenticator: async (value) => {
+      if (value === credential) {
+        return { user: { id: 7, username: "ada_lovelace" } }
+      }
+      if (value === "b".repeat(43)) {
+        return { user: { id: 8, username: "grace_hopper" } }
+      }
+      return null
+    },
+  })
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request, bunServer) {
+      const result = await collaboration.handleUpgrade(request, bunServer)
+      return result === null ? new Response("not found", { status: 404 }) : result
+    },
+    websocket: collaboration.websocket,
+  })
+  const url = `ws://127.0.0.1:${server.port}/boards/${boardId}/collaboration`
+  const owner = createSocketClient(url, credential)
+  const member = createSocketClient(url, "b".repeat(43))
+
+  try {
+    await Promise.all([waitForSocketOpen(owner.socket), waitForSocketOpen(member.socket)])
+    await owner.nextMessage()
+    await member.nextMessage()
+    await nextMessageMatching(owner, (message) => (message.presence as unknown[]).length === 2)
+
+    owner.socket.send(JSON.stringify({
+      type: "move_sticky_note",
+      stickyNoteId: note.id,
+      direction: "right",
+    }))
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(moveInputs).toHaveLength(1)
+    allowFirstCommit()
+
+    await expect(nextMessageMatching(owner, (message) => message.type === "sticky_note_moved"))
+      .resolves.toEqual({
+        type: "sticky_note_moved",
+        revision: 2,
+        stickyNote: movedNotes[0],
+      })
+    await expect(nextMessageMatching(member, (message) => message.type === "sticky_note_moved"))
+      .resolves.toMatchObject({ revision: 2, stickyNote: movedNotes[0] })
+    await expect(nextMessageMatching(member, (message) => presenceFor(message, "ada_lovelace") === "moving"))
+      .resolves.toMatchObject({ revision: 2 })
+    expect(manualScheduler.activeCount()).toBe(1)
+
+    manualScheduler.advance(250)
+    owner.socket.send(JSON.stringify({
+      type: "move_sticky_note",
+      stickyNoteId: note.id,
+      direction: "up",
+    }))
+    await expect(nextMessageMatching(member, (message) => message.type === "sticky_note_moved"))
+      .resolves.toMatchObject({ revision: 3, stickyNote: movedNotes[1] })
+    await expect(nextMessageMatching(member, (message) => presenceFor(message, "ada_lovelace") === "moving"))
+      .resolves.toMatchObject({ revision: 3 })
+    expect(moveInputs[1]).toMatchObject({
+      boardId,
+      stickyNoteId: note.id,
+      userId: 7,
+      direction: "up",
+    })
+    expect(manualScheduler.activeCount()).toBe(1)
+
+    owner.socket.send(JSON.stringify({
+      type: "begin_sticky_note_edit",
+      stickyNoteId: note.id,
+    }))
+    const editClaim = await nextMessageMatching(
+      owner,
+      (message) => message.type === "sticky_note_edit_claim_granted",
+    )
+    await expect(nextMessageMatching(member, (message) => presenceFor(message, "ada_lovelace") === "editing"))
+      .resolves.toMatchObject({ revision: 3 })
+    expect(manualScheduler.activeCount()).toBe(0)
+    manualScheduler.advance(500)
+    expect(manualScheduler.activeCount()).toBe(0)
+
+    owner.socket.send(JSON.stringify({
+      type: "release_sticky_note_edit",
+      claimId: editClaim.claimId,
+      stickyNoteId: note.id,
+    }))
+    await expect(nextMessageMatching(member, (message) => presenceFor(message, "ada_lovelace") === "viewing"))
+      .resolves.toMatchObject({ revision: 3 })
+    expect(manualScheduler.activeCount()).toBe(0)
+
+    owner.socket.send(JSON.stringify({
+      type: "move_sticky_note",
+      stickyNoteId: note.id,
+      direction: "right",
+    }))
+    await expect(nextMessageMatching(member, (message) => message.type === "sticky_note_moved"))
+      .resolves.toMatchObject({ revision: 4, stickyNote: movedNotes[2] })
+    await expect(nextMessageMatching(member, (message) => presenceFor(message, "ada_lovelace") === "moving"))
+      .resolves.toMatchObject({ revision: 4 })
+    expect(manualScheduler.activeCount()).toBe(1)
+    manualScheduler.advance(500)
+    await expect(nextMessageMatching(member, (message) => presenceFor(message, "ada_lovelace") === "viewing"))
+      .resolves.toMatchObject({ revision: 4 })
+    expect(manualScheduler.activeCount()).toBe(0)
+  } finally {
+    allowFirstCommit()
+    await Promise.all([closeSocket(owner.socket), closeSocket(member.socket)])
+    await server.stop(true)
+  }
+})
+
 function presenceFor(message: Record<string, unknown>, username: string): string | undefined {
   const presence = message.presence as Array<{ member: { username: string }; activity: string }> | undefined
   return presence?.find((entry) => entry.member.username === username)?.activity
@@ -2015,6 +2179,9 @@ function createManualScheduler() {
         next.cancelled = true
         next.callback()
       }
+    },
+    activeCount() {
+      return timers.filter((timer) => !timer.cancelled).length
     },
   }
 }

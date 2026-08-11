@@ -12,6 +12,7 @@ import {
   stickyNoteCreationClaimGrantedSchema,
   stickyNoteCreatedSchema,
   stickyNoteEditClaimGrantedSchema,
+  stickyNoteMovedSchema,
   stickyNoteRecoloredSchema,
   stickyNoteReorderedSchema,
   stickyNoteUpdatedSchema,
@@ -25,6 +26,7 @@ import {
 } from "@tuiscrib/contracts"
 import type {
   CreateStickyNoteResult,
+  MoveStickyNoteResult,
   OpenBoardRecord,
   Persistence,
   RecolorStickyNoteResult,
@@ -44,6 +46,7 @@ import type { BoardUser } from "./boards.ts"
 
 const BOARD_COLLABORATION_PATH = /^\/boards\/([^/]+)\/collaboration$/
 export const EDIT_CLAIM_GRACE_MS = 30_000
+export const MOVING_PRESENCE_DURATION_MS = 500
 
 export type BoardCollaborationScheduler = {
   schedule(callback: () => void, delayMs: number): unknown
@@ -57,6 +60,7 @@ export type BoardCollaborationPersistence = Pick<Persistence, "openBoard"> &
     | "updateStickyNoteText"
     | "recolorStickyNote"
     | "reorderStickyNote"
+    | "moveStickyNote"
     | "findUserByUsername"
     | "registerUser"
     | "createTerminalSession"
@@ -162,6 +166,12 @@ export function createBoardCollaboration(
   const editClaimsById = new Map<string, StickyNoteEditClaim>()
   const editClaimIdByKey = new Map<string, string>()
   const mutationTailByBoard = new Map<string, Promise<void>>()
+  const movementPresenceTimersByConnection = new Map<string, {
+    boardId: string
+    token: number
+    handle: unknown
+  }>()
+  let movementPresenceToken = 0
 
   const collaboration: BoardCollaboration = {
     async openBoard(user, publicId) {
@@ -319,6 +329,7 @@ export function createBoardCollaboration(
     reason: "transient" | "authorization_lost" = "transient",
   ): void {
     const { boardId, connectionId, user } = socket.data
+    cancelMovementPresenceTimer(connectionId)
     const state = presenceByBoard.get(boardId)
     if (!state || !state.connections.delete(connectionId)) {
       return
@@ -451,12 +462,23 @@ export function createBoardCollaboration(
             ),
           )
           return
+        case "move_sticky_note":
+          await runBoardMutation(
+            socket.data.boardId,
+            () => moveStickyNote(
+              socket,
+              parsed.data as Extract<BoardCommand, { type: "move_sticky_note" }>,
+            ),
+          )
+          return
       }
     } catch {
       const rejectedMessage = parsed.data.type === "recolor_sticky_note"
         ? "Sticky Note recoloring was rejected."
         : parsed.data.type === "reorder_sticky_note"
         ? "Sticky Note Stacking Order change was rejected."
+        : parsed.data.type === "move_sticky_note"
+        ? "Sticky Note Position change was rejected."
         : parsed.data.type === "begin_sticky_note_edit" ||
         parsed.data.type === "publish_sticky_note_edit" ||
         parsed.data.type === "release_sticky_note_edit"
@@ -938,6 +960,56 @@ export function createBoardCollaboration(
     broadcastSnapshot(state)
   }
 
+  async function moveStickyNote(
+    socket: BoardWebSocket,
+    command: Extract<BoardCommand, { type: "move_sticky_note" }>,
+  ): Promise<void> {
+    const moveStickyNote = options.persistence.moveStickyNote
+    if (typeof moveStickyNote !== "function") {
+      sendCommandError(socket, "sticky_note_rejected", "Sticky Note Position is unavailable.")
+      return
+    }
+
+    const result = await moveStickyNote({
+      boardId: socket.data.boardId,
+      stickyNoteId: command.stickyNoteId,
+      userId: socket.data.user.id,
+      direction: command.direction,
+    })
+    if (result.kind === "at_boundary") {
+      sendCommandError(
+        socket,
+        "position_boundary",
+        "Sticky Note cannot move beyond the shared coordinate plane.",
+        {
+          authoritative: {
+            revision: result.revision,
+            stickyNote: result.stickyNote,
+          },
+        },
+      )
+      return
+    }
+    if (result.kind !== "moved") {
+      sendMovePersistenceError(socket, result)
+      return
+    }
+
+    const event = stickyNoteMovedSchema.parse({
+      type: "sticky_note_moved",
+      revision: result.revision,
+      stickyNote: result.stickyNote,
+    })
+    const state = presenceByBoard.get(socket.data.boardId)
+    if (!state) {
+      return
+    }
+    applyUpdatedNote(state, result.stickyNote, result.revision)
+    broadcastStickyNoteMoved(state, event)
+    setActivity(socket, "moving")
+    broadcastSnapshot(state)
+  }
+
   function releaseStickyNoteEdit(
     socket: BoardWebSocket,
     claimId: string,
@@ -985,7 +1057,41 @@ export function createBoardCollaboration(
     if (!member) {
       return
     }
+    cancelMovementPresenceTimer(connectionId)
     member.activityByConnection.set(connectionId, activity)
+    if (activity !== "moving") {
+      return
+    }
+
+    const token = ++movementPresenceToken
+    const handle = scheduler.schedule(() => {
+      const current = movementPresenceTimersByConnection.get(connectionId)
+      if (!current || current.token !== token) {
+        return
+      }
+      movementPresenceTimersByConnection.delete(connectionId)
+      const currentState = presenceByBoard.get(boardId)
+      const currentConnection = currentState?.connections.get(connectionId)
+      const currentMember = currentConnection
+        ? currentState?.members.get(currentConnection.user.id)
+        : undefined
+      if (!currentState || !currentConnection || !currentMember ||
+        currentMember.activityByConnection.get(connectionId) !== "moving") {
+        return
+      }
+      currentMember.activityByConnection.set(connectionId, "viewing")
+      broadcastPresenceForBoard(boardId)
+    }, MOVING_PRESENCE_DURATION_MS)
+    movementPresenceTimersByConnection.set(connectionId, { boardId, token, handle })
+  }
+
+  function cancelMovementPresenceTimer(connectionId: string): void {
+    const timer = movementPresenceTimersByConnection.get(connectionId)
+    if (!timer) {
+      return
+    }
+    scheduler.cancel(timer.handle)
+    movementPresenceTimersByConnection.delete(connectionId)
   }
 
   function removeCreationClaim(claim: StickyNoteCreationClaim): void {
@@ -1233,6 +1339,18 @@ export function createBoardCollaboration(
     }
   }
 
+  function broadcastStickyNoteMoved(
+    state: BoardPresenceState,
+    event: ReturnType<typeof stickyNoteMovedSchema.parse>,
+  ): void {
+    const serialized = JSON.stringify(event)
+    for (const connection of state.connections.values()) {
+      if (connection.ready) {
+        connection.socket.send(serialized)
+      }
+    }
+  }
+
   function sendClaimAcknowledgement(
     socket: BoardWebSocket,
     claim: StickyNoteCreationClaim,
@@ -1323,9 +1441,27 @@ export function createBoardCollaboration(
     }
   }
 
+  function sendMovePersistenceError(
+    socket: BoardWebSocket,
+    result: MoveStickyNoteResult,
+  ): void {
+    switch (result.kind) {
+      case "invalid_direction":
+        sendCommandError(socket, "sticky_note_rejected", "Sticky Note Position change was rejected.")
+        return
+      case "not_found":
+      case "not_member":
+        sendCommandError(socket, "sticky_note_rejected", "Sticky Note Position change was rejected.")
+        return
+      case "at_boundary":
+      case "moved":
+        return
+    }
+  }
+
   function sendCommandError(
     socket: BoardWebSocket,
-    code: "invalid_command" | "creation_claim_unavailable" | "invalid_creation_claim" | "edit_claim_unavailable" | "invalid_edit_claim" | "empty_sticky_note" | "sticky_note_text_limit" | "sticky_note_capacity" | "sticky_note_rejected" | "text_version_conflict" | "stacking_order_boundary" | "revision_conflict",
+    code: "invalid_command" | "creation_claim_unavailable" | "invalid_creation_claim" | "edit_claim_unavailable" | "invalid_edit_claim" | "empty_sticky_note" | "sticky_note_text_limit" | "sticky_note_capacity" | "sticky_note_rejected" | "text_version_conflict" | "stacking_order_boundary" | "position_boundary" | "revision_conflict",
     error: string,
     details?: {
       claimHolder?: { username: string }

@@ -106,6 +106,49 @@ test("Ctrl navigation pans only the private viewport and emits no shared activit
   expect(fixture.sent).toEqual([])
 })
 
+test("Shift navigation moves the selected Sticky Note only after durable acknowledgement", async () => {
+  const fixture = createBoardFixture()
+  activeSetup = await renderCanvas({ width: 80, height: 24 }, fixture.boardClient)
+
+  await act(async () => {
+    activeSetup?.mockInput.pressArrow("right", { shift: true })
+    await activeSetup?.renderOnce()
+  })
+  expect(JSON.parse(fixture.sent.at(-1) ?? "{}")).toEqual({
+    type: "move_sticky_note",
+    stickyNoteId: "Rz8v4oX9nL3qS6tU0wZ5cD",
+    direction: "right",
+  })
+  let frame = activeSetup.captureCharFrame()
+  expect(frame).toContain("Waiting for durable Position right acknowledgement")
+  expect(frame).toContain("Canvas cursor: (0, 0)")
+
+  await act(async () => {
+    fixture.handlers?.onStickyNoteMoved?.({
+      type: "sticky_note_moved",
+      revision: 4,
+      stickyNote: {
+        ...createSnapshot(3).stickyNotes![0]!,
+        position: { x: 1, y: 0 },
+      },
+    })
+    await activeSetup?.renderOnce()
+  })
+  frame = activeSetup.captureCharFrame()
+  expect(frame).toContain("Board revision: 4")
+  expect(frame).toContain("Sticky Note Position committed at Board revision 4")
+
+  await act(async () => {
+    activeSetup?.mockInput.pressKey("j", { shift: true })
+    await activeSetup?.renderOnce()
+  })
+  expect(JSON.parse(fixture.sent.at(-1) ?? "{}")).toEqual({
+    type: "move_sticky_note",
+    stickyNoteId: "Rz8v4oX9nL3qS6tU0wZ5cD",
+    direction: "down",
+  })
+})
+
 test("authoritative reconnect snapshots reset private navigation without changing selection or shared state", async () => {
   const fixture = createBoardFixture()
   activeSetup = await renderCanvas({ width: 80, height: 24 }, fixture.boardClient)

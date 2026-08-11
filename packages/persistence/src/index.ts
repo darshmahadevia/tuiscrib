@@ -33,6 +33,8 @@ export {
   type RecolorStickyNoteResult,
   type ReorderStickyNoteInput,
   type ReorderStickyNoteResult,
+  type MoveStickyNoteInput,
+  type MoveStickyNoteResult,
   type RotateJoinCodeInput,
   type RotateJoinCodeResult,
   type TerminalSessionAuthentication,

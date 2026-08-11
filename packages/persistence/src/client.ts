@@ -9,11 +9,13 @@ import {
   MAX_STICKY_NOTES,
   compareStickyNoteStackingOrder,
   stickyNoteColorSchema,
+  stickyNoteMovementDirectionSchema,
   stickyNotePositionSchema,
   stickyNoteTextSchema,
   type StickyNote,
   type StickyNoteColor,
   type StickyNotePosition,
+  type StickyNoteMovementDirection,
   type StickyNoteStackingDirection,
 } from "@tuiscrib/contracts"
 
@@ -216,6 +218,20 @@ export type ReorderStickyNoteResult =
   | { kind: "not_found" }
   | { kind: "not_member" }
 
+export type MoveStickyNoteInput = {
+  boardId: string
+  stickyNoteId: string
+  userId: number
+  direction: StickyNoteMovementDirection
+}
+
+export type MoveStickyNoteResult =
+  | { kind: "moved"; stickyNote: StickyNoteRecord; revision: number }
+  | { kind: "at_boundary"; stickyNote: StickyNoteRecord; revision: number }
+  | { kind: "invalid_direction" }
+  | { kind: "not_found" }
+  | { kind: "not_member" }
+
 export type RegisteredUser = {
   user: Pick<AuthUserRecord, "id" | "username">
   sessionId: number
@@ -242,6 +258,7 @@ export type Persistence = {
   updateStickyNoteText(input: UpdateStickyNoteTextInput): Promise<UpdateStickyNoteTextResult>
   recolorStickyNote(input: RecolorStickyNoteInput): Promise<RecolorStickyNoteResult>
   reorderStickyNote(input: ReorderStickyNoteInput): Promise<ReorderStickyNoteResult>
+  moveStickyNote(input: MoveStickyNoteInput): Promise<MoveStickyNoteResult>
   reset(): Promise<void>
   close(): Promise<void>
 }
@@ -1163,6 +1180,119 @@ export function createPersistence(options: PersistenceOptions): Persistence {
               stackingOrder: note.stackingOrder,
             }),
           ].sort(compareStickyNoteStackingOrder),
+        }
+      })
+    },
+
+    async moveStickyNote(input) {
+      if (!stickyNoteMovementDirectionSchema.safeParse(input.direction).success) {
+        return { kind: "invalid_direction" as const }
+      }
+
+      const delta = {
+        up: { x: 0, y: -1 },
+        down: { x: 0, y: 1 },
+        left: { x: -1, y: 0 },
+        right: { x: 1, y: 0 },
+      }[input.direction]
+
+      return database.transaction(async (transaction) => {
+        const boardRows = await transaction
+          .select({ id: boards.id, revision: boards.revision })
+          .from(boards)
+          .where(eq(boards.publicId, input.boardId))
+          .for("update")
+        const board = boardRows[0]
+        if (!board) {
+          return { kind: "not_found" as const }
+        }
+
+        const memberRows = await transaction
+          .select({ username: users.username })
+          .from(memberships)
+          .innerJoin(users, eq(memberships.userId, users.id))
+          .where(
+            and(
+              eq(memberships.boardId, board.id),
+              eq(memberships.userId, input.userId),
+            ),
+          )
+          .limit(1)
+        if (!memberRows[0]) {
+          return { kind: "not_member" as const }
+        }
+
+        const noteRows = await transaction
+          .select({
+            internalId: stickyNotes.id,
+            publicId: stickyNotes.publicId,
+            text: stickyNotes.text,
+            textVersion: stickyNotes.textVersion,
+            positionX: stickyNotes.positionX,
+            positionY: stickyNotes.positionY,
+            color: stickyNotes.color,
+            stackingOrder: stickyNotes.stackingOrder,
+            createdAt: stickyNotes.createdAt,
+            lastEditedAt: stickyNotes.lastEditedAt,
+            authoredByUsername: stickyNoteAuthors.username,
+            lastEditedByUsername: stickyNoteEditors.username,
+          })
+          .from(stickyNotes)
+          .innerJoin(stickyNoteAuthors, eq(stickyNotes.authoredByUserId, stickyNoteAuthors.id))
+          .innerJoin(stickyNoteEditors, eq(stickyNotes.lastEditedByUserId, stickyNoteEditors.id))
+          .where(
+            and(
+              eq(stickyNotes.boardId, board.id),
+              eq(stickyNotes.publicId, input.stickyNoteId),
+            ),
+          )
+          .for("update")
+        const note = noteRows[0]
+        if (!note) {
+          return { kind: "not_found" as const }
+        }
+
+        const currentStickyNote = toStickyNoteRecord({ ...note, id: note.publicId })
+        const nextPosition = {
+          x: note.positionX + delta.x,
+          y: note.positionY + delta.y,
+        }
+        if (!stickyNotePositionSchema.safeParse(nextPosition).success) {
+          return {
+            kind: "at_boundary" as const,
+            stickyNote: currentStickyNote,
+            revision: board.revision,
+          }
+        }
+
+        const updatedRows = await transaction
+          .update(stickyNotes)
+          .set({ positionX: nextPosition.x, positionY: nextPosition.y })
+          .where(eq(stickyNotes.id, note.internalId))
+          .returning({ id: stickyNotes.id })
+        if (!updatedRows[0]) {
+          throw new Error("Sticky Note Position could not be updated")
+        }
+
+        const revisionRows = await transaction
+          .update(boards)
+          .set({ revision: sql`${boards.revision} + 1` })
+          .where(eq(boards.id, board.id))
+          .returning({ revision: boards.revision })
+        const revision = revisionRows[0]?.revision
+        if (revision === undefined) {
+          throw new Error("Board revision could not be advanced")
+        }
+
+        return {
+          kind: "moved" as const,
+          revision,
+          stickyNote: toStickyNoteRecord({
+            ...note,
+            id: note.publicId,
+            positionX: nextPosition.x,
+            positionY: nextPosition.y,
+          }),
         }
       })
     },

@@ -200,6 +200,67 @@ integrationTest("serializes concurrent Stacking Order changes in PostgreSQL comm
   expect(new Set(opened?.stickyNotes?.map((note) => note.id))).toEqual(new Set(noteIds))
 })
 
+integrationTest("serializes concurrent Position changes by Board revision in PostgreSQL commit order", async () => {
+  if (!persistence || !concurrentPersistence) {
+    throw new Error("persistence was not initialized")
+  }
+
+  const now = new Date("2026-08-10T00:00:00.000Z")
+  const registered = await persistence.registerUser({
+    username: "movement_writer",
+    passwordHash: "$argon2id$v=19$m=65536,t=3,p=1$test$hash",
+    credentialHash: "d".repeat(64),
+    now,
+    expiresAt: new Date(now.getTime() + 30 * 24 * 60 * 60 * 1_000),
+  })
+  if (!registered) {
+    throw new Error("user was not registered")
+  }
+
+  const boardId = "SdeFgHiJkLmNoPqRsTuVwX"
+  const noteId = "TdeFgHiJkLmNoPqRsTuVwX"
+  await persistence.createBoard({
+    publicId: boardId,
+    name: "Movement",
+    ownerUserId: registered.user.id,
+    joinCodeHash: "7".repeat(64),
+    now,
+  })
+  await persistence.createStickyNote({
+    publicId: noteId,
+    boardId,
+    userId: registered.user.id,
+    text: "move me",
+    position: { x: 0, y: 0 },
+    color: "yellow",
+    now,
+  })
+
+  const concurrent = await Promise.all([
+    persistence.moveStickyNote({
+      boardId,
+      stickyNoteId: noteId,
+      userId: registered.user.id,
+      direction: "right",
+    }),
+    concurrentPersistence.moveStickyNote({
+      boardId,
+      stickyNoteId: noteId,
+      userId: registered.user.id,
+      direction: "up",
+    }),
+  ])
+  expect(concurrent.map((result) => result.kind)).toEqual(["moved", "moved"])
+  expect(concurrent.map((result) => result.kind === "moved" ? result.revision : 0).sort()).toEqual([2, 3])
+
+  const opened = await persistence.openBoard({ userId: registered.user.id, publicId: boardId })
+  expect(opened?.revision).toBe(3)
+  expect(opened?.stickyNotes).toMatchObject([{
+    id: noteId,
+    position: { x: 1, y: -1 },
+  }])
+})
+
 integrationTest("fails clearly when another session holds the migration lock", async () => {
   if (!migrationDatabaseUrl) {
     throw new Error("migration database URL was not configured")
