@@ -3,6 +3,7 @@ import { randomBytes } from "node:crypto"
 import {
   boardCommandErrorSchema,
   boardCommandSchema,
+  boardAuthorizationLostSchema,
   boardEditClaimSchema,
   boardIdentifierSchema,
   compareStickyNoteStackingOrder,
@@ -49,6 +50,7 @@ import type { BoardUser } from "./boards.ts"
 const BOARD_COLLABORATION_PATH = /^\/boards\/([^/]+)\/collaboration$/
 export const EDIT_CLAIM_GRACE_MS = 30_000
 export const MOVING_PRESENCE_DURATION_MS = 500
+export const BOARD_DELETION_SOCKET_TERMINATION_DELAY_MS = 100
 
 export type BoardCollaborationScheduler = {
   schedule(callback: () => void, delayMs: number): unknown
@@ -87,6 +89,7 @@ export type BoardWebSocket = Bun.ServerWebSocket<BoardWebSocketData>
 
 export type BoardCollaboration = {
   openBoard(user: BoardUser, publicId: string): Promise<BoardOpenOperationResult>
+  notifyBoardDeleted(publicId: string): void
   handleUpgrade(
     request: Request,
     server: Bun.Server<BoardWebSocketData>,
@@ -177,6 +180,10 @@ export function createBoardCollaboration(
   let movementPresenceToken = 0
 
   const collaboration: BoardCollaboration = {
+    notifyBoardDeleted(publicId) {
+      notifyDeletedBoard(publicId)
+    },
+
     async openBoard(user, publicId) {
       if (!boardIdentifierSchema.safeParse(publicId).success) {
         return boardNotFound()
@@ -367,6 +374,62 @@ export function createBoardCollaboration(
       return
     }
     broadcastSnapshot(state)
+  }
+
+  function notifyDeletedBoard(publicId: string): void {
+    const state = presenceByBoard.get(publicId)
+    const connections = state ? [...state.connections.values()] : []
+
+    for (const claim of [...creationClaimsById.values()]) {
+      if (claim.boardId === publicId) {
+        removeCreationClaim(claim)
+      }
+    }
+    for (const claim of [...editClaimsById.values()]) {
+      if (claim.boardId === publicId) {
+        removeEditClaim(claim)
+      }
+    }
+    for (const [connectionId, timer] of [...movementPresenceTimersByConnection.entries()]) {
+      if (timer.boardId === publicId) {
+        cancelMovementPresenceTimer(connectionId)
+      }
+    }
+
+    presenceByBoard.delete(publicId)
+    mutationTailByBoard.delete(publicId)
+    for (const connection of connections) {
+      connection.ready = false
+      try {
+        connection.socket.send(JSON.stringify(boardAuthorizationLostSchema.parse({
+          type: "board_authorization_lost",
+          reason: "board_deleted",
+        })))
+      } catch {
+        // The socket may have closed concurrently; the terminal close remains authoritative.
+      }
+      if (typeof connection.socket.terminate === "function") {
+        // Send one authorization-loss event first. The delayed hard fence gives the event
+        // time to reach compliant clients; they close themselves immediately and never retry.
+        setTimeout(() => {
+          try {
+            connection.socket.terminate()
+          } catch {
+            // A compliant client may have completed its close handshake already.
+          }
+        }, BOARD_DELETION_SOCKET_TERMINATION_DELAY_MS)
+      } else {
+        try {
+          connection.socket.close()
+        } catch {
+          // Closing an already-closed client is harmless.
+        }
+      }
+    }
+    if (state) {
+      state.connections.clear()
+      state.members.clear()
+    }
   }
 
   function buildSnapshot(connection: ActiveConnection, state: BoardPresenceState): BoardSnapshot {

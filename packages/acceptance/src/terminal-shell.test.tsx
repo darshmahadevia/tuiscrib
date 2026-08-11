@@ -114,6 +114,7 @@ test("redeems a Join Code from the keyboard form and renders the new Membership"
       }
     },
     leaveBoard: async () => ({ status: "left" }),
+    deleteBoard: async () => ({ status: "deleted" }),
   }
   const credentialStore: CredentialStore = {
     filePath: "memory://join-form/session",
@@ -218,6 +219,7 @@ test("confirms leaving a Board from Board actions and removes the Membership", a
       left = true
       return { status: "left" }
     },
+    deleteBoard: async () => ({ status: "deleted" }),
   }
   const authClient: AuthClient = {
     register: async () => {
@@ -323,6 +325,7 @@ test("clearly prevents the Owner from leaving a Board in Board actions", async (
       leaveCalled = true
       return { status: "left" }
     },
+    deleteBoard: async () => ({ status: "deleted" }),
   }
   const authClient: AuthClient = {
     register: async () => {
@@ -417,6 +420,7 @@ test("renames a Board and rotates its Join Code from the rendered Owner actions"
       throw new Error("join Board was not expected")
     },
     leaveBoard: async () => ({ status: "left" }),
+    deleteBoard: async () => ({ status: "deleted" }),
     renameBoard: async (nextCredential, boardId, input) => {
       renameInput = { credential: nextCredential, boardId, name: input.name }
       boards = [renamedBoard]
@@ -543,6 +547,9 @@ test("renders Owner-only authorization errors for Member Board actions", async (
       throw new Error("join Board was not expected")
     },
     leaveBoard: async () => ({ status: "left" }),
+    deleteBoard: async () => {
+      throw new Error("delete Board was not expected")
+    },
     renameBoard: async () => {
       throw new ServiceRequestError(403, {
         error: "Only the Owner may rename this Board.",
@@ -632,6 +639,13 @@ test("renders Owner-only authorization errors for Member Board actions", async (
   })
   const rotateFrame = await waitForFrame((value) => value.includes("Only the Owner may rotate"))
   expect(rotateFrame).toContain("Error: Only the Owner may rotate this Join Code.")
+
+  await act(async () => {
+    activeSetup?.mockInput.pressKey("d")
+    await activeSetup?.renderOnce()
+  })
+  const deleteFrame = await waitForFrame((value) => value.includes("Only the Owner may delete"))
+  expect(deleteFrame).toContain("Error: Only the Owner may delete this Board.")
 })
 
 test("uses the reusable Register form with visible validation and status", async () => {
@@ -680,54 +694,103 @@ test("uses the reusable Register form with visible validation and status", async
   expect(frame).toContain("MODE  NAVIGATE")
 })
 
-test("opens and cancels a reusable Board action confirmation", async () => {
-  activeSetup = await testRender(<TerminalShell label="alpha" />, {
-    width: 80,
-    height: 24,
-    kittyKeyboard: true,
-  })
-
-  await activeSetup.renderOnce()
-
-  await act(async () => {
-    activeSetup?.mockInput.pressKey("b")
-    await activeSetup?.renderOnce()
-    activeSetup?.mockInput.pressKey("a")
-    await activeSetup?.renderOnce()
-  })
-
-  let frame = activeSetup.captureCharFrame()
-  expect(frame).toContain("Board actions")
-  expect(frame).toContain("d delete Board")
-
-  await act(async () => {
-    activeSetup?.mockInput.pressKey("d")
-    await activeSetup?.renderOnce()
-  })
-
-  frame = activeSetup.captureCharFrame()
-  expect(frame).toContain("Confirm Board action")
-  expect(frame).toContain("y confirm · n cancel · Escape cancel")
-
-  await act(async () => {
-    activeSetup?.mockInput.pressKey("n")
-    await activeSetup?.renderOnce()
-  })
-
-  frame = activeSetup.captureCharFrame()
-  expect(frame).toContain("Board actions")
-  expect(frame).toContain("Status: Action cancelled.")
+test("requires the exact current Board name and lets Escape cancel without deleting", async () => {
+  const credential = "a".repeat(43)
+  const board = {
+    id: "Qx7u3nW8kM2pR5sT9vY4aB",
+    name: "Ideas",
+    role: "owner" as const,
+  }
+  let deleted = false
+  let deleteCalls = 0
+  const boardClient: BoardClient = {
+    createBoard: async () => { throw new Error("create Board was not expected") },
+    joinBoard: async () => { throw new Error("join Board was not expected") },
+    leaveBoard: async () => ({ status: "left" }),
+    renameBoard: async () => { throw new Error("rename Board was not expected") },
+    rotateJoinCode: async () => { throw new Error("rotate Join Code was not expected") },
+    deleteBoard: async () => {
+      deleteCalls += 1
+      deleted = true
+      return { status: "deleted" }
+    },
+    listBoards: async () => ({ boards: deleted ? [] : [board] }),
+  }
+  const authClient: AuthClient = {
+    register: async () => { throw new Error("register was not expected") },
+    signIn: async () => { throw new Error("sign-in was not expected") },
+    restore: async () => ({ user: { username: "ada_lovelace" } }),
+    signOut: async () => ({ status: "signed_out" }),
+  }
+  const credentialStore: CredentialStore = {
+    filePath: "memory://board-delete/session",
+    load: async () => credential,
+    save: async () => undefined,
+    remove: async () => undefined,
+  }
 
   await act(async () => {
-    activeSetup?.mockInput.pressKey("d")
-    await activeSetup?.renderOnce()
-    activeSetup?.mockInput.pressKey("y")
-    await activeSetup?.renderOnce()
+    activeSetup = await testRender(
+      <TerminalShell
+        label="owner"
+        authClient={authClient}
+        boardClient={boardClient}
+        credentialStore={credentialStore}
+      />,
+      { width: 80, height: 24, kittyKeyboard: true },
+    )
+    await activeSetup.renderOnce()
   })
 
-  frame = activeSetup.captureCharFrame()
-  expect(frame).toContain("Board actions")
-  expect(frame).toContain("Status: Board action confirmed.")
+  const setup = activeSetup
+  if (!setup) {
+    throw new Error("terminal renderer did not start")
+  }
+  await setup.waitForFrame((frame) => frame.includes("Terminal Session restored"))
+  await act(async () => {
+    setup.mockInput.pressKey("b")
+    await setup.renderOnce()
+  })
+  await setup.waitForFrame((frame) => frame.includes("Ideas · Owner"))
+  await act(async () => {
+    setup.mockInput.pressKey("a")
+    await setup.renderOnce()
+    setup.mockInput.pressKey("d")
+    await setup.renderOnce()
+  })
+
+  let frame = setup.captureCharFrame()
+  expect(frame).toContain("Permanently delete Board")
+  expect(frame).toContain("Type Board name exactly")
+  expect(frame).toContain("Every connected Member will lose access immediately.")
+
+  await act(async () => {
+    setup.mockInput.typeText("Wrong")
+    setup.mockInput.pressEnter()
+    await setup.renderOnce()
+  })
+  frame = setup.captureCharFrame()
+  expect(frame).toContain("Type the exact current Board name")
+  expect(deleteCalls).toBe(0)
+
+  await act(async () => {
+    setup.mockInput.pressEscape()
+    await setup.renderOnce()
+  })
+  expect(setup.captureCharFrame()).toContain("Board actions")
+  expect(deleteCalls).toBe(0)
+
+  await act(async () => {
+    setup.mockInput.pressKey("d")
+    await setup.renderOnce()
+    setup.mockInput.typeText("Ideas")
+    setup.mockInput.pressEnter()
+    await setup.renderOnce()
+  })
+  frame = await setup.waitForFrame((value) => value.includes("Board \"Ideas\" deleted permanently."))
+  expect(frame).toContain("Board list")
+  expect(deleteCalls).toBe(1)
+  expect(deleted).toBe(true)
 })
 
 test("keeps Navigate and Edit mode presentation visibly distinct", async () => {
@@ -979,6 +1042,7 @@ test("opens the selected Board through its WebSocket and renders authoritative v
       throw new Error("join Board was not expected")
     },
     leaveBoard: async () => ({ status: "left" }),
+    deleteBoard: async () => ({ status: "deleted" }),
     openBoard: async (nextCredential, boardId, handlers) => {
       opened = { credential: nextCredential, boardId }
       handlers.onSnapshot({
@@ -1093,6 +1157,7 @@ test("replaces an optimistic Sticky Note edit with the authoritative conflict re
     listBoards: async () => ({ boards: [board] }),
     joinBoard: async () => { throw new Error("not used") },
     leaveBoard: async () => ({ status: "left" }),
+    deleteBoard: async () => ({ status: "deleted" }),
     openBoard: async (_nextCredential, _boardId, nextHandlers) => {
       handlers = nextHandlers
       nextHandlers.onSnapshot(snapshot)
@@ -1234,6 +1299,7 @@ test("uses a clear destructive confirmation mode for Sticky Note deletion and ke
     listBoards: async () => ({ boards: [board] }),
     joinBoard: async () => { throw new Error("not used") },
     leaveBoard: async () => ({ status: "left" }),
+    deleteBoard: async () => ({ status: "deleted" }),
     openBoard: async (_nextCredential, _boardId, nextHandlers) => {
       handlers = nextHandlers
       nextHandlers.onSnapshot(snapshot)
@@ -1364,6 +1430,7 @@ test("renders reconnecting after Board loss and does not send shared mutations w
     listBoards: async () => ({ boards: [board] }),
     joinBoard: async () => { throw new Error("not used") },
     leaveBoard: async () => ({ status: "left" }),
+    deleteBoard: async () => ({ status: "deleted" }),
     openBoard: async (_nextCredential, _boardId, nextHandlers) => {
       handlers = nextHandlers
       nextHandlers.onSnapshot({

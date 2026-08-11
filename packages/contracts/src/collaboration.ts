@@ -98,8 +98,18 @@ export const boardSnapshotSchema = z.object({
   }
 })
 
+export const boardAuthorizationLossReasonSchema = z.enum([
+  "board_deleted",
+])
+
+export const boardAuthorizationLostSchema = z.object({
+  type: z.literal("board_authorization_lost"),
+  reason: boardAuthorizationLossReasonSchema,
+}).strict()
+
 export const boardSocketMessageSchema = z.discriminatedUnion("type", [
   boardSnapshotSchema,
+  boardAuthorizationLostSchema,
   stickyNoteCreationClaimGrantedSchema,
   stickyNoteCreatedSchema,
   stickyNoteEditClaimGrantedSchema,
@@ -119,6 +129,8 @@ export type PresenceActivity = z.infer<typeof presenceActivitySchema>
 export type BoardPresence = z.infer<typeof boardPresenceSchema>
 export type { BoardEditClaim }
 export type BoardSnapshot = z.infer<typeof boardSnapshotSchema>
+export type BoardAuthorizationLossReason = z.infer<typeof boardAuthorizationLossReasonSchema>
+export type BoardAuthorizationLost = z.infer<typeof boardAuthorizationLostSchema>
 export type BoardSocketMessage = z.infer<typeof boardSocketMessageSchema>
 export type BoardOpenReadyResponse = z.infer<typeof boardOpenReadyResponseSchema>
 

@@ -247,6 +247,179 @@ test("opens one Board for two real terminal clients and renders Presence lifecyc
   }
 })
 
+test("concurrent connected Members leave a Board view after Owner deletion", async () => {
+  if (!harness) {
+    throw new Error("acceptance harness did not start")
+  }
+  const activeHarness = harness
+  const ownerCredential = await registerUser("delete24_live_owner")
+  const memberCredential = await registerUser("delete24_live_member")
+  const created = await requestJson<{ board: BoardSummary; joinCode: string }>(
+    "/boards",
+    ownerCredential,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Delete Live Board" }),
+    },
+  )
+  expect(created.status).toBe(201)
+  const joined = await requestJson<{ board: BoardSummary }>(
+    "/boards/join",
+    memberCredential,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ joinCode: created.body.joinCode }),
+    },
+  )
+  expect(joined.status).toBe(201)
+
+  const ownerBoardClient = createBoardClient(
+    activeHarness.baseUrl,
+    fetch,
+    undefined,
+    { heartbeatIntervalMs: 0 },
+  )
+  const memberBoardClient = createBoardClient(
+    activeHarness.baseUrl,
+    fetch,
+    undefined,
+    { heartbeatIntervalMs: 0 },
+  )
+  const owner = await activeHarness.addShellClient(
+    "delete24-live-owner",
+    createMemoryCredentialStore(ownerCredential, "memory://delete24/live-owner"),
+    ownerBoardClient,
+  )
+  const member = await activeHarness.addShellClient(
+    "delete24-live-member",
+    createMemoryCredentialStore(memberCredential, "memory://delete24/live-member"),
+    memberBoardClient,
+  )
+
+  try {
+    await waitForFrame(owner, (frame) => frame.includes("Terminal Session restored"))
+    await waitForFrame(member, (frame) => frame.includes("Terminal Session restored"))
+    await openSelectedBoard(owner, created.body.board.name)
+    await openSelectedBoard(member, created.body.board.name)
+    await waitForFrame(owner, (frame) =>
+      frame.includes("Board: Delete Live Board") && frame.includes("delete24_live_owner · viewing"),
+    )
+    await waitForFrame(member, (frame) =>
+      frame.includes("Board: Delete Live Board") && frame.includes("delete24_live_member · viewing"),
+    )
+
+    const memberDelete = await fetch(
+      activeHarness.baseUrl + "/boards/" + created.body.board.id + "/delete",
+      {
+        method: "POST",
+        headers: { authorization: "Bearer " + memberCredential },
+      },
+    )
+    expect(memberDelete.status).toBe(403)
+    expect(await memberDelete.text()).not.toContain(created.body.joinCode)
+
+    await act(async () => {
+      await expect(ownerBoardClient.deleteBoard(ownerCredential, created.body.board.id)).resolves.toEqual({
+        status: "deleted",
+      })
+      await Bun.sleep(10)
+    })
+    const ownerAfterDelete = await waitForFrame(
+      owner,
+      (frame) => frame.includes('Board "Delete Live Board" was deleted.') && frame.includes("Board list"),
+    )
+    const memberAfterDelete = await waitForFrame(
+      member,
+      (frame) => frame.includes('Board "Delete Live Board" was deleted.') && frame.includes("Board list"),
+    )
+    expect(ownerAfterDelete).not.toContain("Board canvas")
+    expect(memberAfterDelete).not.toContain("Board canvas")
+    expect(ownerAfterDelete).toContain("No Memberships match this filter.")
+    expect(memberAfterDelete).toContain("No Memberships match this filter.")
+
+    await expect(memberBoardClient.listBoards(memberCredential)).resolves.toEqual({ boards: [] })
+    await expect(ownerBoardClient.listBoards(ownerCredential)).resolves.toEqual({ boards: [] })
+    const joinAfterDelete = await fetch(activeHarness.baseUrl + "/boards/join", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer " + memberCredential,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ joinCode: created.body.joinCode }),
+    })
+    const joinAfterDeleteBody = await joinAfterDelete.text()
+    expect(joinAfterDelete.status).toBe(404)
+    expect(joinAfterDeleteBody).not.toContain(created.body.board.name)
+    expect(joinAfterDeleteBody).not.toContain(created.body.joinCode)
+  } finally {
+    await activeHarness.disposeClient(owner)
+    await activeHarness.disposeClient(member)
+  }
+
+  async function registerUser(username: string): Promise<string> {
+    const response = await fetch(activeHarness.baseUrl + "/auth/register", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        username,
+        password: "correct horse",
+        confirmation: "correct horse",
+      }),
+    })
+    expect(response.status).toBe(201)
+    return (await response.json() as { sessionCredential: string }).sessionCredential
+  }
+
+  async function requestJson<T>(
+    path: string,
+    credential: string,
+    init: RequestInit,
+  ): Promise<{ status: number; body: T }> {
+    const response = await fetch(activeHarness.baseUrl + path, {
+      ...init,
+      headers: { authorization: "Bearer " + credential, ...init.headers },
+    })
+    return { status: response.status, body: await response.json() as T }
+  }
+
+  async function openSelectedBoard(client: TerminalClient, boardName: string): Promise<void> {
+    await act(async () => {
+      client.setup.mockInput.pressKey("b")
+      await client.setup.renderOnce()
+    })
+    await waitForFrame(client, (frame) => frame.includes("Board list") && frame.includes(boardName))
+    await act(async () => {
+      client.setup.mockInput.pressKey("o")
+      await client.setup.renderOnce()
+    })
+  }
+
+  async function waitForFrame(
+    client: TerminalClient,
+    predicate: (frame: string) => boolean,
+  ): Promise<string> {
+    let lastFrame = ""
+    let matchedFrame: string | undefined
+    await act(async () => {
+      for (let attempt = 0; attempt < 500; attempt += 1) {
+        await Bun.sleep(5)
+        await client.setup.renderOnce()
+        lastFrame = client.setup.captureCharFrame()
+        if (predicate(lastFrame)) {
+          matchedFrame = lastFrame
+          return
+        }
+      }
+    })
+    if (matchedFrame !== undefined) {
+      return matchedFrame
+    }
+    throw new Error("Timed out waiting for " + client.label + " rendered frame\n" + lastFrame)
+  }
+})
+
 test("reorders overlapping Sticky Notes across two clients while editing and converges after reconnect", async () => {
   if (!harness) {
     throw new Error("acceptance harness did not start")

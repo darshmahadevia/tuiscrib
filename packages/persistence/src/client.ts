@@ -135,6 +135,16 @@ export type LeaveBoardResult =
   | { kind: "not_member" }
   | { kind: "owner_cannot_leave" }
 
+export type DeleteBoardInput = {
+  userId: number
+  publicId: string
+}
+
+export type DeleteBoardResult =
+  | { kind: "deleted" }
+  | { kind: "not_found" }
+  | { kind: "not_owner" }
+
 export type ListBoardsInput = {
   userId: number
   nameFilter: string
@@ -268,6 +278,7 @@ export type Persistence = {
   rotateJoinCode(input: RotateJoinCodeInput): Promise<RotateJoinCodeResult>
   joinBoard(input: JoinBoardInput): Promise<JoinBoardResult>
   leaveBoard(input: LeaveBoardInput): Promise<LeaveBoardResult>
+  deleteBoard(input: DeleteBoardInput): Promise<DeleteBoardResult>
   listBoards(input: ListBoardsInput): Promise<BoardSummaryRecord[]>
   openBoard(input: OpenBoardInput): Promise<OpenBoardRecord | null>
   createStickyNote(input: CreateStickyNoteInput): Promise<CreateStickyNoteResult>
@@ -642,6 +653,48 @@ export function createPersistence(options: PersistenceOptions): Persistence {
           )
 
         return { kind: "left" as const }
+      })
+    },
+
+    async deleteBoard(input) {
+      return database.transaction(async (transaction) => {
+        const boardRows = await transaction
+          .select({ id: boards.id, ownerUserId: boards.ownerUserId })
+          .from(boards)
+          .where(eq(boards.publicId, input.publicId))
+          .for("update")
+
+        const board = boardRows[0]
+        if (!board) {
+          return { kind: "not_found" as const }
+        }
+        if (board.ownerUserId !== input.userId) {
+          return { kind: "not_owner" as const }
+        }
+
+        const deletedBoards = await transaction
+          .delete(boards)
+          .where(eq(boards.id, board.id))
+          .returning({ id: boards.id })
+        if (!deletedBoards[0]) {
+          throw new Error("Board could not be deleted")
+        }
+
+        const owners = await transaction
+          .update(users)
+          .set({ ownedBoardCount: sql`${users.ownedBoardCount} - 1` })
+          .where(
+            and(
+              eq(users.id, board.ownerUserId),
+              gt(users.ownedBoardCount, 0),
+            ),
+          )
+          .returning({ id: users.id })
+        if (!owners[0]) {
+          throw new Error("Owned Board count could not be decremented")
+        }
+
+        return { kind: "deleted" as const }
       })
     },
 

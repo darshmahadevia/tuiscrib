@@ -2,6 +2,7 @@ import {
   createAuthClient,
   createBoardClient,
   createHealthClient,
+  ServiceRequestError,
   type BoardConnection,
 } from "../packages/terminal/src/client.ts"
 import { redactServiceError } from "../packages/service/src/config.ts"
@@ -18,6 +19,7 @@ type SmokeProbe = {
   claims: StickyNoteCreationClaimGranted[]
   created: StickyNoteCreated[]
   moved: StickyNoteMoved[]
+  authorizationLosses: string[]
   errors: Error[]
 }
 
@@ -169,6 +171,73 @@ async function main(): Promise<void> {
       "durable Sticky Note after reconnect",
     )
 
+    await withTimeout(
+      boards.deleteBoard(owner.sessionCredential, created.board.id),
+      timeoutMs,
+      "transactional Board deletion",
+    )
+    await waitFor(
+      () => ownerProbe!.authorizationLosses.length === 1 && memberProbe!.authorizationLosses.length === 1,
+      timeoutMs,
+      "authorization loss on both connected clients",
+    )
+
+    const deletedOwnerBoards = await withTimeout(
+      boards.listBoards(owner.sessionCredential),
+      timeoutMs,
+      "Owner Board list after deletion",
+    )
+    const deletedMemberBoards = await withTimeout(
+      boards.listBoards(member.sessionCredential),
+      timeoutMs,
+      "Member Board list after deletion",
+    )
+    if (deletedOwnerBoards.boards.length !== 0 || deletedMemberBoards.boards.length !== 0) {
+      throw new Error("Deleted Board remained visible in a Board list.")
+    }
+
+    let openAfterDeletionError: unknown
+    try {
+      const staleConnection = await withTimeout(
+        boards.openBoard!(member.sessionCredential, created.board.id, {
+          onSnapshot: () => undefined,
+          onError: () => undefined,
+          onClose: () => undefined,
+        }),
+        timeoutMs,
+        "deleted Board WebSocket preflight",
+      )
+      staleConnection.close()
+      throw new Error("Deleted Board WebSocket preflight unexpectedly succeeded.")
+    } catch (error) {
+      openAfterDeletionError = error
+    }
+    if (!(openAfterDeletionError instanceof ServiceRequestError) || openAfterDeletionError.status !== 404) {
+      throw new Error("Deleted Board WebSocket preflight did not return 404.")
+    }
+    if (JSON.stringify(openAfterDeletionError.details).includes(created.board.name) ||
+      JSON.stringify(openAfterDeletionError.details).includes(created.joinCode)) {
+      throw new Error("Deleted Board WebSocket preflight disclosed deleted state.")
+    }
+
+    let joinAfterDeletionError: unknown
+    try {
+      await withTimeout(
+        boards.joinBoard(member.sessionCredential, { joinCode: created.joinCode }),
+        timeoutMs,
+        "deleted Board Join Code redemption",
+      )
+    } catch (error) {
+      joinAfterDeletionError = error
+    }
+    if (!(joinAfterDeletionError instanceof ServiceRequestError) || joinAfterDeletionError.status !== 404) {
+      throw new Error("Deleted Board Join Code did not return 404.")
+    }
+    if (JSON.stringify(joinAfterDeletionError.details).includes(created.board.name) ||
+      JSON.stringify(joinAfterDeletionError.details).includes(created.joinCode)) {
+      throw new Error("Deleted Board Join Code disclosed deleted state.")
+    }
+
     const finalHealth = await withTimeout(
       createHealthClient(parsedUrl.toString()).checkHealth(),
       timeoutMs,
@@ -198,6 +267,7 @@ async function openProbe(
     claims: [],
     created: [],
     moved: [],
+    authorizationLosses: [],
     errors: [],
   }
   const connectionPromise = boards.openBoard(credential, boardId, {
@@ -207,6 +277,7 @@ async function openProbe(
     onStickyNoteCreationClaimGranted: (claim) => probe.claims.push(claim),
     onStickyNoteCreated: (event) => probe.created.push(event),
     onStickyNoteMoved: (event) => probe.moved.push(event),
+    onAuthorizationLost: (reason) => probe.authorizationLosses.push(reason),
   })
   try {
     probe.connection = await withTimeout(connectionPromise, timeoutMs, "WebSocket upgrade")

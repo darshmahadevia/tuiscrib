@@ -40,15 +40,20 @@ export type ServiceAppOptions = {
   authRateLimit?: AuthRateLimitOptions
   boardRateLimit?: BoardRateLimitOptions
   networkKey?: (request: Request) => string
-  collaboration?: Pick<BoardCollaboration, "openBoard">
+  collaboration?: Pick<BoardCollaboration, "openBoard"> &
+    Partial<Pick<BoardCollaboration, "notifyBoardDeleted">>
 }
 
 export function createServiceApp(options: ServiceAppOptions) {
   const app = new Hono()
   const clock = options.clock ?? (() => new Date())
   const authentication = createAuthenticationIfAvailable(options, clock)
-  const boards = createBoardAdministrationIfAvailable(options, clock)
   const collaboration = options.collaboration ?? createBoardCollaborationIfAvailable(options, clock)
+  const boards = createBoardAdministrationIfAvailable(
+    options,
+    clock,
+    collaboration?.notifyBoardDeleted,
+  )
 
   app.get("/health", async (context) => {
     const request = healthRequestSchema.safeParse(
@@ -229,6 +234,29 @@ export function createServiceApp(options: ServiceAppOptions) {
     }
   })
 
+  app.post("/boards/:boardId/delete", async (context) => {
+    if (!authentication || !boards) {
+      return context.json(serviceErrorSchema.parse({ error: "service unavailable" }), 503)
+    }
+
+    const authenticated = await requireBoardUser(authentication, context.req.raw)
+    if (authenticated.kind !== "success") {
+      return context.json(authenticated.error, authenticated.status)
+    }
+
+    try {
+      const result = await boards.deleteBoard(
+        authenticated.user,
+        context.req.param("boardId"),
+      )
+      return result.kind === "success"
+        ? context.json(result.response, 200)
+        : context.json(result.error, result.status)
+    } catch {
+      return context.json(serviceErrorSchema.parse({ error: "service unavailable" }), 503)
+    }
+  })
+
   app.post("/boards", async (context) => {
     if (!authentication || !boards) {
       return context.json(serviceErrorSchema.parse({ error: "service unavailable" }), 503)
@@ -328,6 +356,7 @@ function createAuthenticationIfAvailable(
 function createBoardAdministrationIfAvailable(
   options: ServiceAppOptions,
   clock: () => Date,
+  onBoardDeleted?: (publicId: string) => void,
 ) {
   if (
     typeof options.persistence.createBoard !== "function" ||
@@ -342,6 +371,7 @@ function createBoardAdministrationIfAvailable(
     boardIdGenerator: options.boardIdGenerator,
     joinCodeGenerator: options.joinCodeGenerator,
     rateLimit: options.boardRateLimit,
+    onBoardDeleted,
   })
 }
 

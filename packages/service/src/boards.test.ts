@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test"
 
 import { createServiceApp } from "./app.ts"
-import { createJoinCode, formatJoinCode } from "./boards.ts"
+import { createBoardAdministration, createJoinCode, formatJoinCode } from "./boards.ts"
 
 const credential = "a".repeat(43)
 const joinCode = "ABCD-EFGH-JKMN-PQRS-TVWX-YZ23-45"
@@ -351,4 +351,64 @@ test("rejects non-Owner Board governance without disclosing Join Code values", a
     code: "owner_required",
   })
   expect(rotatedBody).not.toContain(joinCode)
+})
+
+test("deletes a Board through the authenticated Owner action and emits no Board state", async () => {
+  let deleteInput: Record<string, unknown> | undefined
+  const app = createServiceApp({
+    persistence: persistenceForBoards({
+      deleteBoard: async (input: Record<string, unknown>) => {
+        deleteInput = input
+        return { kind: "deleted" as const }
+      },
+    }),
+  })
+
+  const response = await app.request(`http://tuiscrib.test/boards/${board.id}/delete`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${credential}` },
+  })
+
+  expect(response.status).toBe(200)
+  const body = await response.text()
+  expect(JSON.parse(body)).toEqual({ status: "deleted" })
+  expect(deleteInput).toEqual({ userId: 7, publicId: board.id })
+  expect(body).not.toContain(board.name)
+})
+
+test("maps a persistence Owner check to a nondisclosing authorization failure", async () => {
+  const app = createServiceApp({
+    persistence: persistenceForBoards({
+      deleteBoard: async () => ({ kind: "not_owner" as const }),
+    }),
+  })
+
+  const response = await app.request(`http://tuiscrib.test/boards/${board.id}/delete`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${credential}` },
+  })
+
+  expect(response.status).toBe(403)
+  expect(await response.json()).toEqual({
+    error: "Only the Owner may delete this Board.",
+    code: "owner_required",
+  })
+})
+
+test("notifies collaboration only after durable Board deletion", async () => {
+  const notifications: string[] = []
+  const administration = createBoardAdministration({
+    persistence: {
+      createBoard: async () => ({ kind: "created" as const, board }),
+      listBoards: async () => [board],
+      deleteBoard: async () => ({ kind: "deleted" as const }),
+    },
+    onBoardDeleted: (publicId) => notifications.push(publicId),
+  })
+
+  await expect(administration.deleteBoard({ id: 7, username: "ada_lovelace" }, board.id)).resolves.toEqual({
+    kind: "success",
+    response: { status: "deleted" },
+  })
+  expect(notifications).toEqual([board.id])
 })

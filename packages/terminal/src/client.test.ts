@@ -204,6 +204,98 @@ test("Board client joins and leaves through the public HTTP actions", async () =
   ])
 })
 
+test("Board client deletes through the Owner HTTP action without sending a confirmation payload", async () => {
+  const credential = "a".repeat(43)
+  const requests: Array<{ path: string; method?: string; body?: string }> = []
+  const client = createBoardClient("http://tuiscrib.test", async (input, init) => {
+    const url = new URL(String(input))
+    requests.push({
+      path: url.pathname,
+      method: init?.method,
+      body: typeof init?.body === "string" ? init.body : undefined,
+    })
+    return new Response(JSON.stringify({ status: "deleted" }), { status: 200 })
+  })
+
+  await expect(client.deleteBoard(credential, "Qx7u3nW8kM2pR5sT9vY4aB")).resolves.toEqual({
+    status: "deleted",
+  })
+  expect(requests).toEqual([{
+    path: "/boards/Qx7u3nW8kM2pR5sT9vY4aB/delete",
+    method: "POST",
+    body: undefined,
+  }])
+})
+
+test("Board client treats authorization loss as terminal and never reconnects", async () => {
+  const credential = "a".repeat(43)
+  const boardId = "Qx7u3nW8kM2pR5sT9vY4aB"
+  let socket: BoardSocket | undefined
+  let socketClosed = false
+  const scheduled: Array<() => void> = []
+  const states: string[] = []
+  let authorizationLoss: string | undefined
+  let closeNotifications = 0
+  const client = createBoardClient(
+    "http://tuiscrib.test",
+    async () => new Response(JSON.stringify({ status: "ready" }), { status: 200 }),
+    () => {
+      socket = {
+        onmessage: null,
+        onerror: null,
+        onclose: null,
+        send: () => undefined,
+        close: () => { socketClosed = true },
+      }
+      return socket
+    },
+    {
+      heartbeatIntervalMs: 0,
+      scheduler: {
+        schedule(callback) {
+          scheduled.push(callback)
+          return callback
+        },
+        cancel: () => undefined,
+      },
+    },
+  )
+  const openBoard = client.openBoard
+  if (!openBoard) {
+    throw new Error("Board client does not support Board collaboration")
+  }
+
+  const connection = await openBoard(credential, boardId, {
+    onSnapshot: () => undefined,
+    onError: (error) => { throw error },
+    onClose: () => { closeNotifications += 1 },
+    onConnectionState: (state) => states.push(state),
+    onAuthorizationLost: (reason) => { authorizationLoss = reason },
+  })
+  socket?.onmessage?.({
+    data: JSON.stringify({
+      type: "snapshot",
+      board: { id: boardId, name: "Ideas", role: "owner" },
+      revision: 0,
+      presence: [{ member: { username: "ada_lovelace" }, activity: "viewing" }],
+    }),
+  })
+  socket?.onmessage?.({
+    data: JSON.stringify({
+      type: "board_authorization_lost",
+      reason: "board_deleted",
+    }),
+  })
+  socket?.onclose?.()
+
+  expect(authorizationLoss).toBe("board_deleted")
+  expect(socketClosed).toBe(true)
+  expect(closeNotifications).toBe(0)
+  expect(states).toEqual(["connecting", "connected", "closed"])
+  expect(scheduled).toHaveLength(0)
+  expect(() => connection.send({ type: "heartbeat" })).toThrow("closed")
+})
+
 test("Board client renames and rotates a Board through Owner HTTP actions", async () => {
   const credential = "a".repeat(43)
   const rotatedJoinCode = "WXYZ-2345-6789-ABCD-EFGH-JKMN-PQ"

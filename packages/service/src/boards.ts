@@ -5,6 +5,7 @@ import {
   boardListResponseSchema,
   createBoardRequestSchema,
   createBoardResponseSchema,
+  deleteBoardResponseSchema,
   joinCodeSchema,
   joinBoardRequestSchema,
   joinBoardResponseSchema,
@@ -19,6 +20,7 @@ import {
   type BoardListResponse,
   type BoardSummary,
   type CreateBoardResponse,
+  type DeleteBoardResponse,
   type JoinBoardResponse,
   type LeaveBoardResponse,
   type RenameBoardResponse,
@@ -78,6 +80,7 @@ export type BoardPersistence = {
   rotateJoinCode?(input: RotateJoinCodePersistenceInput): Promise<RotateJoinCodePersistenceResult>
   joinBoard?(input: JoinBoardPersistenceInput): Promise<JoinBoardPersistenceResult>
   leaveBoard?(input: LeaveBoardPersistenceInput): Promise<LeaveBoardPersistenceResult>
+  deleteBoard?(input: DeleteBoardPersistenceInput): Promise<DeleteBoardPersistenceResult>
   listBoards(input: ListBoardsPersistenceInput): Promise<BoardSummary[]>
 }
 
@@ -103,6 +106,16 @@ export type LeaveBoardPersistenceResult =
   | { kind: "left" }
   | { kind: "not_member" }
   | { kind: "owner_cannot_leave" }
+
+export type DeleteBoardPersistenceInput = {
+  userId: number
+  publicId: string
+}
+
+export type DeleteBoardPersistenceResult =
+  | { kind: "deleted" }
+  | { kind: "not_found" }
+  | { kind: "not_owner" }
 
 export type BoardRateLimitOptions = {
   maxAttempts?: number
@@ -169,6 +182,7 @@ export type BoardAdministrationOptions = {
   joinCodeGenerator?: () => string
   rateLimiter?: BoardJoinRateLimiter
   rateLimit?: BoardRateLimitOptions
+  onBoardDeleted?: (publicId: string) => void
 }
 
 export type BoardCreateOperationResult =
@@ -194,6 +208,10 @@ export type BoardRotateJoinCodeOperationResult =
 export type BoardLeaveOperationResult =
   | { kind: "success"; response: LeaveBoardResponse }
   | { kind: "failure"; status: 404 | 409 | 503; error: ServiceError }
+
+export type BoardDeleteOperationResult =
+  | { kind: "success"; response: DeleteBoardResponse }
+  | { kind: "failure"; status: 403 | 404 | 503; error: ServiceError }
 
 const defaultBoardIdGenerator = () => randomBytes(16).toString("base64url")
 
@@ -458,6 +476,33 @@ export function createBoardAdministration(options: BoardAdministrationOptions) {
           : notMember()
     },
 
+    async deleteBoard(user: BoardUser, publicId: string): Promise<BoardDeleteOperationResult> {
+      if (!options.persistence.deleteBoard) {
+        return unavailableDelete()
+      }
+      if (!boardIdentifierSchema.safeParse(publicId).success) {
+        return boardNotFoundDelete()
+      }
+
+      const result = await options.persistence.deleteBoard({
+        userId: user.id,
+        publicId,
+      })
+
+      switch (result.kind) {
+        case "deleted":
+          options.onBoardDeleted?.(publicId)
+          return {
+            kind: "success",
+            response: deleteBoardResponseSchema.parse({ status: "deleted" }),
+          }
+        case "not_owner":
+          return ownerRequiredDelete()
+        case "not_found":
+          return boardNotFoundDelete()
+      }
+    },
+
     async listBoards(user: BoardUser, nameFilter: string): Promise<BoardListOperationResult> {
       const boards = await options.persistence.listBoards({
         userId: user.id,
@@ -620,6 +665,37 @@ function notMember(): BoardLeaveOperationResult {
     }),
   }
 }
+
+function unavailableDelete(): BoardDeleteOperationResult {
+  return {
+    kind: "failure",
+    status: 503,
+    error: serviceErrorSchema.parse({ error: "service unavailable" }),
+  }
+}
+
+function ownerRequiredDelete(): BoardDeleteOperationResult {
+  return {
+    kind: "failure",
+    status: 403,
+    error: serviceErrorSchema.parse({
+      error: "Only the Owner may delete this Board.",
+      code: "owner_required",
+    }),
+  }
+}
+
+function boardNotFoundDelete(): BoardDeleteOperationResult {
+  return {
+    kind: "failure",
+    status: 404,
+    error: serviceErrorSchema.parse({
+      error: "Board was not found.",
+      code: "board_not_found",
+    }),
+  }
+}
+
 function invalidBoardInput(error: {
   issues: Array<{ path: PropertyKey[]; message: string }>
 }): BoardCreateOperationResult {

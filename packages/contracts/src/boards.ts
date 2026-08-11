@@ -102,6 +102,10 @@ export const leaveBoardResponseSchema = z.object({
   status: z.literal("left"),
 })
 
+export const deleteBoardResponseSchema = z.object({
+  status: z.literal("deleted"),
+}).strict()
+
 export const boardListResponseSchema = z.object({
   boards: z.array(boardSummarySchema),
 })
@@ -117,3 +121,4 @@ export type BoardListResponse = z.infer<typeof boardListResponseSchema>
 export type JoinBoardRequest = z.infer<typeof joinBoardRequestSchema>
 export type JoinBoardResponse = z.infer<typeof joinBoardResponseSchema>
 export type LeaveBoardResponse = z.infer<typeof leaveBoardResponseSchema>
+export type DeleteBoardResponse = z.infer<typeof deleteBoardResponseSchema>

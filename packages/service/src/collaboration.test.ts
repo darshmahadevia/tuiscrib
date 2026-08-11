@@ -209,6 +209,138 @@ test("re-authenticates an authenticated Board heartbeat to refresh Terminal Sess
   expect(messages[0]).toMatchObject({ type: "snapshot", revision: 0 })
 })
 
+test("notifies every connected client of Board deletion, clears claims, and closes terminally", async () => {
+  const note = {
+    id: "Lm7u3nW8kM2pR5sT9vY4aB",
+    text: "claim is deleted with the Board",
+    textVersion: 1,
+    position: { x: 0, y: 0 },
+    color: "yellow" as const,
+    stackingOrder: 0,
+    authorship: { member: { username: "ada_lovelace" } },
+    createdAt: "2026-08-10T00:00:00.000Z",
+    lastEdit: {
+      member: { username: "ada_lovelace" },
+      at: "2026-08-10T00:00:00.000Z",
+    },
+  }
+  let deleted = false
+  const collaboration = createBoardCollaboration({
+    persistence: {
+      openBoard: async ({ userId, publicId }) => deleted
+        ? null
+        : {
+            board: {
+              id: publicId,
+              name: "Deletion Ideas",
+              role: userId === 7 ? "owner" as const : "member" as const,
+            },
+            revision: 1,
+            stickyNotes: [note],
+          },
+      updateStickyNoteText: async () => ({ kind: "not_found" as const }),
+    },
+    sessionAuthenticator: async (value) => {
+      if (value === credential) {
+        return { user: { id: 7, username: "ada_lovelace" } }
+      }
+      if (value === "b".repeat(43)) {
+        return { user: { id: 8, username: "grace_hopper" } }
+      }
+      return null
+    },
+  })
+
+  const createSocket = (
+    connectionId: string,
+    user: { id: number; username: string },
+    credentialValue: string,
+  ) => {
+    const messages: Record<string, unknown>[] = []
+    let closed = false
+    const socket = {
+      data: {
+        boardId,
+        board: {
+          board: {
+            id: boardId,
+            name: "Deletion Ideas",
+            role: user.id === 7 ? "owner" as const : "member" as const,
+          },
+          revision: 1,
+          stickyNotes: [note],
+        },
+        user,
+        connectionId,
+        credentialHash: hashCredential(credentialValue),
+      },
+      send(serialized: string) {
+        messages.push(JSON.parse(serialized) as Record<string, unknown>)
+      },
+      close() {
+        closed = true
+      },
+    }
+    return { socket, messages, isClosed: () => closed }
+  }
+
+  const owner = createSocket("delete-owner-connection", { id: 7, username: "ada_lovelace" }, credential)
+  const member = createSocket("delete-member-connection", { id: 8, username: "grace_hopper" }, "b".repeat(43))
+  collaboration.websocket.open?.(owner.socket as never)
+  collaboration.websocket.open?.(member.socket as never)
+  await Promise.resolve()
+  await Promise.resolve()
+  await Promise.resolve()
+
+  expect(owner.messages[0]).toMatchObject({ type: "snapshot", revision: 1 })
+  expect(member.messages[0]).toMatchObject({ type: "snapshot", revision: 1 })
+
+  collaboration.websocket.message?.(owner.socket as never, JSON.stringify({
+    type: "begin_sticky_note_edit",
+    stickyNoteId: note.id,
+  }))
+  await Promise.resolve()
+  await Promise.resolve()
+  expect(owner.messages.some((message) => message.type === "sticky_note_edit_claim_granted")).toBe(true)
+  expect(member.messages.some((message) =>
+    message.type === "snapshot" && (message.editClaims as unknown[] | undefined)?.length === 1,
+  )).toBe(true)
+
+  deleted = true
+  collaboration.notifyBoardDeleted(boardId)
+
+  for (const client of [owner, member]) {
+    const authorizationLossMessages = client.messages.filter(
+      (message) => message.type === "board_authorization_lost",
+    )
+    expect(authorizationLossMessages).toEqual([{
+      type: "board_authorization_lost",
+      reason: "board_deleted",
+    }])
+    expect(client.messages.at(-1)).toEqual({
+      type: "board_authorization_lost",
+      reason: "board_deleted",
+    })
+    expect(client.isClosed()).toBe(true)
+    expect(JSON.stringify(authorizationLossMessages)).not.toContain("Deletion Ideas")
+    expect(JSON.stringify(authorizationLossMessages)).not.toContain(note.id)
+  }
+
+  await expect(collaboration.openBoard({ id: 7, username: "ada_lovelace" }, boardId)).resolves.toMatchObject({
+    kind: "failure",
+    status: 404,
+  })
+  const upgrade = await collaboration.handleUpgrade(
+    new Request(`http://tuiscrib.test/boards/${boardId}/collaboration`, {
+      headers: { upgrade: "websocket", authorization: `Bearer ${credential}` },
+    }),
+    { upgrade: () => true } as never,
+  )
+  expect(upgrade).toBeInstanceOf(Response)
+  expect((upgrade as Response).status).toBe(404)
+  expect(await (upgrade as Response).text()).not.toContain("Deletion Ideas")
+})
+
 test("releases an Edit Claim immediately when heartbeat re-authentication loses authorization", async () => {
   const note = {
     id: "Lm7u3nW8kM2pR5sT9vY4aB",

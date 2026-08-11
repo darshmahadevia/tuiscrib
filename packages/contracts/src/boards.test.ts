@@ -5,6 +5,7 @@ import {
   boardNameSchema,
   createBoardRequestSchema,
   createBoardResponseSchema,
+  deleteBoardResponseSchema,
   joinBoardRequestSchema,
   joinBoardResponseSchema,
   joinCodeSchema,
@@ -91,4 +92,11 @@ test("Owner governance contracts validate Board rename and one-time Join Code ro
     board: ownerBoard,
     joinCode,
   })
+})
+
+test("Board deletion returns only an explicit durable-deletion status", () => {
+  expect(deleteBoardResponseSchema.parse({ status: "deleted" })).toEqual({
+    status: "deleted",
+  })
+  expect(() => deleteBoardResponseSchema.parse({ status: "deleted", board: "Ideas" })).toThrow()
 })

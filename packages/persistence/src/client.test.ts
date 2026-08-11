@@ -119,6 +119,239 @@ integrationTest("creates a durable Sticky Note with attribution and one later Bo
   expect(opened?.stickyNotes).toHaveLength(1)
 })
 
+integrationTest("deletes a Board graph only for its Owner and repairs the owned-Board count", async () => {
+  if (!persistence || !databaseUrl) {
+    throw new Error("persistence was not initialized")
+  }
+
+  const now = new Date("2026-08-10T00:00:00.000Z")
+  const owner = await persistence.registerUser({
+    username: "board_delete_owner",
+    passwordHash: "$argon2id$v=19$m=65536,t=3,p=1$test$hash",
+    credentialHash: "board-delete-owner".padEnd(64, "a"),
+    now,
+    expiresAt: new Date(now.getTime() + 30 * 24 * 60 * 60 * 1_000),
+  })
+  const member = await persistence.registerUser({
+    username: "board_delete_member",
+    passwordHash: "$argon2id$v=19$m=65536,t=3,p=1$test$hash",
+    credentialHash: "board-delete-member".padEnd(64, "b"),
+    now,
+    expiresAt: new Date(now.getTime() + 30 * 24 * 60 * 60 * 1_000),
+  })
+  if (!owner || !member) {
+    throw new Error("users were not registered")
+  }
+
+  const boardId = "board24-delete-graph-0"
+  const joinCodeHash = "c".repeat(64)
+  await expect(persistence.createBoard({
+    publicId: boardId,
+    name: "Delete Graph",
+    ownerUserId: owner.user.id,
+    joinCodeHash,
+    now,
+  })).resolves.toMatchObject({ kind: "created" })
+  await expect(persistence.joinBoard({
+    userId: member.user.id,
+    joinCodeHash,
+    now,
+  })).resolves.toMatchObject({ kind: "joined" })
+  await expect(persistence.createStickyNote({
+    publicId: "board24-delete-note-01",
+    boardId,
+    userId: member.user.id,
+    text: "must cascade",
+    position: { x: 1, y: 2 },
+    color: "yellow",
+    now,
+  })).resolves.toMatchObject({ kind: "created" })
+
+  await expect(persistence.deleteBoard({
+    userId: member.user.id,
+    publicId: boardId,
+  })).resolves.toEqual({ kind: "not_owner" })
+  await expect(persistence.openBoard({ userId: owner.user.id, publicId: boardId })).resolves.toMatchObject({
+    board: { id: boardId, name: "Delete Graph" },
+    stickyNotes: [{ id: "board24-delete-note-01" }],
+  })
+
+  await expect(persistence.deleteBoard({
+    userId: owner.user.id,
+    publicId: boardId,
+  })).resolves.toEqual({ kind: "deleted" })
+  await expect(persistence.openBoard({ userId: owner.user.id, publicId: boardId })).resolves.toBeNull()
+  await expect(persistence.openBoard({ userId: member.user.id, publicId: boardId })).resolves.toBeNull()
+  await expect(persistence.listBoards({ userId: owner.user.id, nameFilter: "" })).resolves.toEqual([])
+  await expect(persistence.listBoards({ userId: member.user.id, nameFilter: "" })).resolves.toEqual([])
+  await expect(persistence.joinBoard({ userId: member.user.id, joinCodeHash, now })).resolves.toEqual({
+    kind: "invalid_join_code",
+  })
+
+  const inspector = postgres(databaseUrl, { max: 1, prepare: false })
+  try {
+    const ownerCount = await inspector`
+      select owned_board_count
+      from users
+      where id = ${owner.user.id}
+    `
+    expect(ownerCount[0]?.owned_board_count).toBe(0)
+    const childRows = await inspector`
+      select
+        (select count(*)::int from memberships m join boards b on b.id = m.board_id where b.public_id = ${boardId}) as memberships,
+        (select count(*)::int from sticky_notes n join boards b on b.id = n.board_id where b.public_id = ${boardId}) as sticky_notes
+    `
+    expect(childRows[0]).toEqual({ memberships: 0, sticky_notes: 0 })
+  } finally {
+    await inspector.end({ timeout: 5 })
+  }
+})
+
+integrationTest("rolls back the complete Board deletion graph when post-delete bookkeeping fails", async () => {
+  if (!persistence || !databaseUrl) {
+    throw new Error("persistence was not initialized")
+  }
+
+  const now = new Date("2026-08-10T00:00:00.000Z")
+  const registered = await persistence.registerUser({
+    username: "board_delete_rollback",
+    passwordHash: "$argon2id$v=19$m=65536,t=3,p=1$test$hash",
+    credentialHash: "board-delete-rollback".padEnd(64, "d"),
+    now,
+    expiresAt: new Date(now.getTime() + 30 * 24 * 60 * 60 * 1_000),
+  })
+  if (!registered) {
+    throw new Error("user was not registered")
+  }
+
+  const boardId = "board24-delete-rolledx"
+  const noteId = "board24-delete-note-rb"
+  await persistence.createBoard({
+    publicId: boardId,
+    name: "Delete Rollback",
+    ownerUserId: registered.user.id,
+    joinCodeHash: "e".repeat(64),
+    now,
+  })
+  await persistence.createStickyNote({
+    publicId: noteId,
+    boardId,
+    userId: registered.user.id,
+    text: "survives every failed step",
+    position: { x: 0, y: 0 },
+    color: "blue",
+    now,
+  })
+
+  const triggerClient = postgres(databaseUrl, { max: 1, prepare: false })
+  try {
+    await triggerClient.unsafe(`
+      create or replace function tuiscrib_board24_delete_rollback() returns trigger
+      language plpgsql as $$
+      begin
+        if new.id = ${registered.user.id} and new.owned_board_count = 0 then
+          raise exception 'board24 deletion rollback sentinel';
+        end if;
+        return new;
+      end;
+      $$;
+      create trigger tuiscrib_board24_delete_rollback_trigger
+      before update of owned_board_count on users
+      for each row execute function tuiscrib_board24_delete_rollback();
+    `)
+
+    await expect(persistence.deleteBoard({
+      userId: registered.user.id,
+      publicId: boardId,
+    })).rejects.toThrow("Failed query: update")
+    await expect(persistence.openBoard({
+      userId: registered.user.id,
+      publicId: boardId,
+    })).resolves.toMatchObject({
+      board: { id: boardId, name: "Delete Rollback" },
+      revision: 1,
+      stickyNotes: [{ id: noteId, text: "survives every failed step" }],
+    })
+  } finally {
+    await triggerClient.unsafe(`
+      drop trigger if exists tuiscrib_board24_delete_rollback_trigger on users;
+      drop function if exists tuiscrib_board24_delete_rollback();
+    `).catch(() => undefined)
+    await triggerClient.end({ timeout: 5 })
+  }
+
+  await expect(persistence.deleteBoard({
+    userId: registered.user.id,
+    publicId: boardId,
+  })).resolves.toEqual({ kind: "deleted" })
+})
+
+integrationTest("serializes competing Board deletions by the PostgreSQL Board lock", async () => {
+  if (!persistence || !concurrentPersistence) {
+    throw new Error("persistence was not initialized")
+  }
+
+  const now = new Date("2026-08-10T00:00:00.000Z")
+  const registered = await persistence.registerUser({
+    username: "board_delete_racer",
+    passwordHash: "$argon2id$v=19$m=65536,t=3,p=1$test$hash",
+    credentialHash: "board-delete-racer".padEnd(64, "f"),
+    now,
+    expiresAt: new Date(now.getTime() + 30 * 24 * 60 * 60 * 1_000),
+  })
+  if (!registered) {
+    throw new Error("user was not registered")
+  }
+
+  const boardId = "board24-delete-race-01"
+  await persistence.createBoard({
+    publicId: boardId,
+    name: "Delete Race",
+    ownerUserId: registered.user.id,
+    joinCodeHash: "a".repeat(64),
+    now,
+  })
+
+  const results = await Promise.all([
+    persistence.deleteBoard({ userId: registered.user.id, publicId: boardId }),
+    concurrentPersistence.deleteBoard({ userId: registered.user.id, publicId: boardId }),
+  ])
+  expect(results.map((result) => result.kind).sort()).toEqual(["deleted", "not_found"])
+})
+
+integrationTest("keeps Board cascade foreign keys and child access paths indexed", async () => {
+  if (!databaseUrl) {
+    throw new Error("database URL was not configured")
+  }
+
+  const inspector = postgres(databaseUrl, { max: 1, prepare: false })
+  try {
+    const constraints = await inspector`
+      select conrelid::regclass::text as table_name, conname, confdeltype
+      from pg_constraint
+      where conname in ('memberships_board_id_boards_id_fk', 'sticky_notes_board_id_boards_id_fk')
+      order by conname
+    `
+    expect([...constraints]).toEqual([
+      { table_name: "memberships", conname: "memberships_board_id_boards_id_fk", confdeltype: "c" },
+      { table_name: "sticky_notes", conname: "sticky_notes_board_id_boards_id_fk", confdeltype: "c" },
+    ])
+
+    const indexes = await inspector`
+      select indexname
+      from pg_indexes
+      where indexname in ('memberships_pkey', 'sticky_notes_board_id_idx')
+      order by indexname
+    `
+    expect([...indexes]).toEqual([
+      { indexname: "memberships_pkey" },
+      { indexname: "sticky_notes_board_id_idx" },
+    ])
+  } finally {
+    await inspector.end({ timeout: 5 })
+  }
+})
+
 integrationTest("serializes concurrent Stacking Order changes in PostgreSQL commit order", async () => {
   if (!persistence || !concurrentPersistence) {
     throw new Error("persistence was not initialized")

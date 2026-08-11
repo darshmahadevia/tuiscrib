@@ -83,3 +83,22 @@ test("keeps Edit Claim and text-version conflicts in the public Board command er
     error: "Sticky Note text changed before this publication.",
   })).toMatchObject({ code: "text_version_conflict" })
 })
+
+test("carries Board authorization loss without disclosing deleted Board state", () => {
+  expect(boardSocketMessageSchema.parse({
+    type: "board_authorization_lost",
+    reason: "board_deleted",
+  })).toEqual({
+    type: "board_authorization_lost",
+    reason: "board_deleted",
+  })
+  expect(() => boardSocketMessageSchema.parse({
+    type: "board_authorization_lost",
+    reason: "board_deleted",
+    board: {
+      id: board.id,
+      name: board.name,
+      role: board.role,
+    },
+  })).toThrow()
+})

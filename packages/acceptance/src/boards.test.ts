@@ -423,6 +423,95 @@ describe("Tuiscrib Board administration", () => {
     })
   })
 
+  test("deletes a Board only for its Owner and reveals no deleted HTTP or Join Code state", async () => {
+    if (!harness) {
+      throw new Error("acceptance harness did not start")
+    }
+    const ownerCredential = await registerUser("delete24_http_owner")
+    const memberCredential = await registerUser("delete24_http_member")
+    const created = await fetch(harness.baseUrl + "/boards", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer " + ownerCredential,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ name: "Delete HTTP Board" }),
+    })
+    expect(created.status).toBe(201)
+    const createdBody = await created.json() as {
+      board: { id: string; name: string; role: "owner" }
+      joinCode: string
+    }
+
+    const joined = await fetch(harness.baseUrl + "/boards/join", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer " + memberCredential,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ joinCode: createdBody.joinCode }),
+    })
+    expect(joined.status).toBe(201)
+
+    const memberDelete = await fetch(
+      harness.baseUrl + "/boards/" + createdBody.board.id + "/delete",
+      {
+        method: "POST",
+        headers: {
+          authorization: "Bearer " + memberCredential,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ name: createdBody.board.name }),
+      },
+    )
+    expect(memberDelete.status).toBe(403)
+    expect(await memberDelete.json()).toEqual({
+      error: "Only the Owner may delete this Board.",
+      code: "owner_required",
+    })
+
+    const deleted = await fetch(
+      harness.baseUrl + "/boards/" + createdBody.board.id + "/delete",
+      {
+        method: "POST",
+        headers: { authorization: "Bearer " + ownerCredential },
+      },
+    )
+    expect(deleted.status).toBe(200)
+    expect(await deleted.json()).toEqual({ status: "deleted" })
+    expect(await listBoardsFor(ownerCredential)).toEqual({ boards: [] })
+    expect(await listBoardsFor(memberCredential)).toEqual({ boards: [] })
+
+    const [ownerPreflight, memberPreflight] = await Promise.all([
+      fetch(harness.baseUrl + "/boards/" + createdBody.board.id + "/collaboration", {
+        headers: { authorization: "Bearer " + ownerCredential },
+      }),
+      fetch(harness.baseUrl + "/boards/" + createdBody.board.id + "/collaboration", {
+        headers: { authorization: "Bearer " + memberCredential },
+      }),
+    ])
+    const ownerPreflightBody = await ownerPreflight.text()
+    const memberPreflightBody = await memberPreflight.text()
+    expect(ownerPreflight.status).toBe(404)
+    expect(memberPreflight.status).toBe(404)
+    expect(ownerPreflightBody).toBe(memberPreflightBody)
+    expect(ownerPreflightBody).not.toContain(createdBody.board.name)
+    expect(ownerPreflightBody).not.toContain(createdBody.joinCode)
+
+    const joinAfterDelete = await fetch(harness.baseUrl + "/boards/join", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer " + memberCredential,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ joinCode: createdBody.joinCode }),
+    })
+    const joinAfterDeleteBody = await joinAfterDelete.text()
+    expect(joinAfterDelete.status).toBe(404)
+    expect(joinAfterDeleteBody).not.toContain(createdBody.board.name)
+    expect(joinAfterDeleteBody).not.toContain(createdBody.joinCode)
+  })
+
   test("creates duplicate-named Boards, discloses a grouped Join Code once, and filters Memberships", async () => {
     if (!harness) {
       throw new Error("acceptance harness did not start")

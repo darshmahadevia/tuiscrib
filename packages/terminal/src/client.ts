@@ -4,6 +4,7 @@ import {
   boardListResponseSchema,
   boardSocketMessageSchema,
   createBoardResponseSchema,
+  deleteBoardResponseSchema,
   joinBoardResponseSchema,
   leaveBoardResponseSchema,
   renameBoardResponseSchema,
@@ -17,6 +18,7 @@ import {
   type BoardSnapshot,
   type BoardCommand,
   type BoardCommandError,
+  type BoardAuthorizationLossReason,
   type StickyNoteCreated,
   type StickyNoteCreationClaimGranted,
   type StickyNoteDeleted,
@@ -28,6 +30,7 @@ import {
   type BoardListResponse,
   type CreateBoardRequest,
   type CreateBoardResponse,
+  type DeleteBoardResponse,
   type JoinBoardRequest,
   type JoinBoardResponse,
   type LeaveBoardResponse,
@@ -55,6 +58,7 @@ export type BoardClient = {
   createBoard(credential: string, input: CreateBoardRequest): Promise<CreateBoardResponse>
   joinBoard(credential: string, input: JoinBoardRequest): Promise<JoinBoardResponse>
   leaveBoard(credential: string, boardId: string): Promise<LeaveBoardResponse>
+  deleteBoard(credential: string, boardId: string): Promise<DeleteBoardResponse>
   renameBoard(
     credential: string,
     boardId: string,
@@ -119,6 +123,7 @@ export type BoardConnectionHandlers = {
   onStickyNoteRecolored?(event: StickyNoteRecolored): void
   onStickyNoteReordered?(event: StickyNoteReordered): void
   onCommandError?(error: BoardCommandError): void
+  onAuthorizationLost?(reason: BoardAuthorizationLossReason): void
 }
 
 export type BoardConnection = {
@@ -268,6 +273,15 @@ export function createBoardClient(
         undefined,
         leaveBoardResponseSchema,
         new URL(`/boards/${encodeURIComponent(boardId)}/leave`, baseUrl),
+      )
+    },
+    deleteBoard(credential, boardId) {
+      return requestBoard(
+        "POST",
+        credential,
+        undefined,
+        deleteBoardResponseSchema,
+        new URL(`/boards/${encodeURIComponent(boardId)}/delete`, baseUrl),
       )
     },
     renameBoard(credential, boardId, input) {
@@ -450,6 +464,11 @@ export function createBoardClient(
           return
         }
 
+        if (parsed.data.type === "board_authorization_lost") {
+          terminateForAuthorizationLoss(generation, parsed.data.reason)
+          return
+        }
+
         if (parsed.data.type === "sticky_note_creation_claim_granted") {
           handlers.onStickyNoteCreationClaimGranted?.(parsed.data)
           return
@@ -598,6 +617,27 @@ export function createBoardClient(
         activeGeneration = null
         finishGeneration(generation)
         handlers.onError(new Error("Board collaboration sent an invalid snapshot."))
+        generation.socket.close()
+      }
+
+      function terminateForAuthorizationLoss(
+        generation: BoardSocketGeneration,
+        reason: BoardAuthorizationLossReason,
+      ): void {
+        if (!isCurrent(generation)) {
+          return
+        }
+        generation.ending = true
+        closedByCaller = true
+        nextGeneration += 1
+        activeGeneration = null
+        if (retryHandle !== null) {
+          scheduler.cancel(retryHandle)
+          retryHandle = null
+        }
+        finishGeneration(generation)
+        handlers.onConnectionState?.("closed")
+        handlers.onAuthorizationLost?.(reason)
         generation.socket.close()
       }
 

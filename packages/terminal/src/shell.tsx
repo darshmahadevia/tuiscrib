@@ -65,7 +65,14 @@ export type TerminalShellProps = {
 }
 
 type ShellOverlay = "none" | "help"
-type ShellView = "home" | "boards" | "board-actions" | "canvas" | "form" | "confirmation"
+type ShellView =
+  | "home"
+  | "boards"
+  | "board-actions"
+  | "board-delete-confirmation"
+  | "canvas"
+  | "form"
+  | "confirmation"
 type ConfirmationAction = "placeholder" | "leave" | "delete-sticky-note"
 
 type FormKind =
@@ -312,6 +319,7 @@ export function TerminalShell({
   const [formInitialKey, setFormInitialKey] = useState<string | null>(null)
   const [confirmationReturnView, setConfirmationReturnView] = useState<ShellView>("boards")
   const [confirmationAction, setConfirmationAction] = useState<ConfirmationAction>("placeholder")
+  const [boardDeleteInitialKey, setBoardDeleteInitialKey] = useState<string | null>(null)
   const [notice, setNotice] = useState<ShellNotice | null>(null)
   const [boards, setBoards] = useState<BoardSummary[]>([])
   const [boardFilter, setBoardFilter] = useState("")
@@ -2087,6 +2095,7 @@ export function TerminalShell({
       }
       setFormInitialKey(null)
       setConfirmationAction("placeholder")
+      setBoardDeleteInitialKey(null)
       setNotice(null)
       setFormPending(false)
       if (nextView !== "canvas") {
@@ -2103,6 +2112,33 @@ export function TerminalShell({
     if (nextView === "boards") {
       void loadBoards(boardFilterRef.current)
     }
+  }
+
+  const handleBoardAuthorizationLoss = (reason: "board_deleted") => {
+    if (reason !== "board_deleted") {
+      return
+    }
+    const deletedBoardName = boardSnapshotRef.current?.board.name ??
+      boards[selectedBoardIndexRef.current]?.name ??
+      "selected Board"
+    closeBoardConnection()
+    cancelledProvisionalIdsRef.current.clear()
+    boardSnapshotRef.current = null
+    flushSync(() => {
+      setBoardConnectionState(null)
+      setBoardSnapshot(null)
+      setMode("navigate")
+      setBoardOpenPending(false)
+      setSelectedStickyNoteId(null)
+      setColorPickerStickyNoteId(null)
+      setView("boards")
+      setSelectedIndex(0)
+      setNotice({
+        kind: "status",
+        message: "Board \"" + deletedBoardName + "\" was deleted. Access ended for every Member.",
+      })
+    })
+    void loadBoards(boardFilterRef.current, false)
   }
 
   const openSelectedBoard = async () => {
@@ -2232,6 +2268,11 @@ export function TerminalShell({
             handleStickyNoteCommandError(commandError)
           }
         },
+        onAuthorizationLost: (reason) => {
+          if (isCurrentBoardConnection()) {
+            handleBoardAuthorizationLoss(reason)
+          }
+        },
         onConnectionState: (state) => {
           if (!isCurrentBoardConnection()) {
             return
@@ -2325,6 +2366,92 @@ export function TerminalShell({
       setSelectedIndex(0)
       setNotice(null)
     })
+  }
+
+  const openBoardDeleteConfirmation = (initialKey: string | null = null) => {
+    const board = boards[selectedBoardIndexRef.current]
+    if (!board) {
+      flushSync(() => {
+        setNotice({ kind: "error", message: "Select a Board before deleting it." })
+      })
+      return
+    }
+    if (board.role !== "owner") {
+      flushSync(() => {
+        setNotice({ kind: "error", message: "Only the Owner may delete this Board." })
+      })
+      return
+    }
+
+    flushSync(() => {
+      setView("board-delete-confirmation")
+      setBoardDeleteInitialKey(initialKey)
+      setSelectedIndex(0)
+      setNotice(null)
+    })
+  }
+
+  const cancelBoardDeleteConfirmation = () => {
+    flushSync(() => {
+      setView("board-actions")
+      setBoardDeleteInitialKey(null)
+      setSelectedIndex(0)
+      setNotice(null)
+    })
+  }
+
+  const deleteSelectedBoard = async (typedName: string) => {
+    if (!boardClient?.deleteBoard || boardActionPendingRef.current) {
+      return
+    }
+
+    const board = boards[selectedBoardIndexRef.current]
+    if (!board) {
+      cancelBoardDeleteConfirmation()
+      flushSync(() => {
+        setNotice({ kind: "error", message: "Select a Board before deleting it." })
+      })
+      return
+    }
+    if (board.role !== "owner") {
+      cancelBoardDeleteConfirmation()
+      flushSync(() => {
+        setNotice({ kind: "error", message: "Only the Owner may delete this Board." })
+      })
+      return
+    }
+    if (typedName !== board.name) {
+      flushSync(() => {
+        setNotice({ kind: "error", message: "Type the exact current Board name to delete it." })
+      })
+      return
+    }
+
+    flushSync(() => setBoardActionPending(true))
+    try {
+      const credential = await credentialStore.load()
+      if (!credential) {
+        throw new Error("No active Terminal Session. Sign in to continue.")
+      }
+      await boardClient.deleteBoard(credential, board.id)
+      flushSync(() => {
+        setBoards((currentBoards) =>
+          currentBoards.filter((currentBoard) => currentBoard.id !== board.id),
+        )
+        setSelectedBoardIndex(0)
+        setSelectedIndex(0)
+        setBoardDeleteInitialKey(null)
+        setView("boards")
+        setNotice({ kind: "status", message: "Board \"" + board.name + "\" deleted permanently." })
+        setBoardActionPending(false)
+      })
+      void loadBoards(boardFilterRef.current, false)
+    } catch (error) {
+      flushSync(() => {
+        setNotice({ kind: "error", message: formatBoardError(error) })
+        setBoardActionPending(false)
+      })
+    }
   }
 
   const resolveConfirmation = (confirmed: boolean) => {
@@ -2976,13 +3103,20 @@ export function TerminalShell({
         return
       }
       if (key.name === "d" || (key.name === "return" && selectedIndexRef.current === 0)) {
-        openConfirmation("board-actions")
+        openBoardDeleteConfirmation(key.name === "d" ? key.name : null)
         return
       }
       if (key.name === "l" || (key.name === "return" && selectedIndexRef.current === 1)) {
         openLeaveConfirmation()
         return
       }
+    }
+
+    if (viewRef.current === "board-delete-confirmation") {
+      if (key.name === "escape") {
+        cancelBoardDeleteConfirmation()
+      }
+      return
     }
 
     if (viewRef.current === "confirmation") {
@@ -3052,6 +3186,15 @@ export function TerminalShell({
       status={notice?.kind === "status" ? notice.message : "choose an action"}
       error={notice?.kind === "error" ? notice.message : undefined}
     />
+  ) : view === "board-delete-confirmation" ? (
+    <BoardDeleteConfirmation
+      board={boards[selectedBoardIndex]}
+      initialKeyToIgnore={boardDeleteInitialKey}
+      notice={notice}
+      pending={boardActionPending}
+      onCancel={cancelBoardDeleteConfirmation}
+      onSubmit={deleteSelectedBoard}
+    />
   ) : view === "confirmation" ? (
     <ShellConfirmation action={confirmationAction} deletion={stickyNoteDeletion} />
   ) : view === "canvas" ? (
@@ -3105,7 +3248,9 @@ export function TerminalShell({
     overlay === "help"
       ? "Escape close"
       : view === "form"
-        ? "Tab fields · Enter submit · Escape cancel"
+      ? "Tab fields · Enter submit · Escape cancel"
+        : view === "board-delete-confirmation"
+          ? "Type exact Board name · Enter delete permanently · Escape cancel"
         : view === "confirmation"
           ? "y confirm · n cancel · Escape cancel"
           : view === "canvas"
@@ -3328,6 +3473,106 @@ function BoardActions({
       status={status}
       error={error}
     />
+  )
+}
+
+function BoardDeleteConfirmation({
+  board,
+  initialKeyToIgnore,
+  notice,
+  pending,
+  onCancel,
+  onSubmit,
+}: {
+  board: BoardSummary | undefined
+  initialKeyToIgnore: string | null
+  notice: ShellNotice | null
+  pending: boolean
+  onCancel: () => void
+  onSubmit: (typedName: string) => void | Promise<void>
+}) {
+  const inputRef = useRef<InputRenderable | null>(null)
+  const typedNameRef = useRef("")
+  const initialKeyToIgnoreRef = useRef(initialKeyToIgnore)
+
+  useLayoutEffect(() => {
+    inputRef.current?.focus()
+  }, [])
+
+  useKeyboard((key) => {
+    if (pending) {
+      return
+    }
+    if (key.name === "escape") {
+      onCancel()
+    }
+  })
+
+  return (
+    <box
+      style={{
+        width: "100%",
+        height: "100%",
+        alignItems: "center",
+        justifyContent: "center",
+      }}
+    >
+      <box
+        style={{
+          width: 72,
+          border: true,
+          borderStyle: "rounded",
+          borderColor: colors.error,
+          backgroundColor: colors.panel,
+          padding: 2,
+          flexDirection: "column",
+        }}
+      >
+        <text fg={colors.error}>Permanently delete Board</text>
+        {board ? (
+          <>
+            <text fg={colors.text}>Board: {board.name}</text>
+            <text fg={colors.warning}>
+              This permanently removes the Board, Memberships, Sticky Notes, and Join Code.
+            </text>
+            <text fg={colors.muted}>Every connected Member will lose access immediately.</text>
+            <box style={{ width: "100%", flexDirection: "row" }}>
+              <text fg={colors.muted} style={{ width: 28 }}>Type Board name exactly:</text>
+              <input
+                ref={(input) => {
+                  inputRef.current = input
+                }}
+                focused
+                width={38}
+                maxLength={80}
+                placeholder={board.name}
+                backgroundColor={colors.panelStrong}
+                focusedBackgroundColor="#3b2020"
+                textColor={colors.text}
+                focusedTextColor={colors.text}
+                cursorColor={colors.error}
+                onInput={(value) => {
+                  if (initialKeyToIgnoreRef.current && value === initialKeyToIgnoreRef.current) {
+                    if (inputRef.current) {
+                      inputRef.current.value = ""
+                    }
+                    initialKeyToIgnoreRef.current = null
+                    return
+                  }
+                  typedNameRef.current = value
+                }}
+                onSubmit={() => onSubmit(typedNameRef.current)}
+              />
+            </box>
+            {pending ? <text fg={colors.muted}>Deleting Board transactionally…</text> : null}
+            {notice?.kind === "error" ? <text fg={colors.error}>Error: {notice.message}</text> : null}
+            <text fg={colors.warning}>Enter permanently delete · Escape cancel</text>
+          </>
+        ) : (
+          <text fg={colors.error}>No Board is selected.</text>
+        )}
+      </box>
+    </box>
   )
 }
 
