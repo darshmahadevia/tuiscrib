@@ -153,6 +153,7 @@ test("refreshes the authoritative Board snapshot at WebSocket open after the HTT
 
 test("re-authenticates an authenticated Board heartbeat to refresh Terminal Session activity", async () => {
   const heartbeatHashes: string[] = []
+  const messages: Record<string, unknown>[] = []
   let upgradedData: Record<string, unknown> | undefined
   const collaboration = createBoardCollaboration({
     persistence: {
@@ -190,17 +191,22 @@ test("re-authenticates an authenticated Board heartbeat to refresh Terminal Sess
 
   const socket = {
     data: upgradedData,
-    send: () => undefined,
+    send: (serialized: string) => {
+      messages.push(JSON.parse(serialized) as Record<string, unknown>)
+    },
     close: () => undefined,
   }
   collaboration.websocket.open?.(socket as never)
   await Promise.resolve()
   await Promise.resolve()
+  expect(messages).toEqual([expect.objectContaining({ type: "snapshot", revision: 0 })])
   collaboration.websocket.message?.(socket as never, JSON.stringify({ type: "heartbeat" }))
   await Promise.resolve()
   await Promise.resolve()
 
   expect(heartbeatHashes).toEqual([hashCredential(credential)])
+  expect(messages).toHaveLength(1)
+  expect(messages[0]).toMatchObject({ type: "snapshot", revision: 0 })
 })
 
 type SocketClient = {

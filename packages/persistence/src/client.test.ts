@@ -28,10 +28,22 @@ beforeAll(async () => {
   if (!databaseUrl) {
     return
   }
-  persistence = createPersistence({ databaseUrl, maxConnections: 4 })
-  concurrentPersistence = createPersistence({ databaseUrl, maxConnections: 4 })
+  persistence = createPersistence({
+    databaseUrl,
+    applicationName: "tuiscrib-test-primary",
+    maxConnections: 4,
+  })
+  concurrentPersistence = createPersistence({
+    databaseUrl,
+    applicationName: "tuiscrib-test-concurrent",
+    maxConnections: 4,
+  })
   if (migrationDatabaseUrl) {
-    migrationPersistence = createPersistence({ databaseUrl: migrationDatabaseUrl, maxConnections: 4 })
+    migrationPersistence = createPersistence({
+      databaseUrl: migrationDatabaseUrl,
+      applicationName: "tuiscrib-test-migration",
+      maxConnections: 4,
+    })
     await migrationPersistence.migrate()
   }
   await persistence.reset()
@@ -504,6 +516,29 @@ integrationTest("serializes competing established text publications by the locke
   }])
   const finalText = opened?.stickyNotes?.[0]?.text
   expect(finalText === "first committed writer" || finalText === "second stale writer").toBe(true)
+})
+
+integrationTest("recreates pooled connections after disposable PostgreSQL terminates them", async () => {
+  if (!persistence || !databaseUrl) {
+    throw new Error("persistence was not initialized")
+  }
+
+  const terminator = postgres(databaseUrl, { max: 1, prepare: false })
+  try {
+    await persistence.healthCheck()
+    const terminated = await terminator`
+      select pg_terminate_backend(pid) as terminated
+      from pg_stat_activity
+      where datname = current_database()
+        and pid <> pg_backend_pid()
+        and application_name = 'tuiscrib-test-primary'
+    `
+    expect(terminated.some((row) => row.terminated === true)).toBe(true)
+    await expect(persistence.healthCheck()).rejects.toThrow()
+    await expect(persistence.healthCheck()).resolves.toEqual({ database: "ready" })
+  } finally {
+    await terminator.end({ timeout: 5 })
+  }
 })
 
 function capacityNoteId(index: number): string {

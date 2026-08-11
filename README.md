@@ -70,4 +70,4 @@ TUISCRIB_SMOKE_REQUIRE_HTTPS=true \
   bun run smoke:hosted -- --url https://your-render-service.onrender.com
 ```
 
-Free-tier sleep, restart, quota, and single-instance behavior are accepted portfolio constraints; this repository makes no production-reliability claim. See [docs/deployment.md](docs/deployment.md) for the environment contract and deployment evidence required for issue #16.
+Render Free spins down after 15 minutes without inbound HTTP/WebSocket traffic and may restart or exhaust its free-hour quota; Supabase Free projects may pause after seven days of low activity and require owner resume. The client shows `WAKING` and retries with capped backoff, but the deployment cannot resume a paused project and makes no production-reliability claim. See [docs/deployment.md](docs/deployment.md) for the exact provider limits and deployment evidence required for issue #18.

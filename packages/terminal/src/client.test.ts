@@ -345,10 +345,65 @@ test("Board client preflights Membership, opens the authenticated WebSocket, and
   connection.close()
 })
 
+test("Board client ignores an exact duplicate snapshot without hiding a changed Presence snapshot", async () => {
+  const credential = "d".repeat(43)
+  const boardId = "Qx7u3nW8kM2pR5sT9vY4aB"
+  let socket: BoardSocket | undefined
+  const snapshots: unknown[] = []
+  const client = createBoardClient(
+    "http://tuiscrib.test",
+    async () => new Response(JSON.stringify({ status: "ready" }), { status: 200 }),
+    () => {
+      socket = {
+        onmessage: null,
+        onerror: null,
+        onclose: null,
+        send: () => undefined,
+        close: () => undefined,
+      }
+      return socket
+    },
+  )
+  const openBoard = client.openBoard
+  if (!openBoard) {
+    throw new Error("Board client does not support Board collaboration")
+  }
+
+  const connection = await openBoard(credential, boardId, {
+    onSnapshot: (snapshot) => snapshots.push(snapshot),
+    onError: (error) => { throw error },
+    onClose: () => undefined,
+  })
+  const firstSnapshot = {
+    type: "snapshot",
+    board: { id: boardId, name: "Ideas", role: "member" },
+    revision: 4,
+    presence: [{ member: { username: "ada_lovelace" }, activity: "viewing" }],
+    stickyNotes: [],
+  }
+  socket?.onmessage?.({ data: JSON.stringify(firstSnapshot) })
+  socket?.onmessage?.({ data: JSON.stringify(firstSnapshot) })
+  socket?.onmessage?.({
+    data: JSON.stringify({
+      ...firstSnapshot,
+      presence: [{ member: { username: "ada_lovelace" }, activity: "editing" }],
+    }),
+  })
+
+  expect(snapshots).toHaveLength(2)
+  expect((snapshots[1] as { presence: Array<{ activity: string }> }).presence[0]?.activity).toBe("editing")
+  connection.close()
+})
+
 test("Board client sends authenticated application heartbeats and clears them on close", async () => {
   const credential = "a".repeat(43)
   const boardId = "Qx7u3nW8kM2pR5sT9vY4aB"
   const sent: string[] = []
+  const heartbeatSchedules: Array<{
+    callback: () => void
+    intervalMs: number
+    cancelled: boolean
+  }> = []
   let socket: BoardSocket | undefined
   const client = createBoardClient(
     "http://tuiscrib.test",
@@ -363,7 +418,22 @@ test("Board client sends authenticated application heartbeats and clears them on
       }
       return socket
     },
-    { heartbeatIntervalMs: 1_000 },
+    {
+      heartbeatIntervalMs: 1_000,
+      scheduler: {
+        schedule: () => undefined,
+        cancel(handle) {
+          if (handle && typeof handle === "object" && "cancelled" in handle) {
+            ;(handle as { cancelled: boolean }).cancelled = true
+          }
+        },
+        scheduleRepeating(callback, intervalMs) {
+          const entry = { callback, intervalMs, cancelled: false }
+          heartbeatSchedules.push(entry)
+          return entry
+        },
+      },
+    },
   )
   const openBoard = client.openBoard
   if (!openBoard) {
@@ -386,11 +456,13 @@ test("Board client sends authenticated application heartbeats and clears them on
     }),
   })
 
-  await Bun.sleep(1_050)
+  expect(heartbeatSchedules).toMatchObject([{ intervalMs: 1_000, cancelled: false }])
+  heartbeatSchedules[0]?.callback()
   expect(sent).toContain(JSON.stringify({ type: "heartbeat" }))
   connection.close()
+  expect(heartbeatSchedules[0]?.cancelled).toBe(true)
   const sentAtClose = sent.length
-  await Bun.sleep(1_050)
+  heartbeatSchedules[0]?.callback()
   expect(sent).toHaveLength(sentAtClose)
 })
 
@@ -1009,7 +1081,7 @@ test("Board client exposes bounded retry states, resets backoff after a snapshot
   await Promise.resolve()
   await Promise.resolve()
   await Promise.resolve()
-  expect(states.at(-1)).toBe("unavailable")
+  expect(states.at(-1)).toBe("waking")
   expect(scheduled.map((entry) => entry.delayMs)).toEqual([10, 20])
 
   scheduled[1]?.callback()
@@ -1034,6 +1106,181 @@ test("Board client exposes bounded retry states, resets backoff after a snapshot
   connection.close()
   expect(scheduled[2]?.cancelled).toBe(true)
   expect(states.at(-1)).toBe("closed")
+})
+
+test("Board client keeps a cold-start connection in waking state and retries the initial readiness check", async () => {
+  const credential = "w".repeat(43)
+  const boardId = "Qx7u3nW8kM2pR5sT9vY4aB"
+  const sockets: BoardSocket[] = []
+  const scheduled: Array<{ callback: () => void; delayMs: number }> = []
+  const states: string[] = []
+  let requestCount = 0
+  const client = createBoardClient(
+    "https://tuiscrib.test",
+    async () => {
+      requestCount += 1
+      if (requestCount === 1) {
+        return new Response(JSON.stringify({ error: "service unavailable" }), { status: 503 })
+      }
+      return new Response(JSON.stringify({ status: "ready" }), { status: 200 })
+    },
+    () => {
+      const socket: BoardSocket = {
+        onmessage: null,
+        onerror: null,
+        onclose: null,
+        send: () => undefined,
+        close: () => undefined,
+      }
+      sockets.push(socket)
+      return socket
+    },
+    {
+      scheduler: {
+        schedule(callback, delayMs) {
+          const entry = { callback, delayMs }
+          scheduled.push(entry)
+          return entry
+        },
+        cancel: () => undefined,
+      },
+      reconnectPolicy: () => 25,
+    },
+  )
+  const openBoard = client.openBoard
+  if (!openBoard) {
+    throw new Error("Board client does not support Board collaboration")
+  }
+
+  const connection = await openBoard(credential, boardId, {
+    onSnapshot: () => undefined,
+    onError: () => undefined,
+    onClose: () => undefined,
+    onConnectionState: (state) => states.push(state),
+  })
+
+  expect(states).toEqual(["connecting", "waking"])
+  expect(scheduled.map((entry) => entry.delayMs)).toEqual([25])
+  expect(() => connection.send({ type: "heartbeat" })).toThrow("not connected")
+
+  scheduled[0]?.callback()
+  await Promise.resolve()
+  await Promise.resolve()
+  await Promise.resolve()
+  await Promise.resolve()
+  await Promise.resolve()
+  await Promise.resolve()
+  expect(sockets).toHaveLength(1)
+  expect(states.at(-1)).toBe("reconnecting")
+
+  sockets[0]?.onmessage?.({
+    data: JSON.stringify({
+      type: "snapshot",
+      board: { id: boardId, name: "Ideas", role: "member" },
+      revision: 0,
+      presence: [{ member: { username: "ada_lovelace" }, activity: "viewing" }],
+      stickyNotes: [],
+    }),
+  })
+  expect(states.at(-1)).toBe("connected")
+  connection.close()
+})
+
+test("Board client does not retry a non-transient initial HTTP failure", async () => {
+  const scheduled: Array<{ callback: () => void; delayMs: number }> = []
+  const states: string[] = []
+  const client = createBoardClient(
+    "https://tuiscrib.test",
+    async () => new Response(JSON.stringify({ error: "invalid Board request" }), { status: 400 }),
+    () => {
+      throw new Error("WebSocket should not be opened after an invalid HTTP request")
+    },
+    {
+      scheduler: {
+        schedule(callback, delayMs) {
+          const entry = { callback, delayMs }
+          scheduled.push(entry)
+          return entry
+        },
+        cancel: () => undefined,
+      },
+      reconnectPolicy: () => 25,
+    },
+  )
+  const openBoard = client.openBoard
+  if (!openBoard) {
+    throw new Error("Board client does not support Board collaboration")
+  }
+
+  await expect(openBoard("i".repeat(43), "Qx7u3nW8kM2pR5sT9vY4aB", {
+    onSnapshot: () => undefined,
+    onError: () => undefined,
+    onClose: () => undefined,
+    onConnectionState: (state) => states.push(state),
+  })).rejects.toThrow("invalid Board request")
+
+  expect(states).toEqual(["connecting", "unavailable"])
+  expect(scheduled).toHaveLength(0)
+})
+
+test("Board client retries an initial WebSocket wakeup failure through the bounded scheduler", async () => {
+  const boardId = "Qx7u3nW8kM2pR5sT9vY4aB"
+  const scheduled: Array<{ callback: () => void; delayMs: number }> = []
+  const sockets: BoardSocket[] = []
+  let attempts = 0
+  const states: string[] = []
+  const client = createBoardClient(
+    "https://tuiscrib.test",
+    async () => new Response(JSON.stringify({ status: "ready" }), { status: 200 }),
+    () => {
+      attempts += 1
+      if (attempts === 1) {
+        throw new Error("WebSocket wakeup failed")
+      }
+      const socket: BoardSocket = {
+        onmessage: null,
+        onerror: null,
+        onclose: null,
+        send: () => undefined,
+        close: () => undefined,
+      }
+      sockets.push(socket)
+      return socket
+    },
+    {
+      scheduler: {
+        schedule(callback, delayMs) {
+          const entry = { callback, delayMs }
+          scheduled.push(entry)
+          return entry
+        },
+        cancel: () => undefined,
+      },
+      reconnectPolicy: () => 25,
+    },
+  )
+  const openBoard = client.openBoard
+  if (!openBoard) {
+    throw new Error("Board client does not support Board collaboration")
+  }
+
+  const connection = await openBoard("j".repeat(43), boardId, {
+    onSnapshot: () => undefined,
+    onError: () => undefined,
+    onClose: () => undefined,
+    onConnectionState: (state) => states.push(state),
+  })
+
+  expect(states).toEqual(["connecting", "unavailable"])
+  expect(scheduled.map((entry) => entry.delayMs)).toEqual([25])
+  scheduled[0]?.callback()
+  await Promise.resolve()
+  await Promise.resolve()
+  await Promise.resolve()
+  await Promise.resolve()
+  expect(sockets).toHaveLength(1)
+  expect(states.at(-1)).toBe("reconnecting")
+  connection.close()
 })
 
 test("Board client distinguishes an unauthorized reconnect failure from an unavailable service", async () => {

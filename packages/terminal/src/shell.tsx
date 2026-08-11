@@ -2539,7 +2539,14 @@ function CanvasSurface({
         }}
       >
         <text fg={colors.text}>Board canvas</text>
-        {connectionState === "reconnecting" ? (
+        {connectionState === "waking" ? (
+          <>
+            <text fg={colors.warning}>Connection: WAKING</text>
+            <text fg={colors.muted}>Render or hosted PostgreSQL is waking up.</text>
+            <text fg={colors.warning}>Retrying with bounded backoff; shared mutations disabled.</text>
+            {error ? <text fg={colors.error}>Error: {error}</text> : null}
+          </>
+        ) : connectionState === "reconnecting" ? (
           <>
             <text fg={colors.warning}>Connection: RECONNECTING</text>
             <text fg={colors.muted}>No offline Board state is retained.</text>

@@ -103,3 +103,20 @@ test("redacts database URLs and bearer credentials from operational errors", () 
   expect(message).not.toContain("secret")
   expect(message).not.toContain("abcdef123456")
 })
+
+test("redacts labeled Session, Join Code, password, and Sticky Note values", () => {
+  const secrets = {
+    password: "private password",
+    confirmation: "private confirmation",
+    joinCode: "ABCD-1234",
+    sessionCredential: "opaque-session-credential",
+    credentialHash: "opaque-credential-hash",
+    stickyNoteText: "private Sticky Note text",
+  }
+  const message = redactServiceError(new Error(JSON.stringify(secrets)))
+
+  for (const secret of Object.values(secrets)) {
+    expect(message).not.toContain(secret)
+  }
+  expect(message).toContain("[redacted secret]")
+})

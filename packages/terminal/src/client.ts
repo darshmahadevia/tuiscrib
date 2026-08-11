@@ -81,6 +81,7 @@ export type BoardWebSocketFactory = (
 export type BoardConnectionState =
   | "connecting"
   | "connected"
+  | "waking"
   | "reconnecting"
   | "unavailable"
   | "unauthorized"
@@ -89,6 +90,7 @@ export type BoardConnectionState =
 export type BoardConnectionScheduler = {
   schedule(callback: () => void, delayMs: number): unknown
   cancel(handle: unknown): void
+  scheduleRepeating?(callback: () => void, intervalMs: number): unknown
 }
 
 export type BoardReconnectPolicy = (attempt: number) => number
@@ -121,9 +123,10 @@ type BoardSocketGeneration = {
   socket: BoardSocket
   awaitingSnapshot: boolean
   lastRevision: number | null
+  lastSnapshotFingerprint: string | null
   pendingEvents: Map<number, StickyNoteCreated | StickyNoteUpdated>
   ending: boolean
-  heartbeatHandle: ReturnType<typeof setInterval> | null
+  heartbeatHandle: unknown | null
 }
 
 export class ServiceRequestError extends Error {
@@ -354,6 +357,10 @@ export function createBoardClient(
             return
           }
           if (initial) {
+            if (isRetryableFailure(error)) {
+              handleInitialRetryFailure(generationId, error)
+              return
+            }
             reportInitialFailure(error)
             throw error
           }
@@ -371,12 +378,12 @@ export function createBoardClient(
             headers: { authorization: `Bearer ${credential}` },
           })
         } catch (error) {
-          if (!initial) {
-            handleRetryFailure(generationId, error)
+          if (initial) {
+            handleInitialRetryFailure(generationId, error)
             return
           }
-          reportInitialFailure(error)
-          throw error
+          handleRetryFailure(generationId, error)
+          return
         }
 
         const generation: BoardSocketGeneration = {
@@ -384,6 +391,7 @@ export function createBoardClient(
           socket,
           awaitingSnapshot: true,
           lastRevision: null,
+          lastSnapshotFingerprint: null,
           pendingEvents: new Map(),
           ending: false,
           heartbeatHandle: null,
@@ -464,6 +472,10 @@ export function createBoardClient(
         if (!isCurrent(generation)) {
           return
         }
+        const fingerprint = JSON.stringify(snapshot)
+        if (generation.lastSnapshotFingerprint === fingerprint) {
+          return
+        }
         if (
           generation.lastRevision !== null &&
           snapshot.revision < generation.lastRevision
@@ -471,6 +483,7 @@ export function createBoardClient(
           return
         }
 
+        generation.lastSnapshotFingerprint = fingerprint
         generation.lastRevision = snapshot.revision
         generation.awaitingSnapshot = false
         reconnectAttempt = 0
@@ -484,7 +497,7 @@ export function createBoardClient(
         if (heartbeatIntervalMs === 0 || generation.heartbeatHandle !== null) {
           return
         }
-        generation.heartbeatHandle = setInterval(() => {
+        const sendHeartbeat = () => {
           if (!isCurrent(generation) || generation.awaitingSnapshot || generation.ending) {
             return
           }
@@ -496,7 +509,10 @@ export function createBoardClient(
               new Error("Board collaboration is unavailable."),
             )
           }
-        }, heartbeatIntervalMs)
+        }
+        generation.heartbeatHandle = scheduler.scheduleRepeating
+          ? scheduler.scheduleRepeating(sendHeartbeat, heartbeatIntervalMs)
+          : setInterval(sendHeartbeat, heartbeatIntervalMs)
       }
 
       function drainPendingEvents(generation: BoardSocketGeneration): void {
@@ -618,7 +634,21 @@ export function createBoardClient(
           handlers.onError(serviceError)
           return
         }
-        handlers.onConnectionState?.("unavailable")
+        if (!isRetryableFailure(error)) {
+          handlers.onConnectionState?.("unavailable")
+          handlers.onError(error instanceof Error ? error : new Error("Board collaboration is unavailable."))
+          return
+        }
+        handlers.onConnectionState?.(connectionStateForFailure(error))
+        handlers.onError(error instanceof Error ? error : new Error("Board collaboration is unavailable."))
+        scheduleRetry()
+      }
+
+      function handleInitialRetryFailure(generationId: number, error: unknown): void {
+        if (closedByCaller || generationId !== nextGeneration) {
+          return
+        }
+        handlers.onConnectionState?.(connectionStateForFailure(error))
         handlers.onError(error instanceof Error ? error : new Error("Board collaboration is unavailable."))
         scheduleRetry()
       }
@@ -644,7 +674,11 @@ export function createBoardClient(
 
       function finishGeneration(generation: BoardSocketGeneration): void {
         if (generation.heartbeatHandle !== null) {
-          clearInterval(generation.heartbeatHandle)
+          if (scheduler.scheduleRepeating) {
+            scheduler.cancel(generation.heartbeatHandle)
+          } else {
+            clearInterval(generation.heartbeatHandle as ReturnType<typeof setInterval>)
+          }
           generation.heartbeatHandle = null
         }
       }
@@ -676,7 +710,18 @@ export function createBoardClient(
       )
     }
 
-    return schema.parse(payload)
+    try {
+      return schema.parse(payload)
+    } catch {
+      throw new BoardResponseError("The Tuiscrib Service returned an invalid Board response.")
+    }
+  }
+}
+
+class BoardResponseError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "BoardResponseError"
   }
 }
 
@@ -686,6 +731,9 @@ const defaultBoardConnectionScheduler: BoardConnectionScheduler = {
   },
   cancel(handle) {
     clearTimeout(handle as ReturnType<typeof setTimeout>)
+  },
+  scheduleRepeating(callback, intervalMs) {
+    return setInterval(callback, intervalMs)
   },
 }
 
@@ -721,6 +769,23 @@ function normalizeHeartbeatInterval(value: number | undefined): number {
   return value !== undefined && Number.isFinite(value) && value >= 1_000
     ? Math.floor(value)
     : 30_000
+}
+
+function isRetryableFailure(error: unknown): boolean {
+  if (error instanceof BoardResponseError) {
+    return false
+  }
+  if (!(error instanceof ServiceRequestError)) {
+    return true
+  }
+  return error.status === 408 || error.status >= 500
+}
+
+function connectionStateForFailure(error: unknown): "waking" | "unavailable" {
+  return error instanceof ServiceRequestError &&
+    (error.status === 500 || error.status === 502 || error.status === 503 || error.status === 504)
+    ? "waking"
+    : "unavailable"
 }
 
 const defaultBoardWebSocketFactory: BoardWebSocketFactory = (url, options) => {

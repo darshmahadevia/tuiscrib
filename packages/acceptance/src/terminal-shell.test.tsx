@@ -1287,6 +1287,16 @@ test("renders reconnecting after Board loss and does not send shared mutations w
   expect(setup.captureCharFrame()).toContain("Connection: RECONNECTING")
 
   await act(async () => {
+    handlers?.onConnectionState?.("waking")
+    handlers?.onError(new Error("The Tuiscrib Service is waking up."))
+    await setup.renderOnce()
+  })
+  const waking = setup.captureCharFrame()
+  expect(waking).toContain("Connection: WAKING")
+  expect(waking).toContain("Retrying with bounded backoff")
+  expect(waking).not.toContain("Connection: RECONNECTING")
+
+  await act(async () => {
     handlers?.onConnectionState?.("unavailable")
     handlers?.onError(new Error("The Tuiscrib Service is unavailable."))
     await setup.renderOnce()

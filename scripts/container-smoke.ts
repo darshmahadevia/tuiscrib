@@ -1,5 +1,7 @@
 import { fileURLToPath } from "node:url"
 
+import { redactServiceError } from "../packages/service/src/config.ts"
+
 type ProcessResult = { stdout: string; stderr: string }
 
 const repositoryDirectory = fileURLToPath(new URL("..", import.meta.url))
@@ -115,10 +117,7 @@ async function runProcess(
 }
 
 function redact(value: string): string {
-  return value
-    .replace(/postgres(?:ql)?:\/\/[^\s"'`]+/gi, "[redacted database URL]")
-    .replace(/\bBearer\s+[^\s]+/gi, "Bearer [redacted]")
-    .slice(-1_000)
+  return redactServiceError(value)
 }
 
 async function cleanup(): Promise<void> {

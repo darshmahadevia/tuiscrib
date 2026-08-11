@@ -213,6 +213,7 @@ export type Persistence = {
 
 export type PersistenceOptions = {
   databaseUrl: string
+  applicationName?: string
   migrationsFolder?: string
   maxConnections?: number
   connectTimeoutSeconds?: number
@@ -270,6 +271,7 @@ export function createPersistence(options: PersistenceOptions): Persistence {
     connect_timeout: options.connectTimeoutSeconds ?? 10,
     idle_timeout: options.idleTimeoutSeconds ?? 20,
     max_lifetime: options.maxLifetimeSeconds ?? 300,
+    connection: { application_name: options.applicationName ?? "tuiscrib-service" },
     prepare: false,
   })
   const database = drizzle(client)
@@ -1022,7 +1024,7 @@ export function createPersistence(options: PersistenceOptions): Persistence {
     },
 
     async close() {
-      await client.end({ timeout: 5 })
+      await client.end({ timeout: 1 })
     },
   }
 }

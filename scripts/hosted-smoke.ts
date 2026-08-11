@@ -4,6 +4,7 @@ import {
   createHealthClient,
   type BoardConnection,
 } from "../packages/terminal/src/client.ts"
+import { redactServiceError } from "../packages/service/src/config.ts"
 import type {
   BoardSnapshot,
   StickyNoteCreated,
@@ -238,11 +239,7 @@ function parseBoolean(raw: string | undefined): boolean {
 }
 
 function redactError(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error)
-  return message
-    .replace(/postgres(?:ql)?:\/\/[^\s"'`]+/gi, "[redacted database URL]")
-    .replace(/\bBearer\s+[^\s]+/gi, "Bearer [redacted]")
-    .slice(0, 500)
+  return redactServiceError(error)
 }
 
 try {

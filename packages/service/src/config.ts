@@ -159,6 +159,10 @@ export function redactServiceError(error: unknown): string {
     .replace(/postgres(?:ql)?:\/\/[^\s"'`]+/gi, "[redacted database URL]")
     .replace(/\bBearer\s+[^\s]+/gi, "Bearer [redacted]")
     .replace(/\b(DATABASE_URL|MIGRATION_DATABASE_URL|PASSWORD|JOIN_CODE|SESSION_CREDENTIAL)\s*[=:]\s*[^\s]+/gi, "$1=[redacted]")
+    .replace(
+      /(["']?\b(?:password|confirmation|joinCode|join_code|sessionCredential|session_credential|sessionToken|session_token|credential|credentialHash|credential_hash|stickyNoteText|sticky_note_text)\b["']?\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^,\s}]+)/gi,
+      "$1[redacted secret]",
+    )
     .slice(0, 500)
 }
 
