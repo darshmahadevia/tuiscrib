@@ -72,14 +72,14 @@ The deterministic image smoke builds the repository Dockerfile, starts PostgreSQ
 bun run smoke:container
 ```
 
-The hosted smoke creates two throwaway Users, creates a Board, redeems the Join Code, opens two authenticated WebSockets, publishes a durable Sticky Note, observes it from the second client, reconnects that client, and requires the authoritative snapshot to contain the note. It prints only a pass/fail summary:
+The hosted smoke creates two throwaway Users, creates a Board, redeems the Join Code, opens two authenticated WebSockets, creates two overlapping Sticky Notes, edits one through an Edit Claim, moves, recolors, and reorders it, reconnects the second client, verifies the complete durable snapshot, deletes a Sticky Note, and deletes the Board. It prints only a pass/fail summary:
 
 ```bash
 TUISCRIB_SMOKE_REQUIRE_HTTPS=true \
   bun run smoke:hosted -- --url https://your-render-service.onrender.com
 ```
 
-The smoke leaves generated Users and the Board in the configured database so that the public behavior being tested is real. Use a disposable Supabase project or other explicitly isolated database for repeated checks. The local OpenTUI rendering and keyboard behavior remains covered by the acceptance suite; the hosted smoke uses the same exported terminal network client over public HTTP/WebSocket boundaries.
+The smoke deletes the generated Board on success and in best-effort failure cleanup. Tuiscrib has no identity-closure workflow, so the generated Users remain; use a disposable Supabase project or other explicitly isolated database for repeated checks. The local OpenTUI rendering and keyboard behavior remains covered by the acceptance suite; the hosted smoke uses the same exported terminal network client over public HTTP/WebSocket boundaries.
 
 ## Free-tier constraints
 

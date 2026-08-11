@@ -10,15 +10,25 @@ import type {
   BoardSnapshot,
   StickyNoteCreated,
   StickyNoteCreationClaimGranted,
+  StickyNoteDeleted,
+  StickyNoteEditClaimGranted,
   StickyNoteMoved,
+  StickyNoteRecolored,
+  StickyNoteReordered,
+  StickyNoteUpdated,
 } from "../packages/contracts/src/index.ts"
 
 type SmokeProbe = {
   connection: BoardConnection
   snapshots: BoardSnapshot[]
   claims: StickyNoteCreationClaimGranted[]
+  editClaims: StickyNoteEditClaimGranted[]
   created: StickyNoteCreated[]
+  updated: StickyNoteUpdated[]
   moved: StickyNoteMoved[]
+  recolored: StickyNoteRecolored[]
+  reordered: StickyNoteReordered[]
+  deleted: StickyNoteDeleted[]
   authorizationLosses: string[]
   errors: Error[]
 }
@@ -133,6 +143,105 @@ async function main(): Promise<void> {
     if (!createdNote) {
       throw new Error("Hosted smoke could not identify the durable Sticky Note.")
     }
+
+    const editedText = `hosted smoke edited ${suffix}`
+    memberProbe.connection.send({
+      type: "begin_sticky_note_edit",
+      stickyNoteId: createdNote.id,
+    })
+    await waitFor(
+      () => memberProbe!.editClaims.some((claim) => claim.stickyNoteId === createdNote.id),
+      timeoutMs,
+      "established Sticky Note Edit Claim",
+    )
+    const editClaim = memberProbe.editClaims.find((claim) => claim.stickyNoteId === createdNote.id)
+    if (!editClaim) {
+      throw new Error("Hosted smoke could not identify the established Edit Claim.")
+    }
+    memberProbe.connection.send({
+      type: "publish_sticky_note_edit",
+      claimId: editClaim.claimId,
+      stickyNoteId: createdNote.id,
+      text: editedText,
+      expectedTextVersion: editClaim.stickyNote.textVersion,
+    })
+    await waitFor(
+      () => ownerProbe!.updated.some((event) =>
+        event.stickyNote.id === createdNote.id && event.stickyNote.text === editedText),
+      timeoutMs,
+      "durable Sticky Note edit observation by the first client",
+    )
+    const releaseSnapshotCount = ownerProbe.snapshots.length
+    memberProbe.connection.send({
+      type: "release_sticky_note_edit",
+      claimId: editClaim.claimId,
+      stickyNoteId: createdNote.id,
+    })
+    await waitFor(
+      () => ownerProbe!.snapshots.length > releaseSnapshotCount && ownerProbe!.snapshots.at(-1)?.presence.some((presence) =>
+        presence.member.username === memberUsername && presence.activity === "viewing"),
+      timeoutMs,
+      "Edit Claim release",
+    )
+
+    const secondProvisionalId = crypto.randomUUID()
+    ownerProbe.connection.send({
+      type: "begin_sticky_note",
+      provisionalId: secondProvisionalId,
+      position: { x: 0, y: 0 },
+      color: "blue",
+    })
+    await waitFor(
+      () => ownerProbe!.claims.some((claim) => claim.provisionalId === secondProvisionalId),
+      timeoutMs,
+      "second Sticky Note creation authority",
+    )
+    const secondClaim = ownerProbe.claims.find((claim) => claim.provisionalId === secondProvisionalId)
+    if (!secondClaim) {
+      throw new Error("Hosted smoke did not receive the second creation authority.")
+    }
+    const secondText = `hosted smoke overlap ${suffix}`
+    ownerProbe.connection.send({
+      type: "publish_sticky_note",
+      claimId: secondClaim.claimId,
+      provisionalId: secondProvisionalId,
+      text: secondText,
+    })
+    await waitFor(
+      () => memberProbe!.created.some((event) => event.stickyNote.text === secondText),
+      timeoutMs,
+      "second durable Sticky Note observation",
+    )
+    const secondNote = ownerProbe.created.find((event) => event.stickyNote.text === secondText)?.stickyNote ??
+      memberProbe.created.find((event) => event.stickyNote.text === secondText)?.stickyNote
+    if (!secondNote) {
+      throw new Error("Hosted smoke could not identify the overlapping Sticky Note.")
+    }
+
+    ownerProbe.connection.send({
+      type: "reorder_sticky_note",
+      stickyNoteId: createdNote.id,
+      direction: "raise",
+    })
+    await waitFor(
+      () => ownerProbe!.reordered.some((event) =>
+        event.stickyNote.id === createdNote.id && event.stickyNote.stackingOrder === 1),
+      timeoutMs,
+      "durable Sticky Note reordering observation",
+    )
+
+    ownerProbe.connection.send({
+      type: "recolor_sticky_note",
+      stickyNoteId: createdNote.id,
+      color: "magenta",
+    })
+    await waitFor(
+      () => memberProbe!.recolored.some((event) =>
+        event.stickyNote.id === createdNote.id && event.stickyNote.color === "magenta"),
+      timeoutMs,
+      "durable Sticky Note recoloring observation",
+    )
+
     memberProbe.connection.send({
       type: "move_sticky_note",
       stickyNoteId: createdNote.id,
@@ -166,9 +275,41 @@ async function main(): Promise<void> {
     )
     await waitFor(
       () => memberProbe!.snapshots.some((snapshot) =>
-        snapshot.stickyNotes?.some((note) => note.text === text && note.position.x === 1)),
+        snapshot.stickyNotes?.some((note) =>
+          note.id === createdNote.id &&
+          note.text === editedText &&
+          note.position.x === 1 &&
+          note.color === "magenta" &&
+          note.stackingOrder === 1 &&
+          snapshot.stickyNotes.some((otherNote) =>
+            otherNote.id === secondNote.id && otherNote.stackingOrder === 0))),
       timeoutMs,
-      "durable Sticky Note after reconnect",
+      "complete durable Sticky Note state after reconnect",
+    )
+
+    ownerProbe.connection.send({
+      type: "begin_sticky_note_edit",
+      stickyNoteId: createdNote.id,
+    })
+    await waitFor(
+      () => ownerProbe!.editClaims.some((claim) => claim.stickyNoteId === createdNote.id),
+      timeoutMs,
+      "Sticky Note deletion Edit Claim",
+    )
+    const deleteClaim = ownerProbe.editClaims.find((claim) => claim.stickyNoteId === createdNote.id)
+    if (!deleteClaim) {
+      throw new Error("Hosted smoke could not acquire the Sticky Note deletion claim.")
+    }
+    ownerProbe.connection.send({
+      type: "delete_sticky_note",
+      claimId: deleteClaim.claimId,
+      stickyNoteId: createdNote.id,
+    })
+    await waitFor(
+      () => ownerProbe!.deleted.some((event) => event.stickyNoteId === createdNote.id) &&
+        memberProbe!.deleted.some((event) => event.stickyNoteId === createdNote.id),
+      timeoutMs,
+      "durable Sticky Note deletion observation by both clients",
     )
 
     await withTimeout(
@@ -246,10 +387,11 @@ async function main(): Promise<void> {
     if (finalHealth.status !== "ready" || finalHealth.database !== "ready") {
       throw new Error("Final health readiness did not report a ready service and database.")
     }
-    console.log("Hosted smoke passed: health, HTTPS/WebSocket upgrade, two-client Membership, and durable Sticky Note state.")
+    console.log("Hosted smoke passed: health, HTTPS/WSS, two-client Membership, edit/move/recolor/reorder/delete, reconnect durability, and Board deletion.")
   } finally {
     ownerProbe?.connection.close()
     memberProbe?.connection.close()
+    await boards.deleteBoard(owner.sessionCredential, created.board.id).catch(() => undefined)
   }
 }
 
@@ -265,8 +407,13 @@ async function openProbe(
   const probe: Omit<SmokeProbe, "connection"> & { connection?: BoardConnection } = {
     snapshots: [],
     claims: [],
+    editClaims: [],
     created: [],
+    updated: [],
     moved: [],
+    recolored: [],
+    reordered: [],
+    deleted: [],
     authorizationLosses: [],
     errors: [],
   }
@@ -276,7 +423,12 @@ async function openProbe(
     onClose: () => undefined,
     onStickyNoteCreationClaimGranted: (claim) => probe.claims.push(claim),
     onStickyNoteCreated: (event) => probe.created.push(event),
+    onStickyNoteEditClaimGranted: (claim) => probe.editClaims.push(claim),
+    onStickyNoteUpdated: (event) => probe.updated.push(event),
     onStickyNoteMoved: (event) => probe.moved.push(event),
+    onStickyNoteRecolored: (event) => probe.recolored.push(event),
+    onStickyNoteReordered: (event) => probe.reordered.push(event),
+    onStickyNoteDeleted: (event) => probe.deleted.push(event),
     onAuthorizationLost: (reason) => probe.authorizationLosses.push(reason),
   })
   try {

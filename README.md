@@ -63,11 +63,13 @@ Build and verify the local image plus a disposable PostgreSQL instance with:
 bun run smoke:container
 ```
 
-After a real Render service and Supabase project are provisioned, verify the public URL with:
+After a real Render service and Supabase project are provisioned, run the complete hosted portfolio journey with:
 
 ```bash
 TUISCRIB_SMOKE_REQUIRE_HTTPS=true \
   bun run smoke:hosted -- --url https://your-render-service.onrender.com
 ```
+
+The smoke creates two throwaway Users, joins one Board, creates and edits Sticky Notes, moves, recolors, and reorders them, reconnects, verifies the durable snapshot, deletes a Sticky Note, and deletes the Board. See [docs/portfolio-demo.md](docs/portfolio-demo.md) for the local acceptance seam, exact feature sequence, and free-tier limitations.
 
 Render Free spins down after 15 minutes without inbound HTTP/WebSocket traffic and may restart or exhaust its free-hour quota; Supabase Free projects may pause after seven days of low activity and require owner resume. The client shows `WAKING` and retries with capped backoff, but the deployment cannot resume a paused project and makes no production-reliability claim. See [docs/deployment.md](docs/deployment.md) for the exact provider limits and deployment evidence required for issue #18.

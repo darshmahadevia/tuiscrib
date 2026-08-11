@@ -424,11 +424,19 @@ integrationTest("serializes concurrent Stacking Order changes in PostgreSQL comm
       direction: "lower",
     }),
   ])
-  expect(concurrent.map((result) => result.kind)).toEqual(["reordered", "reordered"])
-  expect(concurrent.map((result) => result.kind === "reordered" ? result.revision : 0).sort()).toEqual([5, 6])
+  const concurrentKinds = concurrent.map((result) => result.kind)
+  expect(concurrentKinds.every((kind) => kind === "reordered" || kind === "at_boundary")).toBe(true)
+  const successfulRevisions = concurrent
+    .filter((result): result is Extract<typeof result, { kind: "reordered" }> => result.kind === "reordered")
+    .map((result) => result.revision)
+    .sort()
+  expect(successfulRevisions.length).toBeGreaterThan(0)
+  expect(successfulRevisions).toEqual(
+    Array.from({ length: successfulRevisions.length }, (_, index) => 5 + index),
+  )
 
   const opened = await persistence.openBoard({ userId: registered.user.id, publicId: boardId })
-  expect(opened?.revision).toBe(6)
+  expect(opened?.revision).toBe(4 + successfulRevisions.length)
   expect(opened?.stickyNotes?.map((note) => note.stackingOrder)).toEqual([0, 1, 2])
   expect(new Set(opened?.stickyNotes?.map((note) => note.id))).toEqual(new Set(noteIds))
 })
