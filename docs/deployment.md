@@ -43,6 +43,8 @@ Create or select the external resources in their provider dashboards, then set t
 
 Supabase documents Supavisor session mode on port `5432` and transaction mode on port `6543`. Session mode reserves one underlying database connection for a client session, which preserves session-level advisory locks; transaction mode must not be used for migrations. See [Supabase database connections](https://supabase.com/docs/guides/database/connecting-to-postgres) and [Supavisor connection terminology](https://supabase.com/docs/guides/troubleshooting/supavisor-and-connection-terminology-explained-9pr_ZO). The service uses direct PostgreSQL connections and does not depend on Supabase Auth, the Data API, or exposed public tables.
 
+The deployed Free service currently uses Supavisor shared session mode on port `5432` for both `DATABASE_URL` and `MIGRATION_DATABASE_URL`. The direct endpoint was not reachable from the validation network, so the stable session-pooled endpoint is the selected migration fallback and persistent-runtime mode; this deployment does not use transaction pooling on port `6543`.
+
 Supabase's current changelog includes a change making new public tables opt-in for Data API exposure. That does not change this service because Drizzle and `postgres-js` connect over PostgreSQL directly. See the [Supabase breaking-change changelog](https://supabase.com/changelog?types=breaking-change) before changing the database access path.
 
 ## Provisioning and linking
