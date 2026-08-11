@@ -50,10 +50,10 @@ Supabase's current changelog includes a change making new public tables opt-in f
 The official CLI can create a project without adding itself to this repository:
 
 ```bash
-npx --yes supabase@2.113.0 projects create tuiscrib --org-id <org-id> --db-password '<one-time-password>' --region us-east-1 --size micro
+npx --yes supabase@2.113.0 projects create tuiscrib --org-id <org-id> --db-password '<one-time-password>' --region us-east-1
 ```
 
-Do not paste the password or resulting URLs into the repository, issue comments, or smoke output. Link only after the project exists and use the CLI's current `supabase link` help for the project reference. A paid upgrade, CAPTCHA, account-wide permission request, or destructive reuse of an unrelated project is a blocker for this ticket.
+For a Free organization, omit `--size`; the provider selects the Free-compatible instance size. Do not paste the password or resulting URLs into the repository, issue comments, or smoke output. Link only after the project exists and use the CLI's current `supabase link` help for the project reference. A paid upgrade, CAPTCHA, account-wide permission request, or destructive reuse of an unrelated project is a blocker for this ticket.
 
 ## Local and container verification
 
