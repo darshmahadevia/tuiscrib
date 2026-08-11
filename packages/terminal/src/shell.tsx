@@ -7,6 +7,7 @@ import {
   DEFAULT_STICKY_NOTE_COLOR,
   splitUserPerceivedCharacters,
   USER_PERCEIVED_CHARACTER_SEGMENTATION_UNAVAILABLE,
+  type BoardEditClaim,
   type StickyNote,
   type StickyNoteColor,
   type StickyNotePosition,
@@ -127,6 +128,8 @@ type EstablishedStickyNoteEdit = {
   publishedText?: string
   releaseRequested: boolean
   releaseSent: boolean
+  claimRequestSent: boolean
+  reconnecting: boolean
 }
 
 type StickyNoteColorChoice = {
@@ -312,6 +315,7 @@ export function TerminalShell({
   const selectedIndexRef = useRef(selectedIndex)
   const selectedBoardIndexRef = useRef(selectedBoardIndex)
   const sessionStateRef = useRef(sessionState)
+  const authenticatedUsernameRef = useRef<string | null>(authenticatedUsername)
   const boardFilterRef = useRef(boardFilter)
   const signOutPendingRef = useRef(signOutPending)
   const confirmationActionRef = useRef(confirmationAction)
@@ -331,6 +335,7 @@ export function TerminalShell({
   )
   const cancelledProvisionalIdsRef = useRef(new Set<string>())
   const cancelledStickyNoteEditIdsRef = useRef(new Set<string>())
+  const cancelledStickyNoteEditRequestsRef = useRef(new Set<string>())
   const stickyNoteDebouncerRef = useRef<StickyNoteDebouncer | null>(null)
   overlayRef.current = overlay
   viewRef.current = view
@@ -338,6 +343,7 @@ export function TerminalShell({
   selectedIndexRef.current = selectedIndex
   selectedBoardIndexRef.current = selectedBoardIndex
   sessionStateRef.current = sessionState
+  authenticatedUsernameRef.current = authenticatedUsername
   boardFilterRef.current = boardFilter
   signOutPendingRef.current = signOutPending
   confirmationActionRef.current = confirmationAction
@@ -456,17 +462,35 @@ export function TerminalShell({
     return !boardClient?.openBoard || boardConnectionStateRef.current === "connected"
   }
 
-  function discardLocalBoardWorkAfterConnectionLoss(): void {
+  function discardLocalBoardWorkAfterConnectionLoss(
+    preserveEstablishedEdit = false,
+  ): void {
     stickyNoteDebouncerRef.current?.cancel()
     provisionalStickyNoteRef.current = null
-    establishedStickyNoteEditRef.current = null
     colorPickerStickyNoteIdRef.current = null
     cancelledProvisionalIdsRef.current.clear()
-    cancelledStickyNoteEditIdsRef.current.clear()
+    if (!preserveEstablishedEdit) {
+      cancelledStickyNoteEditIdsRef.current.clear()
+      cancelledStickyNoteEditRequestsRef.current.clear()
+    }
     boardSnapshotRef.current = null
+
+    const currentEdit = establishedStickyNoteEditRef.current
+    const preservedEdit = preserveEstablishedEdit && currentEdit
+      ? {
+          ...currentEdit,
+          status: "requesting" as const,
+          publicationRequested: false,
+          publishedText: undefined,
+          releaseSent: false,
+          claimRequestSent: false,
+          reconnecting: true,
+        }
+      : null
+    establishedStickyNoteEditRef.current = preservedEdit
     flushSync(() => {
       setProvisionalStickyNote(null)
-      setEstablishedStickyNoteEdit(null)
+      setEstablishedStickyNoteEdit(preservedEdit)
       setColorPickerStickyNoteId(null)
       setBoardSnapshot(null)
       setMode("navigate")
@@ -483,7 +507,11 @@ export function TerminalShell({
       return
     }
 
-    discardLocalBoardWorkAfterConnectionLoss()
+    const transient = state === "connecting" ||
+      state === "reconnecting" ||
+      state === "waking" ||
+      state === "unavailable"
+    discardLocalBoardWorkAfterConnectionLoss(transient)
     flushSync(() => {
       setBoardConnectionState(state)
       setBoardOpenPending(state === "connecting")
@@ -781,6 +809,8 @@ export function TerminalShell({
       publicationRequested: false,
       releaseRequested: false,
       releaseSent: false,
+      claimRequestSent: false,
+      reconnecting: false,
     }
     selectedStickyNoteIdRef.current = note.id
     establishedStickyNoteEditRef.current = edit
@@ -832,11 +862,17 @@ export function TerminalShell({
 
   const sendEstablishedStickyNoteRelease = (): boolean => {
     const edit = establishedStickyNoteEditRef.current
-    if (!edit?.claimId || edit.releaseSent) {
+    const connection = boardConnectionRef.current
+    if (
+      !edit?.claimId ||
+      edit.releaseSent ||
+      !connection ||
+      boardConnectionStateRef.current !== "connected"
+    ) {
       return false
     }
     try {
-      boardConnectionRef.current?.send({
+      connection.send({
         type: "release_sticky_note_edit",
         claimId: edit.claimId,
         stickyNoteId: edit.stickyNoteId,
@@ -870,7 +906,7 @@ export function TerminalShell({
     if (!afterFlush) {
       return
     }
-    if (!afterFlush.claimId) {
+    if (!afterFlush.claimId || afterFlush.status === "requesting" || afterFlush.reconnecting) {
       cancelledStickyNoteEditIdsRef.current.add(afterFlush.stickyNoteId)
       clearEstablishedStickyNoteEdit()
       return
@@ -888,7 +924,9 @@ export function TerminalShell({
       return
     }
 
-    sendEstablishedStickyNoteRelease()
+    if (!sendEstablishedStickyNoteRelease()) {
+      cancelledStickyNoteEditIdsRef.current.add(afterFlush.stickyNoteId)
+    }
     clearEstablishedStickyNoteEdit()
   }
 
@@ -936,6 +974,7 @@ export function TerminalShell({
     claimId: string
     stickyNote: StickyNote
   }) => {
+    cancelledStickyNoteEditRequestsRef.current.delete(claim.stickyNoteId)
     if (cancelledStickyNoteEditIdsRef.current.delete(claim.stickyNoteId)) {
       try {
         boardConnectionRef.current?.send({
@@ -951,25 +990,74 @@ export function TerminalShell({
 
     const edit = establishedStickyNoteEditRef.current
     if (!edit || edit.stickyNoteId !== claim.stickyNoteId) {
+      try {
+        boardConnectionRef.current?.send({
+          type: "release_sticky_note_edit",
+          claimId: claim.claimId,
+          stickyNoteId: claim.stickyNoteId,
+        })
+      } catch {
+        // A stale grant cannot be released after the socket has already moved on.
+      }
       return
     }
+    const wasReconnecting = edit.reconnecting
+    const previousClaimId = edit.claimId
     mergeStickyNoteIntoSnapshot(claim.stickyNote, boardSnapshotRef.current?.revision ?? 0)
-    const text = edit.dirty ? edit.text : claim.stickyNote.text
+    if (wasReconnecting && previousClaimId && previousClaimId !== claim.claimId) {
+      try {
+        boardConnectionRef.current?.send({
+          type: "release_sticky_note_edit",
+          claimId: claim.claimId,
+          stickyNoteId: claim.stickyNoteId,
+        })
+      } catch {
+        // The authoritative snapshot has already won; the service will fence this claim.
+      }
+      stickyNoteDebouncerRef.current?.cancel()
+      establishedStickyNoteEditRef.current = null
+      flushSync(() => {
+        setEstablishedStickyNoteEdit(null)
+        setMode("navigate")
+        setNotice({
+          kind: "error",
+          message: "Edit Claim was lost; authoritative Sticky Note text was reloaded.",
+        })
+      })
+      return
+    }
+
+    const text = wasReconnecting && edit.dirty && edit.text !== claim.stickyNote.text
+      ? edit.text
+      : claim.stickyNote.text
     const next: EstablishedStickyNoteEdit = {
       ...edit,
       claimId: claim.claimId,
       text,
       textVersion: claim.stickyNote.textVersion,
       status: "granted",
+      dirty: text !== claim.stickyNote.text,
       publicationRequested: false,
       publishedText: undefined,
+      claimRequestSent: false,
+      reconnecting: false,
     }
     establishedStickyNoteEditRef.current = next
-    flushSync(() => setEstablishedStickyNoteEdit(next))
+    flushSync(() => {
+      setEstablishedStickyNoteEdit(next)
+      if (wasReconnecting) {
+        setMode("edit")
+      }
+    })
     if (text !== claim.stickyNote.text) {
       stickyNoteDebouncerRef.current?.schedule(text)
     }
-    flushSync(() => setNotice({ kind: "status", message: "Sticky Note Edit Claim granted." }))
+    flushSync(() => setNotice({
+      kind: "status",
+      message: wasReconnecting
+        ? "Sticky Note Edit Claim restored; local draft preserved."
+        : "Sticky Note Edit Claim granted.",
+    }))
   }
 
   const mergeStickyNoteIntoSnapshot = (note: StickyNote, revision: number) => {
@@ -991,6 +1079,140 @@ export function TerminalShell({
     const nextSnapshot = { ...current, revision, stickyNotes: nextNotes }
     boardSnapshotRef.current = nextSnapshot
     flushSync(() => setBoardSnapshot(nextSnapshot))
+  }
+
+  const editClaimBelongsToAuthenticatedMember = (claim: BoardEditClaim): boolean =>
+    authenticatedUsernameRef.current !== null &&
+    claim.holder.username === authenticatedUsernameRef.current
+
+  const reconcileEstablishedStickyNoteEditFromSnapshot = (snapshot: BoardSnapshot): void => {
+    const edit = establishedStickyNoteEditRef.current
+    if (!edit?.reconnecting) {
+      return
+    }
+
+    const note = snapshot.stickyNotes?.find((currentNote) => currentNote.id === edit.stickyNoteId)
+    const claim = snapshot.editClaims?.find(
+      (currentClaim) => currentClaim.stickyNoteId === edit.stickyNoteId,
+    )
+
+    if (edit.releaseRequested) {
+      cancelledStickyNoteEditIdsRef.current.add(edit.stickyNoteId)
+      stickyNoteDebouncerRef.current?.cancel()
+      establishedStickyNoteEditRef.current = null
+      flushSync(() => {
+        setEstablishedStickyNoteEdit(null)
+        setMode("navigate")
+      })
+      return
+    }
+
+    if (!note || !claim || !editClaimBelongsToAuthenticatedMember(claim)) {
+      stickyNoteDebouncerRef.current?.cancel()
+      establishedStickyNoteEditRef.current = null
+      flushSync(() => {
+        setEstablishedStickyNoteEdit(null)
+        setMode("navigate")
+        setNotice({
+          kind: "error",
+          message: "Edit Claim was lost; authoritative Sticky Note text was reloaded.",
+        })
+      })
+      return
+    }
+
+    const text = edit.dirty && edit.text !== note.text ? edit.text : note.text
+    const next: EstablishedStickyNoteEdit = {
+      ...edit,
+      text,
+      textVersion: note.textVersion,
+      status: "requesting",
+      dirty: text !== note.text,
+      publicationRequested: false,
+      publishedText: undefined,
+      claimRequestSent: edit.claimRequestSent,
+      reconnecting: true,
+    }
+    establishedStickyNoteEditRef.current = next
+    flushSync(() => {
+      setEstablishedStickyNoteEdit(next)
+      setMode("navigate")
+      setNotice({ kind: "status", message: "Reconnected; restoring the Sticky Note Edit Claim…" })
+    })
+  }
+
+  const releaseCancelledEditClaimsAfterReconnect = (snapshot: BoardSnapshot): void => {
+    const connection = boardConnectionRef.current
+    if (!connection || boardConnectionStateRef.current !== "connected") {
+      return
+    }
+
+    for (const stickyNoteId of [...cancelledStickyNoteEditIdsRef.current]) {
+      const claim = snapshot.editClaims?.find(
+        (currentClaim) => currentClaim.stickyNoteId === stickyNoteId,
+      )
+      if (!claim) {
+        cancelledStickyNoteEditIdsRef.current.delete(stickyNoteId)
+        cancelledStickyNoteEditRequestsRef.current.delete(stickyNoteId)
+        continue
+      }
+      if (!editClaimBelongsToAuthenticatedMember(claim)) {
+        cancelledStickyNoteEditIdsRef.current.delete(stickyNoteId)
+        cancelledStickyNoteEditRequestsRef.current.delete(stickyNoteId)
+        continue
+      }
+      if (cancelledStickyNoteEditRequestsRef.current.has(stickyNoteId)) {
+        continue
+      }
+
+      cancelledStickyNoteEditRequestsRef.current.add(stickyNoteId)
+      try {
+        connection.send({ type: "begin_sticky_note_edit", stickyNoteId })
+      } catch {
+        cancelledStickyNoteEditRequestsRef.current.delete(stickyNoteId)
+      }
+    }
+  }
+
+  const requestEstablishedStickyNoteEditReclaim = (snapshot: BoardSnapshot): void => {
+    const edit = establishedStickyNoteEditRef.current
+    const connection = boardConnectionRef.current
+    if (
+      !edit?.reconnecting ||
+      edit.releaseRequested ||
+      edit.claimRequestSent ||
+      !connection ||
+      boardConnectionStateRef.current !== "connected" ||
+      cancelledStickyNoteEditIdsRef.current.has(edit.stickyNoteId)
+    ) {
+      return
+    }
+
+    const claim = snapshot.editClaims?.find(
+      (currentClaim) => currentClaim.stickyNoteId === edit.stickyNoteId,
+    )
+    if (!claim || !editClaimBelongsToAuthenticatedMember(claim)) {
+      return
+    }
+
+    const next = { ...edit, claimRequestSent: true }
+    establishedStickyNoteEditRef.current = next
+    flushSync(() => setEstablishedStickyNoteEdit(next))
+    try {
+      connection.send({
+        type: "begin_sticky_note_edit",
+        stickyNoteId: edit.stickyNoteId,
+      })
+    } catch (error) {
+      establishedStickyNoteEditRef.current = {
+        ...next,
+        claimRequestSent: false,
+      }
+      flushSync(() => {
+        setEstablishedStickyNoteEdit(establishedStickyNoteEditRef.current)
+        setNotice({ kind: "error", message: formatBoardError(error) })
+      })
+    }
   }
 
   const handleStickyNoteCreated = (event: {
@@ -1073,6 +1295,7 @@ export function TerminalShell({
     code: string
     error: string
     claimHolder?: { username: string }
+    claimConnection?: "connected" | "disconnected"
     authoritative?: { revision: number; stickyNote: StickyNote }
   }) => {
     if (commandError.code === "creation_claim_unavailable") {
@@ -1094,7 +1317,7 @@ export function TerminalShell({
         setNotice({
           kind: "error",
           message: commandError.claimHolder
-            ? `Edit Claim unavailable; holder: ${commandError.claimHolder.username}.`
+            ? `Edit Claim unavailable; holder: ${commandError.claimHolder.username} (${commandError.claimConnection ?? "connected"}).`
             : commandError.error,
         })
       })
@@ -1311,7 +1534,9 @@ export function TerminalShell({
     colorPickerStickyNoteIdRef.current = null
     releaseProvisionalStickyNote()
     const edit = establishedStickyNoteEditRef.current
-    if (edit?.claimId && !edit.releaseSent) {
+    if (edit && (edit.status === "requesting" || edit.reconnecting || !edit.claimId)) {
+      cancelledStickyNoteEditIdsRef.current.add(edit.stickyNoteId)
+    } else if (edit?.claimId && !edit.releaseSent) {
       try {
         boardConnectionRef.current?.send({
           type: "release_sticky_note_edit",
@@ -1341,7 +1566,9 @@ export function TerminalShell({
       stickyNoteDebouncerRef.current?.cancel()
       releaseProvisionalStickyNote()
       const edit = establishedStickyNoteEditRef.current
-      if (edit?.claimId && !edit.releaseSent) {
+      if (edit && (edit.status === "requesting" || edit.reconnecting || !edit.claimId)) {
+        cancelledStickyNoteEditIdsRef.current.add(edit.stickyNoteId)
+      } else if (edit?.claimId && !edit.releaseSent) {
         try {
           boardConnectionRef.current?.send({
             type: "release_sticky_note_edit",
@@ -1469,6 +1696,9 @@ export function TerminalShell({
             setBoardOpenPending(false)
             setNotice((current) => current?.kind === "error" ? current : null)
           })
+          reconcileEstablishedStickyNoteEditFromSnapshot(snapshot)
+          releaseCancelledEditClaimsAfterReconnect(snapshot)
+          requestEstablishedStickyNoteEditReclaim(snapshot)
         },
         onStickyNoteCreationClaimGranted: (claim) => {
           if (isCurrentBoardConnection()) {
@@ -1505,6 +1735,10 @@ export function TerminalShell({
             return
           }
           renderBoardConnectionState(state)
+          if (state === "connected" && boardSnapshotRef.current) {
+            releaseCancelledEditClaimsAfterReconnect(boardSnapshotRef.current)
+            requestEstablishedStickyNoteEditReclaim(boardSnapshotRef.current)
+          }
         },
         onError: (error) => {
           if (!isCurrentBoardConnection()) {
@@ -2723,6 +2957,18 @@ function CanvasSurface({
                 {presence.member.username} · {presence.activity}
               </text>
             ))}
+            {(snapshot.editClaims ?? []).some((claim) => claim.status === "disconnected") ? (
+              <>
+                <text fg={colors.text}>Edit Claims</text>
+                {(snapshot.editClaims ?? []).filter((claim) => claim.status === "disconnected").map((claim) => (
+                  <text key={claim.stickyNoteId} fg={claim.status === "disconnected" ? colors.warning : colors.muted}>
+                    Edit Claim · {claim.stickyNoteId} · {claim.holder.username} · {claim.status === "disconnected"
+                      ? "disconnected · grace active"
+                      : "connected"}
+                  </text>
+                ))}
+              </>
+            ) : null}
             <text fg={colors.accent}>
               Sticky Notes: {snapshot.stickyNotes?.length ?? 0} · {mode === "navigate"
                 ? selectedStickyNoteId

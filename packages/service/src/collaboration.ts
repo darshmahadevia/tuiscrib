@@ -3,6 +3,7 @@ import { randomBytes } from "node:crypto"
 import {
   boardCommandErrorSchema,
   boardCommandSchema,
+  boardEditClaimSchema,
   boardIdentifierSchema,
   boardOpenReadyResponseSchema,
   boardSnapshotSchema,
@@ -15,6 +16,7 @@ import {
   stickyNoteTextSchema,
   serviceErrorSchema,
   type BoardCommand,
+  type BoardEditClaim,
   type BoardSnapshot,
   type BoardOpenReadyResponse,
   type ServiceError,
@@ -38,6 +40,12 @@ import {
 import type { BoardUser } from "./boards.ts"
 
 const BOARD_COLLABORATION_PATH = /^\/boards\/([^/]+)\/collaboration$/
+export const EDIT_CLAIM_GRACE_MS = 30_000
+
+export type BoardCollaborationScheduler = {
+  schedule(callback: () => void, delayMs: number): unknown
+  cancel(handle: unknown): void
+}
 
 export type BoardCollaborationPersistence = Pick<Persistence, "openBoard"> &
   Partial<Pick<
@@ -108,15 +116,24 @@ type StickyNoteCreationClaim = {
 type StickyNoteEditClaim = {
   claimId: string
   boardId: string
-  connectionId: string
+  ownerSessionKey: string
+  holder: BoardUser
+  connectionId: string | null
   stickyNoteId: string
   status: "editing" | "publishing"
+  connectionState: "connected" | "disconnected"
+  graceHandle: unknown | null
+  graceToken: number
+  expiresAtMs: number | null
+  expired: boolean
+  invalidated: boolean
   releaseRequested?: boolean
 }
 
 export type BoardCollaborationOptions = {
   persistence: BoardCollaborationPersistence
   clock?: () => Date
+  scheduler?: BoardCollaborationScheduler
   stickyNoteIdGenerator?: () => string
   sessionAuthenticator?: (
     credential: string | null,
@@ -130,6 +147,7 @@ export function createBoardCollaboration(
   options: BoardCollaborationOptions,
 ): BoardCollaboration {
   const clock = options.clock ?? (() => new Date())
+  const scheduler = options.scheduler ?? defaultBoardCollaborationScheduler
   const authenticate = options.sessionAuthenticator ?? createSessionAuthenticator(options, clock)
   const authenticateActivity = options.sessionActivityAuthenticator ??
     createSessionActivityAuthenticator(options, clock)
@@ -173,6 +191,9 @@ export function createBoardCollaboration(
       }
 
       if (!authentication || "status" in authentication) {
+        if (credential) {
+          releaseClaimsForSession(hashCredential(credential))
+        }
         return serviceErrorResponse(401, {
           error: "Your Terminal Session is invalid. Sign in again.",
           code: "invalid_session",
@@ -192,6 +213,7 @@ export function createBoardCollaboration(
         return serviceErrorResponse(503, { error: "service unavailable" })
       }
       if (authorized.kind === "failure") {
+        releaseClaimsForSession(hashCredential(credential))
         return serviceErrorResponse(authorized.status, authorized.error)
       }
 
@@ -258,8 +280,8 @@ export function createBoardCollaboration(
         publicId: boardId,
       })
     } catch {
+      disconnect(socket, "authorization_lost")
       socket.close()
-      disconnect(socket)
       return
     }
 
@@ -267,16 +289,16 @@ export function createBoardCollaboration(
     try {
       refreshedBoard = await refreshedBoardPromise
     } catch {
+      disconnect(socket, "authorization_lost")
       socket.close()
-      disconnect(socket)
       return
     }
     if (
       refreshedBoard === null ||
       state.connections.get(connection.id) !== connection
     ) {
+      disconnect(socket, "authorization_lost")
       socket.close()
-      disconnect(socket)
       return
     }
 
@@ -288,7 +310,10 @@ export function createBoardCollaboration(
     broadcastSnapshot(state, connection.id)
   }
 
-  function disconnect(socket: BoardWebSocket): void {
+  function disconnect(
+    socket: BoardWebSocket,
+    reason: "transient" | "authorization_lost" = "transient",
+  ): void {
     const { boardId, connectionId, user } = socket.data
     const state = presenceByBoard.get(boardId)
     if (!state || !state.connections.delete(connectionId)) {
@@ -311,7 +336,11 @@ export function createBoardCollaboration(
     }
     for (const claim of editClaimsById.values()) {
       if (claim.connectionId === connectionId) {
-        removeEditClaim(claim)
+        if (reason === "authorization_lost") {
+          removeEditClaim(claim)
+        } else {
+          detachEditClaim(claim)
+        }
       }
     }
 
@@ -335,6 +364,7 @@ export function createBoardCollaboration(
       board: connection.board.board,
       revision: connection.board.revision,
       presence,
+      editClaims: editClaimsForBoard(connection.boardId),
       stickyNotes: connection.board.stickyNotes ?? [],
     })
   }
@@ -423,22 +453,27 @@ export function createBoardCollaboration(
 
   async function refreshHeartbeat(socket: BoardWebSocket): Promise<void> {
     if (!authenticateActivity) {
-      socket.close()
+      closeForAuthorizationLoss(socket)
       return
     }
     const credentialHash = socket.data.credentialHash
     if (!credentialHash) {
-      socket.close()
+      closeForAuthorizationLoss(socket)
       return
     }
     try {
       const authentication = await authenticateActivity(credentialHash)
       if (!authentication || "status" in authentication) {
-        socket.close()
+        closeForAuthorizationLoss(socket)
       }
     } catch {
-      socket.close()
+      closeForAuthorizationLoss(socket)
     }
+  }
+
+  function closeForAuthorizationLoss(socket: BoardWebSocket): void {
+    disconnect(socket, "authorization_lost")
+    socket.close()
   }
 
   function beginStickyNote(
@@ -619,30 +654,65 @@ export function createBoardCollaboration(
 
     const key = editClaimKey(socket.data.boardId, stickyNoteId)
     const existingClaimId = editClaimIdByKey.get(key)
-    if (existingClaimId) {
-      const existingClaim = editClaimsById.get(existingClaimId)
-      if (existingClaim?.connectionId === socket.data.connectionId) {
-        sendEditClaimAcknowledgement(socket, existingClaim, note)
-      } else {
-        const holderUsername = existingClaim
-          ? state?.connections.get(existingClaim.connectionId)?.user.username
-          : undefined
-        sendCommandError(
-          socket,
-          "edit_claim_unavailable",
-          "Another Terminal Session already holds this Edit Claim.",
-          holderUsername ? { claimHolder: { username: holderUsername } } : undefined,
-        )
+    const existingClaim = existingClaimId
+      ? editClaimsById.get(existingClaimId)
+      : undefined
+    if (existingClaim && claimHasExpired(existingClaim)) {
+      removeEditClaim(existingClaim)
+    }
+    const currentClaimId = editClaimIdByKey.get(key)
+    const currentClaim = currentClaimId ? editClaimsById.get(currentClaimId) : undefined
+    if (currentClaim) {
+      if (
+        currentClaim.ownerSessionKey === socket.data.credentialHash &&
+        currentClaim.status === "editing"
+      ) {
+        if (
+          currentClaim.connectionId !== null &&
+          currentClaim.connectionId !== socket.data.connectionId
+        ) {
+          setActivityForConnection(
+            socket.data.boardId,
+            currentClaim.connectionId,
+            "viewing",
+          )
+        }
+        reattachEditClaim(currentClaim, socket)
+        setActivity(socket, "editing")
+        broadcastPresenceForBoard(socket.data.boardId)
+        sendEditClaimAcknowledgement(socket, currentClaim, note)
+        return
       }
+
+      sendCommandError(
+        socket,
+        "edit_claim_unavailable",
+        "Another Terminal Session already holds this Edit Claim.",
+        {
+          claimHolder: { username: currentClaim.holder.username },
+          claimConnection: currentClaim.connectionState,
+          ...(currentClaim.expiresAtMs === null
+            ? {}
+            : { claimExpiresAt: new Date(currentClaim.expiresAtMs).toISOString() }),
+        },
+      )
       return
     }
 
     const claim: StickyNoteEditClaim = {
       claimId: crypto.randomUUID(),
       boardId: socket.data.boardId,
+      ownerSessionKey: socket.data.credentialHash,
+      holder: socket.data.user,
       connectionId: socket.data.connectionId,
       stickyNoteId,
       status: "editing",
+      connectionState: "connected",
+      graceHandle: null,
+      graceToken: 0,
+      expiresAtMs: null,
+      expired: false,
+      invalidated: false,
     }
     editClaimsById.set(claim.claimId, claim)
     editClaimIdByKey.set(key, claim.claimId)
@@ -659,6 +729,10 @@ export function createBoardCollaboration(
     if (
       !claim ||
       claim.connectionId !== socket.data.connectionId ||
+      claim.connectionState !== "connected" ||
+      claim.ownerSessionKey !== socket.data.credentialHash ||
+      claim.invalidated ||
+      claim.expired ||
       claim.boardId !== socket.data.boardId ||
       claim.stickyNoteId !== command.stickyNoteId ||
       claim.status !== "editing"
@@ -693,7 +767,9 @@ export function createBoardCollaboration(
           revision: result.revision,
           stickyNote: result.stickyNote,
         })
-        const releaseRequested = claim.releaseRequested === true
+        const releaseRequested = claim.releaseRequested === true ||
+          claim.expired ||
+          claim.invalidated
         if (releaseRequested) {
           removeEditClaim(claim)
         } else {
@@ -713,7 +789,9 @@ export function createBoardCollaboration(
         return
       }
 
-      const releaseRequested = claim.releaseRequested === true
+      const releaseRequested = claim.releaseRequested === true ||
+        claim.expired ||
+        claim.invalidated
       if (releaseRequested) {
         removeEditClaim(claim)
       } else {
@@ -802,6 +880,9 @@ export function createBoardCollaboration(
     if (
       !claim ||
       claim.connectionId !== socket.data.connectionId ||
+      claim.connectionState !== "connected" ||
+      claim.ownerSessionKey !== socket.data.credentialHash ||
+      claim.invalidated ||
       claim.boardId !== socket.data.boardId ||
       claim.stickyNoteId !== stickyNoteId
     ) {
@@ -823,12 +904,21 @@ export function createBoardCollaboration(
     socket: BoardWebSocket,
     activity: "viewing" | "creating" | "editing" | "moving",
   ): void {
-    const state = presenceByBoard.get(socket.data.boardId)
-    const member = state?.members.get(socket.data.user.id)
+    setActivityForConnection(socket.data.boardId, socket.data.connectionId, activity)
+  }
+
+  function setActivityForConnection(
+    boardId: string,
+    connectionId: string,
+    activity: "viewing" | "creating" | "editing" | "moving",
+  ): void {
+    const state = presenceByBoard.get(boardId)
+    const connection = state?.connections.get(connectionId)
+    const member = connection ? state?.members.get(connection.user.id) : undefined
     if (!member) {
       return
     }
-    member.activityByConnection.set(socket.data.connectionId, activity)
+    member.activityByConnection.set(connectionId, activity)
   }
 
   function removeCreationClaim(claim: StickyNoteCreationClaim): void {
@@ -842,12 +932,109 @@ export function createBoardCollaboration(
   }
 
   function removeEditClaim(claim: StickyNoteEditClaim): void {
+    if (claim.graceHandle !== null) {
+      scheduler.cancel(claim.graceHandle)
+      claim.graceHandle = null
+    }
     if (editClaimsById.get(claim.claimId) === claim) {
       editClaimsById.delete(claim.claimId)
     }
     const key = editClaimKey(claim.boardId, claim.stickyNoteId)
     if (editClaimIdByKey.get(key) === claim.claimId) {
       editClaimIdByKey.delete(key)
+    }
+  }
+
+  function detachEditClaim(claim: StickyNoteEditClaim): void {
+    if (editClaimsById.get(claim.claimId) !== claim || claim.invalidated) {
+      return
+    }
+    if (claim.graceHandle !== null) {
+      scheduler.cancel(claim.graceHandle)
+    }
+    claim.connectionId = null
+    claim.connectionState = "disconnected"
+    claim.expiresAtMs = clock().getTime() + EDIT_CLAIM_GRACE_MS
+    claim.expired = false
+    const graceToken = ++claim.graceToken
+    claim.graceHandle = scheduler.schedule(() => {
+      if (
+        editClaimsById.get(claim.claimId) !== claim ||
+        claim.graceToken !== graceToken ||
+        claim.connectionState !== "disconnected"
+      ) {
+        return
+      }
+      claim.graceHandle = null
+      claim.expired = true
+      if (claim.status === "publishing") {
+        return
+      }
+      removeEditClaim(claim)
+      broadcastPresenceForBoard(claim.boardId)
+    }, EDIT_CLAIM_GRACE_MS)
+  }
+
+  function reattachEditClaim(claim: StickyNoteEditClaim, socket: BoardWebSocket): void {
+    if (claim.graceHandle !== null) {
+      scheduler.cancel(claim.graceHandle)
+      claim.graceHandle = null
+    }
+    claim.connectionId = socket.data.connectionId
+    claim.connectionState = "connected"
+    claim.expiresAtMs = null
+    claim.expired = false
+    claim.graceToken += 1
+  }
+
+  function claimHasExpired(claim: StickyNoteEditClaim): boolean {
+    if (
+      claim.connectionState === "disconnected" &&
+      claim.expiresAtMs !== null &&
+      clock().getTime() >= claim.expiresAtMs
+    ) {
+      claim.expired = true
+    }
+    return claim.expired
+  }
+
+  function editClaimsForBoard(boardId: string): BoardEditClaim[] {
+    const claims: BoardEditClaim[] = []
+    for (const claim of editClaimsById.values()) {
+      if (claim.boardId !== boardId) {
+        continue
+      }
+      if (claimHasExpired(claim) && claim.status !== "publishing") {
+        removeEditClaim(claim)
+        continue
+      }
+      claims.push(boardEditClaimSchema.parse({
+        stickyNoteId: claim.stickyNoteId,
+        holder: { username: claim.holder.username },
+        status: claim.connectionState,
+        ...(claim.expiresAtMs === null
+          ? {}
+          : { expiresAt: new Date(claim.expiresAtMs).toISOString() }),
+      }))
+    }
+    return claims.sort((left, right) =>
+      left.stickyNoteId.localeCompare(right.stickyNoteId) ||
+      left.holder.username.localeCompare(right.holder.username),
+    )
+  }
+
+  function releaseClaimsForSession(sessionKey: string): void {
+    const affectedBoards = new Set<string>()
+    for (const claim of editClaimsById.values()) {
+      if (claim.ownerSessionKey !== sessionKey) {
+        continue
+      }
+      affectedBoards.add(claim.boardId)
+      claim.invalidated = true
+      removeEditClaim(claim)
+    }
+    for (const boardId of affectedBoards) {
+      broadcastPresenceForBoard(boardId)
     }
   }
 
@@ -1040,6 +1227,8 @@ export function createBoardCollaboration(
     error: string,
     details?: {
       claimHolder?: { username: string }
+      claimConnection?: "connected" | "disconnected"
+      claimExpiresAt?: string
       authoritative?: { revision: number; stickyNote: StickyNoteRecord }
     },
   ): void {
@@ -1192,4 +1381,13 @@ function serviceErrorResponse(status: number, error: ServiceError): Response {
       "content-type": "application/json",
     },
   })
+}
+
+const defaultBoardCollaborationScheduler: BoardCollaborationScheduler = {
+  schedule(callback, delayMs) {
+    return setTimeout(callback, delayMs)
+  },
+  cancel(handle) {
+    clearTimeout(handle as ReturnType<typeof setTimeout>)
+  },
 }

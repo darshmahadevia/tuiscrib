@@ -304,6 +304,10 @@ export class AcceptanceHarness {
     const collaboration = createBoardCollaboration({
       persistence: this.persistence,
       clock: () => new Date(this.clock.now()),
+      scheduler: {
+        schedule: (callback, delayMs) => this.clock.setTimeout(callback, delayMs),
+        cancel: (handle) => this.clock.clearTimeout(handle as number),
+      },
     })
     const app = createServiceApp({
       persistence: this.persistence,

@@ -102,6 +102,8 @@ export {
   stickyNoteEditClaimGrantedSchema,
   stickyNoteUpdatedSchema,
   stickyNoteRecoloredSchema,
+  boardEditClaimSchema,
+  editClaimConnectionSchema,
   boardCommandErrorCodeSchema,
   boardCommandErrorSchema,
   type StickyNoteColor,
@@ -121,5 +123,6 @@ export {
   type StickyNoteEditClaimGranted,
   type StickyNoteUpdated,
   type StickyNoteRecolored,
+  type BoardEditClaim,
   type BoardCommandError,
 } from "./sticky-notes.ts"

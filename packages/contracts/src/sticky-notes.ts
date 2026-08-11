@@ -195,6 +195,15 @@ export const stickyNoteRecoloredSchema = z.object({
   stickyNote: stickyNoteSchema,
 })
 
+export const editClaimConnectionSchema = z.enum(["connected", "disconnected"])
+
+export const boardEditClaimSchema = z.object({
+  stickyNoteId: boardIdentifierSchema,
+  holder: noteMemberSchema,
+  status: editClaimConnectionSchema,
+  expiresAt: isoTimestampSchema.optional(),
+})
+
 export const boardCommandErrorCodeSchema = z.enum([
   "invalid_command",
   "creation_claim_unavailable",
@@ -214,6 +223,8 @@ export const boardCommandErrorSchema = z.object({
   code: boardCommandErrorCodeSchema,
   error: z.string().min(1).max(200),
   claimHolder: z.object({ username: usernameSchema }).optional(),
+  claimConnection: editClaimConnectionSchema.optional(),
+  claimExpiresAt: isoTimestampSchema.optional(),
   authoritative: z.object({
     revision: z.number().int().nonnegative(),
     stickyNote: stickyNoteSchema,
@@ -237,4 +248,5 @@ export type StickyNoteCreated = z.infer<typeof stickyNoteCreatedSchema>
 export type StickyNoteEditClaimGranted = z.infer<typeof stickyNoteEditClaimGrantedSchema>
 export type StickyNoteUpdated = z.infer<typeof stickyNoteUpdatedSchema>
 export type StickyNoteRecolored = z.infer<typeof stickyNoteRecoloredSchema>
+export type BoardEditClaim = z.infer<typeof boardEditClaimSchema>
 export type BoardCommandError = z.infer<typeof boardCommandErrorSchema>

@@ -5,6 +5,8 @@ import type { BoardSummary } from "@tuiscrib/contracts"
 import {
   createBoardClient,
   type BoardClient,
+  type BoardSocket,
+  type BoardWebSocketFactory,
 } from "@tuiscrib/terminal"
 
 import {
@@ -402,6 +404,244 @@ test("reconnects two terminal clients from authoritative snapshots after a servi
     let matchedFrame: string | undefined
     await act(async () => {
       for (let attempt = 0; attempt < 500; attempt += 1) {
+        await Bun.sleep(5)
+        await client.setup.renderOnce()
+        lastFrame = client.setup.captureCharFrame()
+        if (predicate(lastFrame)) {
+          matchedFrame = lastFrame
+          return
+        }
+      }
+    })
+    if (matchedFrame !== undefined) {
+      return matchedFrame
+    }
+    throw new Error(`Timed out waiting for ${client.label} rendered frame\n${lastFrame}`)
+  }
+})
+
+test("preserves an Edit Claim draft through transient loss and clears it after a service restart", async () => {
+  if (!harness) {
+    throw new Error("acceptance harness did not start")
+  }
+  const activeHarness = harness
+  const ownerCredential = await registerUser("claim20_owner")
+  const memberCredential = await registerUser("claim20_member")
+  const created = await requestJson<{ board: BoardSummary; joinCode: string }>(
+    "/boards",
+    ownerCredential,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Edit Claim Recovery Board" }),
+    },
+  )
+  expect(created.status).toBe(201)
+  const joined = await requestJson<{ board: BoardSummary }>(
+    "/boards/join",
+    memberCredential,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ joinCode: created.body.joinCode }),
+    },
+  )
+  expect(joined.status).toBe(201)
+
+  const ownerSockets: BoardSocket[] = []
+  const ownerWebSocketFactory: BoardWebSocketFactory = (url, options) => {
+    const WebSocketConstructor = WebSocket as unknown as new (
+      url: string,
+      options: { headers: Record<string, string> },
+    ) => BoardSocket
+    const socket = new WebSocketConstructor(url, options)
+    ownerSockets.push(socket)
+    return socket
+  }
+  const scheduler = {
+    schedule: (callback: () => void, delayMs: number) => activeHarness.clock.setTimeout(callback, delayMs),
+    cancel: (handle: unknown) => activeHarness.clock.clearTimeout(handle as number),
+  }
+  const ownerBoardClient = createBoardClient(
+    activeHarness.baseUrl,
+    fetch,
+    ownerWebSocketFactory,
+    {
+      scheduler,
+      reconnectPolicy: () => 0,
+      heartbeatIntervalMs: 0,
+    },
+  )
+  const memberBoardClient = createBoardClient(
+    activeHarness.baseUrl,
+    fetch,
+    undefined,
+    {
+      scheduler,
+      reconnectPolicy: () => 0,
+      heartbeatIntervalMs: 0,
+    },
+  )
+  const owner = await activeHarness.addShellClient(
+    "claim20-owner",
+    createMemoryCredentialStore(ownerCredential, "memory://claim20/owner"),
+    ownerBoardClient,
+    scheduler,
+  )
+  const member = await activeHarness.addShellClient(
+    "claim20-member",
+    createMemoryCredentialStore(memberCredential, "memory://claim20/member"),
+    memberBoardClient,
+  )
+
+  try {
+    await waitForFrame(owner, (frame) => frame.includes("Terminal Session restored"))
+    await waitForFrame(member, (frame) => frame.includes("Terminal Session restored"))
+    await openSelectedBoard(owner, created.body.board.name)
+    await openSelectedBoard(member, created.body.board.name)
+    await waitForFrame(owner, (frame) => frame.includes("claim20_owner · viewing"))
+    await waitForFrame(member, (frame) => frame.includes("claim20_member · viewing"))
+
+    await act(async () => {
+      owner.setup.mockInput.pressKey("n")
+      await owner.setup.renderOnce()
+    })
+    await waitForFrame(owner, (frame) => frame.includes("Provisional Sticky Note"))
+    await act(async () => {
+      await owner.setup.mockInput.typeText("claim baseline")
+      activeHarness.clock.advance(150)
+      await owner.setup.renderOnce()
+    })
+    await waitForFrame(member, (frame) => frame.includes("claim baseline") && frame.includes("Board revision: 1"))
+
+    await act(async () => {
+      owner.setup.mockInput.pressEscape()
+      await owner.setup.renderOnce()
+    })
+    await waitForFrame(owner, (frame) => frame.includes("Navigate mode") && !frame.includes("Provisional Sticky Note"))
+
+    await act(async () => {
+      owner.setup.mockInput.pressEnter()
+      await owner.setup.renderOnce()
+    })
+    await waitForFrame(
+      owner,
+      (frame) => frame.includes("Edit mode · established text editing active") &&
+        frame.includes("Claim granted"),
+    )
+
+    await act(async () => {
+      await owner.setup.mockInput.typeText(" unsent draft")
+      await owner.setup.renderOnce()
+    })
+    const draftBeforeDisconnect = owner.setup.captureCharFrame()
+    expect(draftBeforeDisconnect).toContain("unsent draft")
+
+    await act(async () => {
+      ownerSockets[0]?.close()
+      await owner.setup.renderOnce()
+    })
+    const reconnecting = await waitForFrame(owner, (frame) => frame.includes("Connection: RECONNECTING"))
+    expect(reconnecting).toContain("Shared mutations disabled")
+    const disconnectedClaim = await waitForFrame(
+      member,
+      (frame) => frame.includes("claim20_owner · disconnected") && frame.includes("grace active"),
+    )
+    expect(disconnectedClaim).not.toContain("claim20_owner · editing")
+    expect(disconnectedClaim).not.toContain("unsent draft")
+
+    await act(async () => {
+      activeHarness.clock.advance(0)
+      await owner.setup.renderOnce()
+    })
+    const restored = await waitForFrame(
+      owner,
+      (frame) => frame.includes("Connection: CONNECTED") &&
+        frame.includes("Edit mode") &&
+        frame.includes("unsent draft"),
+    )
+    expect(restored).toContain("Connection: CONNECTED")
+    expect(restored).toContain("Edit mode · established text editing active")
+
+    await act(async () => {
+      activeHarness.clock.advance(150)
+      await owner.setup.renderOnce()
+    })
+    const committed = await waitForFrame(
+      member,
+      (frame) => frame.includes("claim baseline unsent draft") && frame.includes("Board revision: 2"),
+    )
+    expect(committed).toContain("Connection: CONNECTED")
+    await act(async () => {
+      activeHarness.clock.advance(100)
+      await member.setup.renderOnce()
+    })
+    expect(member.setup.captureCharFrame()).not.toContain("Board revision: 3")
+
+    await act(async () => {
+      await activeHarness.restartService()
+    })
+    await waitForFrame(owner, (frame) => frame.includes("Connection: RECONNECTING"))
+    await act(async () => {
+      activeHarness.clock.advance(0)
+      await owner.setup.renderOnce()
+      await member.setup.renderOnce()
+    })
+    const claimLost = await waitForFrame(
+      owner,
+      (frame) => frame.includes("Edit Claim was lost") && frame.includes("Connection: CONNECTED"),
+    )
+    expect(claimLost).toContain("authoritative Sticky Note text was")
+    expect(claimLost).toContain("reloaded")
+    expect(claimLost).not.toContain("Edit mode · established text editing active")
+    expect(claimLost).toContain("claim baseline unsent draft")
+  } finally {
+    await activeHarness.disposeClient(owner)
+    await activeHarness.disposeClient(member)
+  }
+
+  async function registerUser(username: string): Promise<string> {
+    const response = await fetch(`${activeHarness.baseUrl}/auth/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ username, password: "correct horse", confirmation: "correct horse" }),
+    })
+    expect(response.status).toBe(201)
+    return (await response.json() as { sessionCredential: string }).sessionCredential
+  }
+
+  async function requestJson<T>(
+    path: string,
+    credential: string,
+    init: RequestInit,
+  ): Promise<{ status: number; body: T }> {
+    const response = await fetch(`${activeHarness.baseUrl}${path}`, {
+      ...init,
+      headers: { authorization: `Bearer ${credential}`, ...init.headers },
+    })
+    return { status: response.status, body: await response.json() as T }
+  }
+
+  async function openSelectedBoard(client: TerminalClient, boardName: string): Promise<void> {
+    await act(async () => {
+      client.setup.mockInput.pressKey("b")
+      await client.setup.renderOnce()
+    })
+    await waitForFrame(client, (frame) => frame.includes("Board list") && frame.includes(boardName))
+    await act(async () => {
+      client.setup.mockInput.pressKey("o")
+      await client.setup.renderOnce()
+    })
+  }
+
+  async function waitForFrame(
+    client: TerminalClient,
+    predicate: (frame: string) => boolean,
+  ): Promise<string> {
+    let lastFrame = ""
+    let matchedFrame: string | undefined
+    await act(async () => {
+      for (let attempt = 0; attempt < 400; attempt += 1) {
         await Bun.sleep(5)
         await client.setup.renderOnce()
         lastFrame = client.setup.captureCharFrame()
