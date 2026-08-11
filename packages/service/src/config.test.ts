@@ -29,34 +29,41 @@ test("rejects missing DATABASE_URL without echoing a credential-bearing value", 
   }
 })
 
-test("requires a pooled Neon endpoint for hosted configuration", () => {
+test("requires a hosted pooled PostgreSQL endpoint for runtime configuration", () => {
   expect(() => loadServiceEnvironment({
     NODE_ENV: "production",
-    DATABASE_URL: "postgresql://tuiscrib:secret@ep-example.us-east-2.aws.neon.tech/tuiscrib?sslmode=require",
+    DATABASE_URL: "postgresql://postgres:secret@db.example.supabase.co:5432/postgres?sslmode=require",
   })).toThrow("pooled")
 
   const environment = loadServiceEnvironment({
     NODE_ENV: "production",
-    DATABASE_URL: "postgresql://tuiscrib:secret@ep-example-pooler.us-east-2.aws.neon.tech/tuiscrib?sslmode=require",
-    MIGRATION_DATABASE_URL: "postgresql://tuiscrib:secret@ep-example.us-east-2.aws.neon.tech/tuiscrib?sslmode=require",
+    DATABASE_URL: "postgresql://postgres:secret@aws-0-us-east-1.pooler.supabase.com:6543/postgres?sslmode=require",
+    MIGRATION_DATABASE_URL: "postgresql://postgres:secret@db.example.supabase.co:5432/postgres?sslmode=require",
   })
 
   expect(environment.requirePooledDatabaseUrl).toBe(true)
   expect(environment.databasePoolMax).toBe(4)
-  expect(environment.migrationDatabaseUrl).not.toContain("-pooler")
+  expect(environment.migrationDatabaseUrl).toContain("db.example.supabase.co")
 })
 
-test("requires a direct TLS endpoint for hosted migrations", () => {
+test("requires stable session semantics for hosted migrations", () => {
   expect(() => loadServiceEnvironment({
     NODE_ENV: "production",
-    DATABASE_URL: "postgresql://tuiscrib:secret@ep-example-pooler.us-east-2.aws.neon.tech/tuiscrib?sslmode=require",
+    DATABASE_URL: "postgresql://postgres:secret@aws-0-us-east-1.pooler.supabase.com:6543/postgres?sslmode=require",
   })).toThrow("MIGRATION_DATABASE_URL")
 
   expect(() => loadServiceEnvironment({
     NODE_ENV: "production",
-    DATABASE_URL: "postgresql://tuiscrib:secret@ep-example-pooler.us-east-2.aws.neon.tech/tuiscrib?sslmode=require",
-    MIGRATION_DATABASE_URL: "postgresql://tuiscrib:secret@ep-example-pooler.us-east-2.aws.neon.tech/tuiscrib?sslmode=require",
-  })).toThrow("direct")
+    DATABASE_URL: "postgresql://postgres:secret@aws-0-us-east-1.pooler.supabase.com:6543/postgres?sslmode=require",
+    MIGRATION_DATABASE_URL: "postgresql://postgres:secret@aws-0-us-east-1.pooler.supabase.com:6543/postgres?sslmode=require",
+  })).toThrow("transaction pooling")
+
+  const sessionPooledEnvironment = loadServiceEnvironment({
+    NODE_ENV: "production",
+    DATABASE_URL: "postgresql://postgres:secret@aws-0-us-east-1.pooler.supabase.com:6543/postgres?sslmode=require",
+    MIGRATION_DATABASE_URL: "postgresql://postgres:secret@aws-0-us-east-1.pooler.supabase.com:5432/postgres?sslmode=require",
+  })
+  expect(sessionPooledEnvironment.migrationDatabaseUrl).toContain(":5432/")
 })
 
 test("normalizes bounded runtime settings and migration mode", () => {
@@ -88,7 +95,7 @@ test("normalizes bounded runtime settings and migration mode", () => {
 
 test("redacts database URLs and bearer credentials from operational errors", () => {
   const message = redactServiceError(new Error(
-    "connect failed for postgresql://user:secret@ep-test-pooler.example.test/db?sslmode=require with Bearer abcdef123456",
+    "connect failed for postgresql://user:secret@aws-0-us-east-1.pooler.supabase.com:6543/postgres?sslmode=require with Bearer abcdef123456",
   ))
 
   expect(message).toContain("[redacted database URL]")

@@ -10,10 +10,12 @@ import {
 } from "./client.ts"
 
 const databaseUrl = process.env.TEST_DATABASE_URL ?? process.env.DATABASE_URL
+const migrationDatabaseUrl = process.env.TEST_MIGRATION_DATABASE_URL ?? databaseUrl
 const integrationTest = databaseUrl ? test : test.skip
 
 let persistence: Persistence | null = null
 let concurrentPersistence: Persistence | null = null
+let migrationPersistence: Persistence | null = null
 
 test("keeps the persistence pool within the migration-safe bounded range", () => {
   const options = { databaseUrl: "postgresql://postgres:postgres@127.0.0.1:5432/tuiscrib" }
@@ -28,13 +30,17 @@ beforeAll(async () => {
   }
   persistence = createPersistence({ databaseUrl, maxConnections: 4 })
   concurrentPersistence = createPersistence({ databaseUrl, maxConnections: 4 })
-  await persistence.migrate()
+  if (migrationDatabaseUrl) {
+    migrationPersistence = createPersistence({ databaseUrl: migrationDatabaseUrl, maxConnections: 4 })
+    await migrationPersistence.migrate()
+  }
   await persistence.reset()
 })
 
 afterAll(async () => {
   await concurrentPersistence?.close()
   await persistence?.close()
+  await migrationPersistence?.close()
 })
 
 integrationTest("creates a durable Sticky Note with attribution and one later Board revision", async () => {
@@ -101,15 +107,15 @@ integrationTest("creates a durable Sticky Note with attribution and one later Bo
   expect(opened?.stickyNotes).toHaveLength(1)
 })
 
-integrationTest("fails clearly when another process holds the migration lock", async () => {
-  if (!databaseUrl) {
-    throw new Error("database URL was not configured")
+integrationTest("fails clearly when another session holds the migration lock", async () => {
+  if (!migrationDatabaseUrl) {
+    throw new Error("migration database URL was not configured")
   }
 
-  const blocker = postgres(databaseUrl, { max: 1, prepare: false })
+  const blocker = postgres(migrationDatabaseUrl, { max: 1, prepare: false })
   const reserved = await blocker.reserve()
   const migrating = createPersistence({
-    databaseUrl,
+    databaseUrl: migrationDatabaseUrl,
     migrationLockTimeoutMs: 75,
     migrationLockPollMs: 10,
   })

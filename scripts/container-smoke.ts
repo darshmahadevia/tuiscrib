@@ -7,7 +7,6 @@ const suffix = crypto.randomUUID().replaceAll("-", "").slice(0, 12)
 const imageName = `tuiscrib-smoke:${suffix}`
 const networkName = `tuiscrib-smoke-${suffix}`
 const databaseContainer = `tuiscrib-smoke-db-${suffix}`
-const migrationContainer = `tuiscrib-smoke-migrate-${suffix}`
 const serviceContainer = `tuiscrib-smoke-service-${suffix}`
 let networkCreated = false
 let imageBuilt = false
@@ -31,17 +30,6 @@ async function main(): Promise<void> {
 
   const databaseUrl = `postgresql://postgres:tuiscrib-test@${databaseContainer}:5432/tuiscrib_test`
   await runProcess([
-    "docker", "run", "--rm", "--name", migrationContainer,
-    "--network", networkName,
-    "--env", `DATABASE_URL=${databaseUrl}`,
-    "--env", `MIGRATION_DATABASE_URL=${databaseUrl}`,
-    "--env", "NODE_ENV=development",
-    "--env", "DATABASE_POOL_MAX=4",
-    imageName,
-    "bun", "run", "service:migrate",
-  ])
-
-  await runProcess([
     "docker", "run", "--detach", "--name", serviceContainer,
     "--network", networkName,
     "--publish", "127.0.0.1::3000",
@@ -51,14 +39,14 @@ async function main(): Promise<void> {
     "--env", "HOST=0.0.0.0",
     "--env", "PORT=3000",
     "--env", "DATABASE_POOL_MAX=4",
-    "--env", "TUISCRIB_MIGRATIONS_PREDEPLOYED=true",
+    "--env", "TUISCRIB_MIGRATIONS_PREDEPLOYED=false",
     imageName,
   ])
   const port = await waitForPublishedPort()
   const baseUrl = `http://127.0.0.1:${port}`
   await waitForHealth(baseUrl)
   await runProcess(["bun", "scripts/hosted-smoke.ts", "--url", baseUrl], { cwd: repositoryDirectory })
-  console.log("Container smoke passed: image start, migration-before-traffic, health, WebSocket, and Postgres durability.")
+  console.log("Container smoke passed: image start, startup migration-before-traffic, health, WebSocket, and Postgres durability.")
 }
 
 async function waitForDatabase(): Promise<void> {

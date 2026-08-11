@@ -6,7 +6,6 @@ services:
     region: ohio
     dockerfilePath: ./Dockerfile
     dockerContext: .
-    preDeployCommand: bun run service:migrate
     healthCheckPath: /health
     autoDeployTrigger: commit
     envVars:
@@ -19,7 +18,7 @@ services:
       - key: TUISCRIB_REQUIRE_POOLED_DATABASE_URL
         value: "true"
       - key: TUISCRIB_MIGRATIONS_PREDEPLOYED
-        value: "true"
+        value: "false"
       - key: DATABASE_POOL_MAX
         value: "4"
       - key: DATABASE_CONNECT_TIMEOUT_SECONDS

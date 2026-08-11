@@ -182,8 +182,8 @@ function validateDatabaseUrl(
     issues.push("DATABASE_URL must include a host, username, and password.")
   }
 
-  if (requirePooledDatabaseUrl && !/-pooler(?:\.|$)/i.test(parsed.hostname)) {
-    issues.push("DATABASE_URL must use Neon's pooled endpoint (the hostname contains -pooler).")
+  if (requirePooledDatabaseUrl && !/pooler/i.test(parsed.hostname)) {
+    issues.push("DATABASE_URL must use a hosted pooled PostgreSQL endpoint (the hostname must identify a pooler).")
   }
   if (requirePooledDatabaseUrl && parsed.searchParams.get("sslmode")?.toLowerCase() !== "require") {
     issues.push("DATABASE_URL must require TLS with sslmode=require for hosted PostgreSQL.")
@@ -209,8 +209,8 @@ function validateMigrationDatabaseUrl(
   if (!parsed.hostname || !parsed.username || !parsed.password) {
     issues.push("MIGRATION_DATABASE_URL must include a host, username, and password.")
   }
-  if (/-pooler(?:\.|$)/i.test(parsed.hostname)) {
-    issues.push("MIGRATION_DATABASE_URL must use Neon's direct (non-pooled) endpoint for migrations.")
+  if (parsed.port === "6543") {
+    issues.push("MIGRATION_DATABASE_URL must not use transaction pooling on port 6543; use a direct endpoint or session pooling on port 5432.")
   }
   if (requireTls && parsed.searchParams.get("sslmode")?.toLowerCase() !== "require") {
     issues.push("MIGRATION_DATABASE_URL must require TLS with sslmode=require for hosted PostgreSQL.")

@@ -55,7 +55,7 @@ bun run build:release -- --all --output dist/releases
 
 ## Hosted deployment
 
-The first hosted two-user collaboration slice is defined by [`render.yaml`](render.yaml), [`Dockerfile`](Dockerfile), and [docs/deployment.md](docs/deployment.md). It uses one Render Free Bun/Hono service with HTTPS/WebSockets and a pooled Neon PostgreSQL runtime URL. Render's pre-deploy command uses a separate direct Neon URL to apply the current Drizzle migrations under a PostgreSQL advisory lock before the service starts accepting traffic; Neon transaction pooling does not support session-level migration locks.
+The first hosted two-user collaboration slice is defined by [`render.yaml`](render.yaml), [`Dockerfile`](Dockerfile), and [docs/deployment.md](docs/deployment.md). It uses one Render Free Bun/Hono service with HTTPS/WebSockets and hosted pooled PostgreSQL. Supabase PostgreSQL with Supavisor is the selected implementation. The service process uses a separate direct Supabase URL, or Supavisor session mode on port 5432 when direct access is unavailable, to apply the current Drizzle migrations under a PostgreSQL advisory lock before it binds the public port; transaction pooling on port 6543 is never used for migrations.
 
 Build and verify the local image plus a disposable PostgreSQL instance with:
 
@@ -63,7 +63,7 @@ Build and verify the local image plus a disposable PostgreSQL instance with:
 bun run smoke:container
 ```
 
-After a real Render service and Neon database are provisioned, verify the public URL with:
+After a real Render service and Supabase project are provisioned, verify the public URL with:
 
 ```bash
 TUISCRIB_SMOKE_REQUIRE_HTTPS=true \
