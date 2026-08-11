@@ -74,6 +74,7 @@ type ActiveConnection = {
   board: OpenBoardRecord
   user: BoardUser
   socket: BoardWebSocket
+  ready: boolean
 }
 
 type BoardPresenceState = {
@@ -188,7 +189,7 @@ export function createBoardCollaboration(
     websocket: {
       data: {} as BoardWebSocketData,
       open(socket) {
-        connect(socket)
+        void connect(socket)
       },
       close(socket) {
         disconnect(socket)
@@ -199,7 +200,7 @@ export function createBoardCollaboration(
     },
   }
 
-  function connect(socket: BoardWebSocket): void {
+  async function connect(socket: BoardWebSocket): Promise<void> {
     const { boardId, board, user, connectionId } = socket.data
     const connection: ActiveConnection = {
       id: connectionId,
@@ -207,6 +208,7 @@ export function createBoardCollaboration(
       board,
       user,
       socket,
+      ready: false,
     }
     const state = presenceByBoard.get(boardId) ?? {
       connections: new Map<string, ActiveConnection>(),
@@ -228,6 +230,39 @@ export function createBoardCollaboration(
     state.members.set(user.id, member)
     presenceByBoard.set(boardId, state)
 
+    let refreshedBoardPromise: Promise<OpenBoardRecord | null>
+    try {
+      refreshedBoardPromise = options.persistence.openBoard({
+        userId: user.id,
+        publicId: boardId,
+      })
+    } catch {
+      socket.close()
+      disconnect(socket)
+      return
+    }
+
+    let refreshedBoard: OpenBoardRecord | null
+    try {
+      refreshedBoard = await refreshedBoardPromise
+    } catch {
+      socket.close()
+      disconnect(socket)
+      return
+    }
+    if (
+      refreshedBoard === null ||
+      state.connections.get(connection.id) !== connection
+    ) {
+      socket.close()
+      disconnect(socket)
+      return
+    }
+
+    if (refreshedBoard.revision >= connection.board.revision) {
+      connection.board = refreshedBoard
+    }
+    connection.ready = true
     sendSnapshot(connection, state)
     broadcastSnapshot(state, connection.id)
   }
@@ -289,7 +324,7 @@ export function createBoardCollaboration(
 
   function broadcastSnapshot(state: BoardPresenceState, excludedConnectionId?: string): void {
     for (const connection of state.connections.values()) {
-      if (connection.id !== excludedConnectionId) {
+      if (connection.id !== excludedConnectionId && connection.ready) {
         sendSnapshot(connection, state)
       }
     }
@@ -311,6 +346,12 @@ export function createBoardCollaboration(
         return
       }
       sendCommandError(socket, "invalid_command", "The Board command was invalid.")
+      return
+    }
+
+    const state = presenceByBoard.get(socket.data.boardId)
+    const connection = state?.connections.get(socket.data.connectionId)
+    if (!connection?.ready) {
       return
     }
 
@@ -765,7 +806,9 @@ export function createBoardCollaboration(
   ): void {
     const serialized = JSON.stringify(event)
     for (const connection of state.connections.values()) {
-      connection.socket.send(serialized)
+      if (connection.ready) {
+        connection.socket.send(serialized)
+      }
     }
   }
 
@@ -775,7 +818,9 @@ export function createBoardCollaboration(
   ): void {
     const serialized = JSON.stringify(event)
     for (const connection of state.connections.values()) {
-      connection.socket.send(serialized)
+      if (connection.ready) {
+        connection.socket.send(serialized)
+      }
     }
   }
 

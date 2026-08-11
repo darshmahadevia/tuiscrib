@@ -18,6 +18,7 @@ import {
   ServiceRequestError,
   type AuthClient,
   type BoardConnection,
+  type BoardConnectionState,
   type BoardClient,
 } from "./client.ts"
 import {
@@ -255,6 +256,7 @@ export function TerminalShell({
   const [boardsPending, setBoardsPending] = useState(false)
   const [boardCodeNotice, setBoardCodeNotice] = useState<BoardCodeNotice | null>(null)
   const [boardSnapshot, setBoardSnapshot] = useState<BoardSnapshot | null>(null)
+  const [boardConnectionState, setBoardConnectionState] = useState<BoardConnectionState | null>(null)
   const [canvasCursor, setCanvasCursor] = useState<StickyNotePosition>({ x: 0, y: 0 })
   const [selectedStickyNoteId, setSelectedStickyNoteId] = useState<string | null>(null)
   const [provisionalStickyNote, setProvisionalStickyNote] =
@@ -281,6 +283,8 @@ export function TerminalShell({
   const boardActionPendingRef = useRef(boardActionPending)
   const boardConnectionRef = useRef<BoardConnection | null>(null)
   const activeBoardIdRef = useRef<string | null>(null)
+  const boardConnectionGenerationRef = useRef(0)
+  const boardConnectionStateRef = useRef<BoardConnectionState | null>(boardConnectionState)
   const boardSnapshotRef = useRef<BoardSnapshot | null>(boardSnapshot)
   const canvasCursorRef = useRef(canvasCursor)
   const selectedStickyNoteIdRef = useRef<string | null>(selectedStickyNoteId)
@@ -301,6 +305,7 @@ export function TerminalShell({
   signOutPendingRef.current = signOutPending
   confirmationActionRef.current = confirmationAction
   boardActionPendingRef.current = boardActionPending
+  boardConnectionStateRef.current = boardConnectionState
   boardSnapshotRef.current = boardSnapshot
   canvasCursorRef.current = canvasCursor
   selectedStickyNoteIdRef.current = selectedStickyNoteId
@@ -395,10 +400,58 @@ export function TerminalShell({
     flushSync(() => setEstablishedStickyNoteEdit(next))
   }
 
+  function sharedBoardMutationsEnabled(): boolean {
+    return !boardClient?.openBoard || boardConnectionStateRef.current === "connected"
+  }
+
+  function discardLocalBoardWorkAfterConnectionLoss(): void {
+    stickyNoteDebouncerRef.current?.cancel()
+    provisionalStickyNoteRef.current = null
+    establishedStickyNoteEditRef.current = null
+    cancelledProvisionalIdsRef.current.clear()
+    cancelledStickyNoteEditIdsRef.current.clear()
+    boardSnapshotRef.current = null
+    selectedStickyNoteIdRef.current = null
+    flushSync(() => {
+      setProvisionalStickyNote(null)
+      setEstablishedStickyNoteEdit(null)
+      setBoardSnapshot(null)
+      setSelectedStickyNoteId(null)
+      setMode("navigate")
+    })
+  }
+
+  function renderBoardConnectionState(state: BoardConnectionState): void {
+    boardConnectionStateRef.current = state
+    if (state === "connected") {
+      flushSync(() => {
+        setBoardConnectionState(state)
+        setBoardOpenPending(false)
+      })
+      return
+    }
+
+    discardLocalBoardWorkAfterConnectionLoss()
+    flushSync(() => {
+      setBoardConnectionState(state)
+      setBoardOpenPending(state === "connecting")
+      if (state === "reconnecting") {
+        setNotice({ kind: "status", message: "Reconnecting to the Tuiscrib Service…" })
+      }
+    })
+  }
+
   function publishFirstStickyNoteSnapshot(text: string) {
     const draft = provisionalStickyNoteRef.current
     const connection = boardConnectionRef.current
-    if (!draft || !connection || !draft.claimId || draft.publicationRequested || text.length === 0) {
+    if (
+      !sharedBoardMutationsEnabled() ||
+      !draft ||
+      !connection ||
+      !draft.claimId ||
+      draft.publicationRequested ||
+      text.length === 0
+    ) {
       return
     }
     if (draft.status === "requesting") {
@@ -432,6 +485,7 @@ export function TerminalShell({
     const edit = establishedStickyNoteEditRef.current
     const connection = boardConnectionRef.current
     if (
+      !sharedBoardMutationsEnabled() ||
       !edit ||
       !connection ||
       !edit.claimId ||
@@ -531,6 +585,12 @@ export function TerminalShell({
     if (provisionalStickyNoteRef.current || establishedStickyNoteEditRef.current) {
       return
     }
+    if (!sharedBoardMutationsEnabled()) {
+      flushSync(() => {
+        setNotice({ kind: "error", message: "Shared mutations are disabled while the Board reconnects." })
+      })
+      return
+    }
     const connection = boardConnectionRef.current
     if (!connection) {
       flushSync(() => {
@@ -572,6 +632,12 @@ export function TerminalShell({
 
   const startEstablishedStickyNoteEdit = () => {
     if (provisionalStickyNoteRef.current || establishedStickyNoteEditRef.current) {
+      return
+    }
+    if (!sharedBoardMutationsEnabled()) {
+      flushSync(() => {
+        setNotice({ kind: "error", message: "Shared mutations are disabled while the Board reconnects." })
+      })
       return
     }
     const connection = boardConnectionRef.current
@@ -972,6 +1038,9 @@ export function TerminalShell({
   }
 
   const handleProvisionalStickyNoteTextChange = (text: string): boolean => {
+    if (!sharedBoardMutationsEnabled()) {
+      return false
+    }
     const validation = validateStickyNoteEditorText(text)
     if (!validation.accepted) {
       flushSync(() => {
@@ -992,6 +1061,9 @@ export function TerminalShell({
   }
 
   const handleEstablishedStickyNoteTextChange = (text: string): boolean => {
+    if (!sharedBoardMutationsEnabled()) {
+      return false
+    }
     const validation = validateStickyNoteEditorText(text)
     if (!validation.accepted) {
       flushSync(() => setNotice({ kind: "error", message: validation.error }))
@@ -1092,6 +1164,7 @@ export function TerminalShell({
   }
 
   const closeBoardConnection = () => {
+    boardConnectionGenerationRef.current += 1
     stickyNoteDebouncerRef.current?.cancel()
     releaseProvisionalStickyNote()
     const edit = establishedStickyNoteEditRef.current
@@ -1108,11 +1181,13 @@ export function TerminalShell({
     }
     establishedStickyNoteEditRef.current = null
     cancelledStickyNoteEditIdsRef.current.clear()
+    boardConnectionStateRef.current = null
     flushSync(() => setEstablishedStickyNoteEdit(null))
     activeBoardIdRef.current = null
     const connection = boardConnectionRef.current
     boardConnectionRef.current = null
     connection?.close()
+    flushSync(() => setBoardConnectionState(null))
   }
 
   useEffect(() => {
@@ -1132,8 +1207,11 @@ export function TerminalShell({
         }
       }
       activeBoardIdRef.current = null
+      boardConnectionGenerationRef.current += 1
+      boardConnectionStateRef.current = null
       boardConnectionRef.current?.close()
       boardConnectionRef.current = null
+      flushSync(() => setBoardConnectionState(null))
     }
   }, [])
 
@@ -1192,12 +1270,18 @@ export function TerminalShell({
     }
 
     closeBoardConnection()
+    const connectionGeneration = boardConnectionGenerationRef.current
     activeBoardIdRef.current = board.id
+    const isCurrentBoardConnection = () =>
+      activeBoardIdRef.current === board.id &&
+      boardConnectionGenerationRef.current === connectionGeneration
     flushSync(() => {
       setView("canvas")
       setMode("navigate")
       boardSnapshotRef.current = null
       setBoardSnapshot(null)
+      boardConnectionStateRef.current = "connecting"
+      setBoardConnectionState("connecting")
       selectedStickyNoteIdRef.current = null
       setSelectedStickyNoteId(null)
       establishedStickyNoteEditRef.current = null
@@ -1209,9 +1293,10 @@ export function TerminalShell({
     try {
       const connection = await openBoard(credential, board.id, {
         onSnapshot: (snapshot) => {
-          if (activeBoardIdRef.current !== board.id) {
+          if (!isCurrentBoardConnection()) {
             return
           }
+          boardConnectionStateRef.current = "connected"
           boardSnapshotRef.current = snapshot
           const selectedStillExists = selectedStickyNoteIdRef.current && snapshot.stickyNotes?.some(
             (note) => note.id === selectedStickyNoteIdRef.current,
@@ -1226,57 +1311,73 @@ export function TerminalShell({
           selectedStickyNoteIdRef.current = nextSelectedStickyNoteId
           flushSync(() => {
             setBoardSnapshot(snapshot)
+            setBoardConnectionState("connected")
             setSelectedStickyNoteId(nextSelectedStickyNoteId)
             setBoardOpenPending(false)
             setNotice((current) => current?.kind === "error" ? current : null)
           })
         },
-        onStickyNoteCreationClaimGranted: handleStickyNoteCreationClaimGranted,
-        onStickyNoteCreated: handleStickyNoteCreated,
-        onStickyNoteEditClaimGranted: handleStickyNoteEditClaimGranted,
-        onStickyNoteUpdated: handleStickyNoteUpdated,
-        onCommandError: handleStickyNoteCommandError,
+        onStickyNoteCreationClaimGranted: (claim) => {
+          if (isCurrentBoardConnection()) {
+            handleStickyNoteCreationClaimGranted(claim)
+          }
+        },
+        onStickyNoteCreated: (event) => {
+          if (isCurrentBoardConnection()) {
+            handleStickyNoteCreated(event)
+          }
+        },
+        onStickyNoteEditClaimGranted: (claim) => {
+          if (isCurrentBoardConnection()) {
+            handleStickyNoteEditClaimGranted(claim)
+          }
+        },
+        onStickyNoteUpdated: (event) => {
+          if (isCurrentBoardConnection()) {
+            handleStickyNoteUpdated(event)
+          }
+        },
+        onCommandError: (commandError) => {
+          if (isCurrentBoardConnection()) {
+            handleStickyNoteCommandError(commandError)
+          }
+        },
+        onConnectionState: (state) => {
+          if (!isCurrentBoardConnection()) {
+            return
+          }
+          renderBoardConnectionState(state)
+        },
         onError: (error) => {
-          if (activeBoardIdRef.current !== board.id) {
+          if (!isCurrentBoardConnection()) {
             return
           }
           flushSync(() => {
-            setBoardSnapshot(null)
-            setBoardOpenPending(false)
             setNotice({ kind: "error", message: formatBoardError(error) })
           })
         },
         onClose: () => {
-          if (activeBoardIdRef.current !== board.id) {
+          if (!isCurrentBoardConnection()) {
             return
           }
-          flushSync(() => {
-            setBoardSnapshot(null)
-            setBoardOpenPending(false)
-            setNotice({
-              kind: "error",
-              message: "Board collaboration disconnected. Return to the Board list and reopen it.",
-            })
-          })
+          renderBoardConnectionState("reconnecting")
         },
       })
-      if (activeBoardIdRef.current !== board.id) {
+      if (!isCurrentBoardConnection()) {
         connection.close()
         return
       }
       boardConnectionRef.current = connection
     } catch (error) {
-      if (activeBoardIdRef.current !== board.id) {
+      if (!isCurrentBoardConnection()) {
         return
       }
       flushSync(() => {
-        setView("boards")
         setMode("navigate")
-        setBoardSnapshot(null)
         setBoardOpenPending(false)
+        setBoardConnectionState(boardConnectionStateRef.current ?? "unavailable")
         setNotice({ kind: "error", message: formatBoardError(error) })
       })
-      activeBoardIdRef.current = null
     }
   }
 
@@ -1800,6 +1901,20 @@ export function TerminalShell({
     }
 
     if (viewRef.current === "canvas") {
+      if (!sharedBoardMutationsEnabled()) {
+        if (key.name === "escape") {
+          openView("boards")
+          return
+        }
+        if (key.name === "?") {
+          flushSync(() => setOverlay("help"))
+          return
+        }
+        if (key.name === "q") {
+          renderer.destroy()
+        }
+        return
+      }
       if (modeRef.current === "navigate") {
         if (key.name === "n") {
           startProvisionalStickyNote()
@@ -1967,6 +2082,7 @@ export function TerminalShell({
       boardActionPendingRef.current ||
       viewRef.current !== "canvas" ||
       modeRef.current !== "edit" ||
+      !sharedBoardMutationsEnabled() ||
       (!provisionalStickyNoteRef.current && !establishedStickyNoteEditRef.current)
     ) {
       return
@@ -2002,6 +2118,7 @@ export function TerminalShell({
     <CanvasSurface
       mode={mode}
       snapshot={boardSnapshot}
+      connectionState={boardConnectionState}
       pending={boardOpenPending}
       error={notice?.kind === "error" ? notice.message : undefined}
       status={notice?.kind === "status" ? notice.message : undefined}
@@ -2298,6 +2415,7 @@ function ShellConfirmation({ action }: { action: ConfirmationAction }) {
 function CanvasSurface({
   mode,
   snapshot,
+  connectionState,
   pending,
   error,
   status,
@@ -2310,6 +2428,7 @@ function CanvasSurface({
 }: {
   mode: ShellMode
   snapshot: BoardSnapshot | null
+  connectionState: BoardConnectionState | null
   pending: boolean
   error?: string
   status?: string
@@ -2341,7 +2460,35 @@ function CanvasSurface({
         }}
       >
         <text fg={colors.text}>Board canvas</text>
-        {pending ? (
+        {connectionState === "reconnecting" ? (
+          <>
+            <text fg={colors.warning}>Connection: RECONNECTING</text>
+            <text fg={colors.muted}>No offline Board state is retained.</text>
+            <text fg={colors.warning}>Shared mutations disabled until a fresh snapshot arrives.</text>
+            {error ? <text fg={colors.error}>Error: {error}</text> : null}
+          </>
+        ) : connectionState === "unavailable" ? (
+          <>
+            <text fg={colors.error}>Connection: UNAVAILABLE</text>
+            <text fg={colors.muted}>The Tuiscrib Service is unavailable.</text>
+            <text fg={colors.warning}>Retrying with bounded backoff; shared mutations disabled.</text>
+            {error ? <text fg={colors.error}>Error: {error}</text> : null}
+          </>
+        ) : connectionState === "unauthorized" ? (
+          <>
+            <text fg={colors.error}>Connection: UNAUTHORIZED</text>
+            <text fg={colors.muted}>This Terminal Session is unauthorized.</text>
+            <text fg={colors.warning}>Sign in again; shared mutations disabled.</text>
+            {error ? <text fg={colors.error}>Error: {error}</text> : null}
+          </>
+        ) : connectionState === "closed" ? (
+          <>
+            <text fg={colors.error}>Connection: CLOSED</text>
+            <text fg={colors.muted}>Board collaboration is no longer available.</text>
+            <text fg={colors.warning}>Shared mutations disabled.</text>
+            {error ? <text fg={colors.error}>Error: {error}</text> : null}
+          </>
+        ) : connectionState === "connecting" || pending ? (
           <>
             <text fg={colors.accent}>Opening Board over WebSocket…</text>
             <text fg={colors.muted}>Loading one authoritative snapshot.</text>
@@ -2350,6 +2497,7 @@ function CanvasSurface({
           <text fg={colors.error}>Error: {error}</text>
         ) : snapshot ? (
           <>
+            <text fg={colors.success}>Connection: CONNECTED</text>
             <text fg={colors.text}>Board: {snapshot.board.name}</text>
             <text fg={colors.accent}>Board revision: {snapshot.revision}</text>
             <text fg={colors.muted}>

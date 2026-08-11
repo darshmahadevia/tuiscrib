@@ -78,10 +78,31 @@ export type BoardWebSocketFactory = (
   options: { headers: Record<string, string> },
 ) => BoardSocket
 
+export type BoardConnectionState =
+  | "connecting"
+  | "connected"
+  | "reconnecting"
+  | "unavailable"
+  | "unauthorized"
+  | "closed"
+
+export type BoardConnectionScheduler = {
+  schedule(callback: () => void, delayMs: number): unknown
+  cancel(handle: unknown): void
+}
+
+export type BoardReconnectPolicy = (attempt: number) => number
+
+export type BoardClientOptions = {
+  scheduler?: BoardConnectionScheduler
+  reconnectPolicy?: BoardReconnectPolicy
+}
+
 export type BoardConnectionHandlers = {
   onSnapshot(snapshot: BoardSnapshot): void
   onError(error: Error): void
   onClose(): void
+  onConnectionState?(state: BoardConnectionState): void
   onStickyNoteCreationClaimGranted?(claim: StickyNoteCreationClaimGranted): void
   onStickyNoteCreated?(event: StickyNoteCreated): void
   onStickyNoteEditClaimGranted?(claim: StickyNoteEditClaimGranted): void
@@ -92,6 +113,15 @@ export type BoardConnectionHandlers = {
 export type BoardConnection = {
   send(command: BoardCommand): void
   close(): void
+}
+
+type BoardSocketGeneration = {
+  id: number
+  socket: BoardSocket
+  awaitingSnapshot: boolean
+  lastRevision: number | null
+  pendingEvents: Map<number, StickyNoteCreated | StickyNoteUpdated>
+  ending: boolean
 }
 
 export class ServiceRequestError extends Error {
@@ -199,7 +229,11 @@ export function createBoardClient(
   baseUrl: string,
   fetcher: Fetcher = fetch,
   webSocketFactory: BoardWebSocketFactory = defaultBoardWebSocketFactory,
+  options: BoardClientOptions = {},
 ): BoardClient {
+  const scheduler = options.scheduler ?? defaultBoardConnectionScheduler
+  const reconnectPolicy = options.reconnectPolicy ?? createBoundedReconnectPolicy()
+
   return {
     createBoard(credential, input) {
       return requestBoard("POST", credential, input, createBoardResponseSchema)
@@ -252,44 +286,144 @@ export function createBoardClient(
         `/boards/${encodeURIComponent(boardId)}/collaboration`,
         baseUrl,
       )
-      await requestBoard(
-        "GET",
-        credential,
-        undefined,
-        boardOpenReadyResponseSchema,
-        httpUrl,
-      )
 
-      const socket = webSocketFactory(toWebSocketUrl(httpUrl), {
-        headers: { authorization: `Bearer ${credential}` },
-      })
       let closedByCaller = false
-      let lastRevision: number | null = null
-      socket.onmessage = (event) => {
+      let nextGeneration = 0
+      let activeGeneration: BoardSocketGeneration | null = null
+      let retryHandle: unknown | null = null
+      let reconnectAttempt = 0
+
+      const connection: BoardConnection = {
+        send(command) {
+          const parsed = boardCommandSchema.parse(command)
+          const generation = activeGeneration
+          if (closedByCaller) {
+            throw new Error("Board collaboration is closed.")
+          }
+          if (!generation || generation.awaitingSnapshot) {
+            throw new Error("Board collaboration is not connected; shared mutations are disabled.")
+          }
+          generation.socket.send(JSON.stringify(parsed))
+        },
+        close() {
+          if (closedByCaller) {
+            return
+          }
+          closedByCaller = true
+          nextGeneration += 1
+          if (retryHandle !== null) {
+            scheduler.cancel(retryHandle)
+            retryHandle = null
+          }
+          const generation = activeGeneration
+          activeGeneration = null
+          generation?.socket.close()
+          handlers.onConnectionState?.("closed")
+        },
+      }
+
+      handlers.onConnectionState?.("connecting")
+      await connect(true)
+      return connection
+
+      async function connect(initial: boolean): Promise<void> {
+        if (closedByCaller) {
+          return
+        }
+
+        const generationId = ++nextGeneration
+        if (!initial) {
+          handlers.onConnectionState?.("reconnecting")
+        }
+        try {
+          await requestBoard(
+            "GET",
+            credential,
+            undefined,
+            boardOpenReadyResponseSchema,
+            httpUrl,
+          )
+        } catch (error) {
+          if (closedByCaller || generationId !== nextGeneration) {
+            return
+          }
+          if (initial) {
+            reportInitialFailure(error)
+            throw error
+          }
+          handleRetryFailure(generationId, error)
+          return
+        }
+
+        if (closedByCaller || generationId !== nextGeneration) {
+          return
+        }
+
+        let socket: BoardSocket
+        try {
+          socket = webSocketFactory(toWebSocketUrl(httpUrl), {
+            headers: { authorization: `Bearer ${credential}` },
+          })
+        } catch (error) {
+          if (!initial) {
+            handleRetryFailure(generationId, error)
+            return
+          }
+          reportInitialFailure(error)
+          throw error
+        }
+
+        const generation: BoardSocketGeneration = {
+          id: generationId,
+          socket,
+          awaitingSnapshot: true,
+          lastRevision: null,
+          pendingEvents: new Map(),
+          ending: false,
+        }
+        activeGeneration = generation
+        socket.onmessage = (event) => handleMessage(generation, event)
+        socket.onerror = () => {
+          if (!isCurrent(generation) || generation.ending) {
+            return
+          }
+          finishGenerationForRetry(
+            generation,
+            new Error("Board collaboration is unavailable."),
+          )
+        }
+        socket.onclose = () => {
+          if (!isCurrent(generation) || generation.ending) {
+            return
+          }
+          finishGenerationForRetry(generation)
+        }
+      }
+
+      function handleMessage(
+        generation: BoardSocketGeneration,
+        event: { data: unknown },
+      ): void {
+        if (!isCurrent(generation)) {
+          return
+        }
+
         let payload: unknown
         try {
           payload = JSON.parse(decodeSocketMessage(event.data))
         } catch {
-          closedByCaller = true
-          handlers.onError(new Error("Board collaboration sent an invalid snapshot."))
-          socket.close()
+          terminateForProtocolError(generation)
           return
         }
 
         const parsed = boardSocketMessageSchema.safeParse(payload)
         if (!parsed.success) {
-          closedByCaller = true
-          handlers.onError(new Error("Board collaboration sent an invalid snapshot."))
-          socket.close()
+          terminateForProtocolError(generation)
           return
         }
 
         if (parsed.data.type === "snapshot") {
-          if (lastRevision !== null && parsed.data.revision < lastRevision) {
-            return
-          }
-          lastRevision = parsed.data.revision
-          handlers.onSnapshot(parsed.data)
+          handleSnapshot(generation, parsed.data)
           return
         }
 
@@ -298,68 +432,185 @@ export function createBoardClient(
           return
         }
 
-        if (parsed.data.type === "sticky_note_created") {
-          if (lastRevision !== null && parsed.data.revision <= lastRevision) {
-            return
-          }
-          if (lastRevision !== null && parsed.data.revision !== lastRevision + 1) {
-            closedByCaller = true
-            handlers.onError(new Error("Board collaboration revision gap detected."))
-            socket.close()
-            return
-          }
-          lastRevision = parsed.data.revision
-          handlers.onStickyNoteCreated?.(parsed.data)
-          return
-        }
-
         if (parsed.data.type === "sticky_note_edit_claim_granted") {
           handlers.onStickyNoteEditClaimGranted?.(parsed.data)
           return
         }
 
-        if (parsed.data.type === "sticky_note_updated") {
-          if (lastRevision !== null && parsed.data.revision <= lastRevision) {
-            return
-          }
-          if (lastRevision !== null && parsed.data.revision !== lastRevision + 1) {
-            closedByCaller = true
-            handlers.onError(new Error("Board collaboration revision gap detected."))
-            socket.close()
-            return
-          }
-          lastRevision = parsed.data.revision
-          handlers.onStickyNoteUpdated?.(parsed.data)
+        if (parsed.data.type === "error") {
+          handlers.onCommandError?.(parsed.data)
           return
         }
 
-        if (parsed.data.type === "error") {
-          handlers.onCommandError?.(parsed.data)
+        if (generation.awaitingSnapshot) {
+          generation.pendingEvents.set(parsed.data.revision, parsed.data)
+          return
         }
+
+        applyDurableEvent(generation, parsed.data)
       }
-      socket.onerror = () => {
-        if (!closedByCaller) {
-          handlers.onError(new Error("Board collaboration is unavailable."))
+
+      function handleSnapshot(
+        generation: BoardSocketGeneration,
+        snapshot: BoardSnapshot,
+      ): void {
+        if (!isCurrent(generation)) {
+          return
         }
+        if (
+          generation.lastRevision !== null &&
+          snapshot.revision < generation.lastRevision
+        ) {
+          return
+        }
+
+        generation.lastRevision = snapshot.revision
+        generation.awaitingSnapshot = false
+        reconnectAttempt = 0
+        handlers.onSnapshot(snapshot)
+        handlers.onConnectionState?.("connected")
+        drainPendingEvents(generation)
       }
-      socket.onclose = () => {
-        if (!closedByCaller) {
-          handlers.onClose()
+
+      function drainPendingEvents(generation: BoardSocketGeneration): void {
+        if (!isCurrent(generation) || generation.lastRevision === null) {
+          return
+        }
+
+        const pending = [...generation.pendingEvents.entries()]
+          .filter(([revision]) => revision > generation.lastRevision!)
+          .sort(([left], [right]) => left - right)
+        generation.pendingEvents.clear()
+
+        let expectedRevision = generation.lastRevision + 1
+        for (const [revision] of pending) {
+          if (revision !== expectedRevision) {
+            requestAuthoritativeSnapshot(generation)
+            return
+          }
+          expectedRevision += 1
+        }
+
+        for (const [, event] of pending) {
+          if (!isCurrent(generation)) {
+            return
+          }
+          applyDurableEvent(generation, event)
         }
       }
 
-      return {
-        send(command) {
-          const parsed = boardCommandSchema.parse(command)
-          if (closedByCaller) {
-            throw new Error("Board collaboration is closed.")
-          }
-          socket.send(JSON.stringify(parsed))
-        },
-        close() {
-          closedByCaller = true
-          socket.close()
-        },
+      function applyDurableEvent(
+        generation: BoardSocketGeneration,
+        event: StickyNoteCreated | StickyNoteUpdated,
+      ): void {
+        if (!isCurrent(generation) || generation.lastRevision === null) {
+          return
+        }
+        if (event.revision <= generation.lastRevision) {
+          return
+        }
+        if (event.revision !== generation.lastRevision + 1) {
+          requestAuthoritativeSnapshot(generation)
+          return
+        }
+        generation.lastRevision = event.revision
+        if (event.type === "sticky_note_created") {
+          handlers.onStickyNoteCreated?.(event)
+        } else {
+          handlers.onStickyNoteUpdated?.(event)
+        }
+      }
+
+      function requestAuthoritativeSnapshot(generation: BoardSocketGeneration): void {
+        if (!isCurrent(generation)) {
+          return
+        }
+        finishGenerationForRetry(
+          generation,
+          new Error("Board collaboration revision gap detected; requesting an authoritative snapshot."),
+        )
+      }
+
+      function terminateForProtocolError(generation: BoardSocketGeneration): void {
+        if (!isCurrent(generation)) {
+          return
+        }
+        generation.ending = true
+        activeGeneration = null
+        handlers.onError(new Error("Board collaboration sent an invalid snapshot."))
+        generation.socket.close()
+      }
+
+      function finishGenerationForRetry(
+        generation: BoardSocketGeneration,
+        error?: Error,
+      ): void {
+        if (!isCurrent(generation) || generation.ending || closedByCaller) {
+          return
+        }
+        generation.ending = true
+        activeGeneration = null
+        if (error) {
+          handlers.onError(error)
+        }
+        handlers.onClose()
+        handlers.onConnectionState?.("reconnecting")
+        generation.socket.close()
+        scheduleRetry()
+      }
+
+      function scheduleRetry(): void {
+        if (closedByCaller || retryHandle !== null) {
+          return
+        }
+        reconnectAttempt += 1
+        const requestedDelay = reconnectPolicy(reconnectAttempt)
+        const delayMs = Number.isFinite(requestedDelay)
+          ? Math.max(0, Math.floor(requestedDelay))
+          : 0
+        retryHandle = scheduler.schedule(() => {
+          retryHandle = null
+          void connect(false)
+        }, delayMs)
+      }
+
+      function handleRetryFailure(generationId: number, error: unknown): void {
+        if (closedByCaller || generationId !== nextGeneration) {
+          return
+        }
+        const serviceError = error instanceof ServiceRequestError ? error : null
+        if (serviceError?.status === 401) {
+          handlers.onConnectionState?.("unauthorized")
+          handlers.onError(serviceError)
+          return
+        }
+        if (serviceError?.status === 404) {
+          handlers.onConnectionState?.("closed")
+          handlers.onError(serviceError)
+          return
+        }
+        handlers.onConnectionState?.("unavailable")
+        handlers.onError(error instanceof Error ? error : new Error("Board collaboration is unavailable."))
+        scheduleRetry()
+      }
+
+      function reportInitialFailure(error: unknown): void {
+        if (closedByCaller) {
+          return
+        }
+        const serviceError = error instanceof ServiceRequestError ? error : null
+        handlers.onConnectionState?.(
+          serviceError?.status === 401
+            ? "unauthorized"
+            : serviceError?.status === 404
+              ? "closed"
+              : "unavailable",
+        )
+        handlers.onError(error instanceof Error ? error : new Error("Board collaboration is unavailable."))
+      }
+
+      function isCurrent(generation: BoardSocketGeneration): boolean {
+        return !closedByCaller && activeGeneration === generation && generation.id === nextGeneration
       }
     },
   }
@@ -391,6 +642,40 @@ export function createBoardClient(
 
     return schema.parse(payload)
   }
+}
+
+const defaultBoardConnectionScheduler: BoardConnectionScheduler = {
+  schedule(callback, delayMs) {
+    return setTimeout(callback, delayMs)
+  },
+  cancel(handle) {
+    clearTimeout(handle as ReturnType<typeof setTimeout>)
+  },
+}
+
+export function createBoundedReconnectPolicy(options: {
+  initialDelayMs?: number
+  maximumDelayMs?: number
+  multiplier?: number
+} = {}): BoardReconnectPolicy {
+  const initialDelayMs = normalizeReconnectNumber(options.initialDelayMs, 250)
+  const maximumDelayMs = Math.max(
+    initialDelayMs,
+    normalizeReconnectNumber(options.maximumDelayMs, 30_000),
+  )
+  const multiplier = Math.max(1, normalizeReconnectNumber(options.multiplier, 2))
+
+  return (attempt) => {
+    const normalizedAttempt = Math.max(1, Math.floor(attempt))
+    return Math.min(
+      maximumDelayMs,
+      initialDelayMs * Math.pow(multiplier, normalizedAttempt - 1),
+    )
+  }
+}
+
+function normalizeReconnectNumber(value: number | undefined, fallback: number): number {
+  return value !== undefined && Number.isFinite(value) && value >= 0 ? value : fallback
 }
 
 const defaultBoardWebSocketFactory: BoardWebSocketFactory = (url, options) => {

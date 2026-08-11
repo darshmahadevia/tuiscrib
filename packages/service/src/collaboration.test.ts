@@ -103,6 +103,53 @@ test("gives nonexistent and non-member Boards the same nondisclosing error", asy
   expect(missingBody).not.toContain("revision")
 })
 
+test("refreshes the authoritative Board snapshot at WebSocket open after the HTTP preflight", async () => {
+  let currentRevision = 1
+  let upgradedData: Record<string, unknown> | undefined
+  const messages: Record<string, unknown>[] = []
+  const collaboration = createBoardCollaboration({
+    persistence: {
+      openBoard: async ({ publicId }) => ({
+        board: { ...board, id: publicId },
+        revision: currentRevision,
+      }),
+    },
+    sessionAuthenticator: async (value) =>
+      value === credential ? { user: { id: 7, username: "ada_lovelace" } } : null,
+  })
+
+  const response = await collaboration.handleUpgrade(
+    new Request(`http://tuiscrib.test/boards/${boardId}/collaboration`, {
+      headers: {
+        upgrade: "websocket",
+        authorization: `Bearer ${credential}`,
+      },
+    }),
+    {
+      upgrade: (_request: Request, options: { data: Record<string, unknown> }) => {
+        upgradedData = options.data
+        currentRevision = 2
+        return true
+      },
+    } as never,
+  )
+  expect(response).toBeUndefined()
+  expect(upgradedData).toBeDefined()
+
+  const socket = {
+    data: upgradedData,
+    send(serialized: string) {
+      messages.push(JSON.parse(serialized) as Record<string, unknown>)
+    },
+    close: () => undefined,
+  }
+  collaboration.websocket.open?.(socket as never)
+  await Promise.resolve()
+  await Promise.resolve()
+
+  expect(messages[0]).toMatchObject({ type: "snapshot", revision: 2 })
+})
+
 type SocketClient = {
   socket: WebSocket
   nextMessage(): Promise<Record<string, unknown>>

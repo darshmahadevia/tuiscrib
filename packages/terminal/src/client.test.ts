@@ -3,6 +3,7 @@ import { expect, test } from "bun:test"
 import {
   createAuthClient,
   createBoardClient,
+  createBoundedReconnectPolicy,
   type BoardSocket,
 } from "./client.ts"
 
@@ -423,6 +424,15 @@ test("Board client sends creation commands and rejects stale or gapped durable r
   })
 
   const provisionalId = "71ed2c45-67be-4a55-a5ae-90aafc1ecb1c"
+  socket?.onmessage?.({
+    data: JSON.stringify({
+      type: "snapshot",
+      board: { id: boardId, name: "Ideas", role: "member" },
+      revision: 0,
+      presence: [{ member: { username: "ada_lovelace" }, activity: "viewing" }],
+      stickyNotes: [],
+    }),
+  })
   connection.send({
     type: "begin_sticky_note",
     provisionalId,
@@ -434,15 +444,6 @@ test("Board client sends creation commands and rejects stale or gapped durable r
     provisionalId,
   })
 
-  socket?.onmessage?.({
-    data: JSON.stringify({
-      type: "snapshot",
-      board: { id: boardId, name: "Ideas", role: "member" },
-      revision: 0,
-      presence: [{ member: { username: "ada_lovelace" }, activity: "viewing" }],
-      stickyNotes: [],
-    }),
-  })
   socket?.onmessage?.({
     data: JSON.stringify({
       type: "sticky_note_created",
@@ -511,6 +512,7 @@ test("Board client sends creation commands and rejects stale or gapped durable r
     }),
   })
   expect(revisionError?.message).toContain("revision gap")
+  connection.close()
 })
 
 test("Board client sends established Edit Claim commands and delivers committed text updates", async () => {
@@ -568,6 +570,18 @@ test("Board client sends established Edit Claim commands and delivers committed 
   }
   const claimId = "5ab7d4c2-2a35-4ee3-9f0f-9d0d2a92f36a"
 
+  socket?.onmessage?.({
+    data: JSON.stringify({
+      type: "snapshot",
+      board: { id: boardId, name: "Ideas", role: "member" },
+      revision: 1,
+      presence: [{ member: { username: "ada_lovelace" }, activity: "viewing" }],
+      stickyNotes: [{ ...note, text: "before edit", textVersion: 1, lastEdit: {
+        member: { username: "ada_lovelace" },
+        at: "2026-08-10T00:00:00.000Z",
+      } }],
+    }),
+  })
   connection.send({ type: "begin_sticky_note_edit", stickyNoteId: note.id })
   connection.send({
     type: "publish_sticky_note_edit",
@@ -595,18 +609,6 @@ test("Board client sends established Edit Claim commands and delivers committed 
 
   socket?.onmessage?.({
     data: JSON.stringify({
-      type: "snapshot",
-      board: { id: boardId, name: "Ideas", role: "member" },
-      revision: 1,
-      presence: [{ member: { username: "ada_lovelace" }, activity: "viewing" }],
-      stickyNotes: [{ ...note, text: "before edit", textVersion: 1, lastEdit: {
-        member: { username: "ada_lovelace" },
-        at: "2026-08-10T00:00:00.000Z",
-      } }],
-    }),
-  })
-  socket?.onmessage?.({
-    data: JSON.stringify({
       type: "sticky_note_edit_claim_granted",
       stickyNoteId: note.id,
       claimId,
@@ -623,4 +625,387 @@ test("Board client sends established Edit Claim commands and delivers committed 
   expect(granted).toMatchObject({ type: "sticky_note_edit_claim_granted", claimId })
   expect(updated).toMatchObject({ type: "sticky_note_updated", revision: 2, stickyNote: { text: "" } })
   connection.close()
+})
+
+test("Board client reconnects after a dropped socket and replaces state from the next authoritative snapshot", async () => {
+  const credential = "e".repeat(43)
+  const boardId = "Qx7u3nW8kM2pR5sT9vY4aB"
+  const sockets: BoardSocket[] = []
+  const scheduled: Array<{ callback: () => void; delayMs: number; cancelled: boolean }> = []
+  const states: string[] = []
+  const snapshots: number[] = []
+  const receivedEvents: number[] = []
+
+  const client = createBoardClient(
+    "http://tuiscrib.test",
+    async () => new Response(JSON.stringify({ status: "ready" }), { status: 200 }),
+    () => {
+      const socket: BoardSocket = {
+        onmessage: null,
+        onerror: null,
+        onclose: null,
+        send: () => undefined,
+        close: () => undefined,
+      }
+      sockets.push(socket)
+      return socket
+    },
+    {
+      scheduler: {
+        schedule(callback, delayMs) {
+          const entry = { callback, delayMs, cancelled: false }
+          scheduled.push(entry)
+          return entry
+        },
+        cancel(handle) {
+          ;(handle as { cancelled: boolean }).cancelled = true
+        },
+      },
+      reconnectPolicy: (attempt) => attempt === 1 ? 25 : 50,
+    },
+  )
+  const openBoard = client.openBoard
+  if (!openBoard) {
+    throw new Error("Board client does not support Board collaboration")
+  }
+
+  const connection = await openBoard(credential, boardId, {
+    onSnapshot: (snapshot) => snapshots.push(snapshot.revision),
+    onError: (error) => {
+      throw error
+    },
+    onClose: () => undefined,
+    onConnectionState: (state) => states.push(state),
+    onStickyNoteUpdated: (event) => receivedEvents.push(event.revision),
+  })
+
+  sockets[0]?.onmessage?.({
+    data: JSON.stringify({
+      type: "snapshot",
+      board: { id: boardId, name: "Ideas", role: "member" },
+      revision: 4,
+      presence: [{ member: { username: "ada_lovelace" }, activity: "viewing" }],
+      stickyNotes: [],
+    }),
+  })
+  expect(states.at(-1)).toBe("connected")
+
+  // Revision 5 is intentionally dropped before the socket is lost.
+  sockets[0]?.onclose?.()
+  expect(states.at(-1)).toBe("reconnecting")
+  expect(scheduled.map((entry) => entry.delayMs)).toEqual([25])
+
+  const retry = scheduled[0]
+  retry?.callback()
+  await Promise.resolve()
+  await Promise.resolve()
+  await Promise.resolve()
+  await Promise.resolve()
+  expect(sockets).toHaveLength(2)
+
+  sockets[1]?.onmessage?.({
+    data: JSON.stringify({
+      type: "snapshot",
+      board: { id: boardId, name: "Ideas", role: "member" },
+      revision: 6,
+      presence: [{ member: { username: "ada_lovelace" }, activity: "viewing" }],
+      stickyNotes: [],
+    }),
+  })
+  sockets[1]?.onmessage?.({
+    data: JSON.stringify({
+      type: "sticky_note_updated",
+      revision: 7,
+      stickyNote: {
+        id: "Lm7u3nW8kM2pR5sT9vY4aB",
+        text: "later",
+        textVersion: 2,
+        position: { x: 0, y: 0 },
+        color: "yellow",
+        stackingOrder: 0,
+        authorship: { member: { username: "ada_lovelace" } },
+        createdAt: "2026-08-10T00:00:00.000Z",
+        lastEdit: {
+          member: { username: "ada_lovelace" },
+          at: "2026-08-10T00:00:01.000Z",
+        },
+      },
+    }),
+  })
+
+  expect(snapshots).toEqual([4, 6])
+  expect(receivedEvents).toEqual([7])
+  expect(states.at(-1)).toBe("connected")
+
+  // A callback from the old generation cannot append state to the replacement.
+  sockets[0]?.onmessage?.({
+    data: JSON.stringify({
+      type: "sticky_note_updated",
+      revision: 8,
+      stickyNote: {
+        id: "Lm7u3nW8kM2pR5sT9vY4aB",
+        text: "stale old socket",
+        textVersion: 3,
+        position: { x: 0, y: 0 },
+        color: "yellow",
+        stackingOrder: 0,
+        authorship: { member: { username: "ada_lovelace" } },
+        createdAt: "2026-08-10T00:00:00.000Z",
+        lastEdit: {
+          member: { username: "ada_lovelace" },
+          at: "2026-08-10T00:00:02.000Z",
+        },
+      },
+    }),
+  })
+  expect(receivedEvents).toEqual([7])
+
+  connection.close()
+})
+
+test("Board client buffers snapshot races and requests a snapshot instead of replaying across a revision gap", async () => {
+  const credential = "f".repeat(43)
+  const boardId = "Qx7u3nW8kM2pR5sT9vY4aB"
+  const note = {
+    id: "Lm7u3nW8kM2pR5sT9vY4aB",
+    text: "authoritative",
+    textVersion: 2,
+    position: { x: 0, y: 0 },
+    color: "yellow" as const,
+    stackingOrder: 0,
+    authorship: { member: { username: "ada_lovelace" } },
+    createdAt: "2026-08-10T00:00:00.000Z",
+    lastEdit: {
+      member: { username: "ada_lovelace" },
+      at: "2026-08-10T00:00:01.000Z",
+    },
+  }
+  const sockets: BoardSocket[] = []
+  const scheduled: Array<{ callback: () => void; delayMs: number }> = []
+  const events: number[] = []
+  const errors: string[] = []
+  const client = createBoardClient(
+    "http://tuiscrib.test",
+    async () => new Response(JSON.stringify({ status: "ready" }), { status: 200 }),
+    () => {
+      const socket: BoardSocket = {
+        onmessage: null,
+        onerror: null,
+        onclose: null,
+        send: () => undefined,
+        close: () => undefined,
+      }
+      sockets.push(socket)
+      return socket
+    },
+    {
+      scheduler: {
+        schedule(callback, delayMs) {
+          const entry = { callback, delayMs }
+          scheduled.push(entry)
+          return entry
+        },
+        cancel: () => undefined,
+      },
+      reconnectPolicy: () => 1,
+    },
+  )
+  const openBoard = client.openBoard
+  if (!openBoard) {
+    throw new Error("Board client does not support Board collaboration")
+  }
+
+  const connection = await openBoard(credential, boardId, {
+    onSnapshot: () => undefined,
+    onError: (error) => errors.push(error.message),
+    onClose: () => undefined,
+    onStickyNoteUpdated: (event) => events.push(event.revision),
+  })
+
+  sockets[0]?.onmessage?.({
+    data: JSON.stringify({ type: "sticky_note_updated", revision: 2, stickyNote: note }),
+  })
+  sockets[0]?.onmessage?.({
+    data: JSON.stringify({
+      type: "snapshot",
+      board: { id: boardId, name: "Ideas", role: "member" },
+      revision: 1,
+      presence: [{ member: { username: "ada_lovelace" }, activity: "viewing" }],
+      stickyNotes: [],
+    }),
+  })
+  expect(events).toEqual([2])
+
+  // Revision 4 arrives while revision 3 is missing. It must not be applied or replayed.
+  sockets[0]?.onmessage?.({
+    data: JSON.stringify({ type: "sticky_note_updated", revision: 4, stickyNote: note }),
+  })
+  expect(events).toEqual([2])
+  expect(errors.at(-1)).toContain("authoritative snapshot")
+  expect(scheduled).toHaveLength(1)
+
+  scheduled[0]?.callback()
+  await Promise.resolve()
+  await Promise.resolve()
+  await Promise.resolve()
+  await Promise.resolve()
+  expect(sockets).toHaveLength(2)
+
+  // An event can race ahead of the replacement snapshot. It is only accepted after
+  // the snapshot establishes the new revision, and an equal revision is discarded.
+  sockets[1]?.onmessage?.({
+    data: JSON.stringify({ type: "sticky_note_updated", revision: 3, stickyNote: note }),
+  })
+  sockets[1]?.onmessage?.({
+    data: JSON.stringify({
+      type: "snapshot",
+      board: { id: boardId, name: "Ideas", role: "member" },
+      revision: 3,
+      presence: [{ member: { username: "ada_lovelace" }, activity: "viewing" }],
+      stickyNotes: [note],
+    }),
+  })
+  expect(events).toEqual([2])
+  sockets[1]?.onmessage?.({
+    data: JSON.stringify({ type: "sticky_note_updated", revision: 4, stickyNote: note }),
+  })
+  expect(events).toEqual([2, 4])
+
+  connection.close()
+})
+
+test("Board client exposes bounded retry states, resets backoff after a snapshot, and cancels retries on close", async () => {
+  const credential = "g".repeat(43)
+  const boardId = "Qx7u3nW8kM2pR5sT9vY4aB"
+  const sockets: BoardSocket[] = []
+  const scheduled: Array<{ callback: () => void; delayMs: number; cancelled: boolean }> = []
+  const states: string[] = []
+  let requestCount = 0
+  const client = createBoardClient(
+    "http://tuiscrib.test",
+    async () => {
+      requestCount += 1
+      if (requestCount === 2) {
+        return new Response(JSON.stringify({ error: "service unavailable" }), { status: 503 })
+      }
+      return new Response(JSON.stringify({ status: "ready" }), { status: 200 })
+    },
+    () => {
+      const socket: BoardSocket = {
+        onmessage: null,
+        onerror: null,
+        onclose: null,
+        send: () => undefined,
+        close: () => undefined,
+      }
+      sockets.push(socket)
+      return socket
+    },
+    {
+      scheduler: {
+        schedule(callback, delayMs) {
+          const entry = { callback, delayMs, cancelled: false }
+          scheduled.push(entry)
+          return entry
+        },
+        cancel(handle) {
+          ;(handle as { cancelled: boolean }).cancelled = true
+        },
+      },
+      reconnectPolicy: (attempt) => attempt * 10,
+    },
+  )
+  const openBoard = client.openBoard
+  if (!openBoard) {
+    throw new Error("Board client does not support Board collaboration")
+  }
+
+  const connection = await openBoard(credential, boardId, {
+    onSnapshot: () => undefined,
+    onError: () => undefined,
+    onClose: () => undefined,
+    onConnectionState: (state) => states.push(state),
+  })
+  sockets[0]?.onmessage?.({
+    data: JSON.stringify({
+      type: "snapshot",
+      board: { id: boardId, name: "Ideas", role: "member" },
+      revision: 1,
+      presence: [{ member: { username: "ada_lovelace" }, activity: "viewing" }],
+      stickyNotes: [],
+    }),
+  })
+  sockets[0]?.onclose?.()
+  expect(states.slice(-2)).toEqual(["connected", "reconnecting"])
+  expect(scheduled.map((entry) => entry.delayMs)).toEqual([10])
+
+  scheduled[0]?.callback()
+  await Promise.resolve()
+  await Promise.resolve()
+  await Promise.resolve()
+  await Promise.resolve()
+  expect(states.at(-1)).toBe("unavailable")
+  expect(scheduled.map((entry) => entry.delayMs)).toEqual([10, 20])
+
+  scheduled[1]?.callback()
+  await Promise.resolve()
+  await Promise.resolve()
+  await Promise.resolve()
+  await Promise.resolve()
+  expect(sockets).toHaveLength(2)
+  sockets[1]?.onmessage?.({
+    data: JSON.stringify({
+      type: "snapshot",
+      board: { id: boardId, name: "Ideas", role: "member" },
+      revision: 2,
+      presence: [{ member: { username: "ada_lovelace" }, activity: "viewing" }],
+      stickyNotes: [],
+    }),
+  })
+  expect(states.at(-1)).toBe("connected")
+
+  sockets[1]?.onclose?.()
+  expect(scheduled.map((entry) => entry.delayMs)).toEqual([10, 20, 10])
+  connection.close()
+  expect(scheduled[2]?.cancelled).toBe(true)
+  expect(states.at(-1)).toBe("closed")
+})
+
+test("Board client distinguishes an unauthorized reconnect failure from an unavailable service", async () => {
+  const states: string[] = []
+  let error: Error | undefined
+  const client = createBoardClient(
+    "http://tuiscrib.test",
+    async () => new Response(JSON.stringify({
+      error: "Your Terminal Session is invalid. Sign in again.",
+      code: "invalid_session",
+    }), { status: 401 }),
+    () => {
+      throw new Error("WebSocket should not be opened for an unauthorized Session")
+    },
+  )
+  const openBoard = client.openBoard
+  if (!openBoard) {
+    throw new Error("Board client does not support Board collaboration")
+  }
+
+  await expect(openBoard("h".repeat(43), "Qx7u3nW8kM2pR5sT9vY4aB", {
+    onSnapshot: () => undefined,
+    onError: (nextError) => { error = nextError },
+    onClose: () => undefined,
+    onConnectionState: (state) => states.push(state),
+  })).rejects.toThrow("Your Terminal Session is invalid")
+
+  expect(states).toEqual(["connecting", "unauthorized"])
+  expect(error?.message).toBe("Your Terminal Session is invalid. Sign in again.")
+})
+
+test("bounded reconnect policy caps exponential retry delay", () => {
+  const policy = createBoundedReconnectPolicy({
+    initialDelayMs: 10,
+    maximumDelayMs: 25,
+    multiplier: 2,
+  })
+
+  expect([policy(1), policy(2), policy(3), policy(4)]).toEqual([10, 20, 25, 25])
 })

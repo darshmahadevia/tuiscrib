@@ -244,3 +244,176 @@ test("opens one Board for two real terminal clients and renders Presence lifecyc
     throw new Error(`Timed out waiting for ${client.label} rendered frame\n${lastFrame}`)
   }
 })
+
+test("reconnects two terminal clients from authoritative snapshots after a service restart", async () => {
+  if (!harness) {
+    throw new Error("acceptance harness did not start")
+  }
+  const activeHarness = harness
+  const ownerCredential = await registerUser("restart14_owner")
+  const memberCredential = await registerUser("restart14_member")
+  const created = await requestJson<{ board: BoardSummary; joinCode: string }>(
+    "/boards",
+    ownerCredential,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Reconnect Snapshot Board" }),
+    },
+  )
+  expect(created.status).toBe(201)
+  const joined = await requestJson<{ board: BoardSummary }>(
+    "/boards/join",
+    memberCredential,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ joinCode: created.body.joinCode }),
+    },
+  )
+  expect(joined.status).toBe(201)
+
+  const ownerBoardClient = createBoardClient(
+    activeHarness.baseUrl,
+    fetch,
+    undefined,
+    {
+      scheduler: {
+        schedule: (callback, delayMs) => activeHarness.clock.setTimeout(callback, delayMs),
+        cancel: (handle) => activeHarness.clock.clearTimeout(handle as number),
+      },
+      reconnectPolicy: () => 0,
+    },
+  )
+  const memberBoardClient = createBoardClient(
+    activeHarness.baseUrl,
+    fetch,
+    undefined,
+    {
+      scheduler: {
+        schedule: (callback, delayMs) => activeHarness.clock.setTimeout(callback, delayMs),
+        cancel: (handle) => activeHarness.clock.clearTimeout(handle as number),
+      },
+      reconnectPolicy: () => 100,
+    },
+  )
+  const owner = await activeHarness.addShellClient(
+    "restart14-owner",
+    createMemoryCredentialStore(ownerCredential, "memory://restart14/owner"),
+    ownerBoardClient,
+    {
+      schedule: (callback, delayMs) => activeHarness.clock.setTimeout(callback, delayMs),
+      cancel: (handle) => activeHarness.clock.clearTimeout(handle as number),
+    },
+  )
+  const member = await activeHarness.addShellClient(
+    "restart14-member",
+    createMemoryCredentialStore(memberCredential, "memory://restart14/member"),
+    memberBoardClient,
+  )
+
+  await waitForFrame(owner, (frame) => frame.includes("Terminal Session restored"))
+  await waitForFrame(member, (frame) => frame.includes("Terminal Session restored"))
+  await openSelectedBoard(owner, created.body.board.name)
+  await openSelectedBoard(member, created.body.board.name)
+  await waitForFrame(owner, (frame) => frame.includes("restart14_owner · viewing"))
+  await waitForFrame(member, (frame) => frame.includes("restart14_member · viewing"))
+
+  await act(async () => {
+    await activeHarness.restartService()
+  })
+  const ownerReconnecting = await waitForFrame(owner, (frame) => frame.includes("Connection: RECONNECTING"))
+  const memberReconnecting = await waitForFrame(member, (frame) => frame.includes("Connection: RECONNECTING"))
+  expect(ownerReconnecting).not.toContain("Board revision: 0")
+  expect(memberReconnecting).not.toContain("Board revision: 0")
+
+  await act(async () => {
+    activeHarness.clock.advance(0)
+    await owner.setup.renderOnce()
+  })
+  await waitForFrame(owner, (frame) => frame.includes("Board revision: 0"))
+
+  await act(async () => {
+    owner.setup.mockInput.pressKey("n")
+    await owner.setup.renderOnce()
+  })
+  await waitForFrame(owner, (frame) => frame.includes("authority") && frame.includes("granted"))
+  await act(async () => {
+    await owner.setup.mockInput.typeText("created while member was disconnected")
+    activeHarness.clock.advance(150)
+    await owner.setup.renderOnce()
+  })
+  await waitForFrame(owner, (frame) => frame.includes("created while member was disconn"))
+  expect(member.setup.captureCharFrame()).not.toContain("created while member was disconn")
+
+  await act(async () => {
+    activeHarness.clock.advance(100)
+    await member.setup.renderOnce()
+  })
+  const memberSnapshot = await waitForFrame(
+    member,
+    (frame) => frame.includes("created while member was disconn") && frame.includes("Board revision: 1"),
+  )
+  expect(memberSnapshot).toContain("Sticky Notes: 1")
+  expect(memberSnapshot).toContain("Connection: CONNECTED")
+
+  await activeHarness.disposeClient(owner)
+  await activeHarness.disposeClient(member)
+
+  async function registerUser(username: string): Promise<string> {
+    const response = await fetch(`${activeHarness.baseUrl}/auth/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ username, password: "correct horse", confirmation: "correct horse" }),
+    })
+    expect(response.status).toBe(201)
+    return (await response.json() as { sessionCredential: string }).sessionCredential
+  }
+
+  async function requestJson<T>(
+    path: string,
+    credential: string,
+    init: RequestInit,
+  ): Promise<{ status: number; body: T }> {
+    const response = await fetch(`${activeHarness.baseUrl}${path}`, {
+      ...init,
+      headers: { authorization: `Bearer ${credential}`, ...init.headers },
+    })
+    return { status: response.status, body: await response.json() as T }
+  }
+
+  async function openSelectedBoard(client: TerminalClient, boardName: string): Promise<void> {
+    await act(async () => {
+      client.setup.mockInput.pressKey("b")
+      await client.setup.renderOnce()
+    })
+    await waitForFrame(client, (frame) => frame.includes("Board list") && frame.includes(boardName))
+    await act(async () => {
+      client.setup.mockInput.pressKey("o")
+      await client.setup.renderOnce()
+    })
+  }
+
+  async function waitForFrame(
+    client: TerminalClient,
+    predicate: (frame: string) => boolean,
+  ): Promise<string> {
+    let lastFrame = ""
+    let matchedFrame: string | undefined
+    await act(async () => {
+      for (let attempt = 0; attempt < 500; attempt += 1) {
+        await Bun.sleep(5)
+        await client.setup.renderOnce()
+        lastFrame = client.setup.captureCharFrame()
+        if (predicate(lastFrame)) {
+          matchedFrame = lastFrame
+          return
+        }
+      }
+    })
+    if (matchedFrame !== undefined) {
+      return matchedFrame
+    }
+    throw new Error(`Timed out waiting for ${client.label} rendered frame\n${lastFrame}`)
+  }
+})

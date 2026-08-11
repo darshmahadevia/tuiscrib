@@ -1045,3 +1045,112 @@ test("opens the selected Board through its WebSocket and renders authoritative v
   expect(frame).toContain("ada_lovelace · viewing")
   expect(frame).toContain("grace_hopper · viewing")
 })
+
+test("renders reconnecting after Board loss and does not send shared mutations while disconnected", async () => {
+  const credential = "e".repeat(43)
+  const board = {
+    id: "Qx7u3nW8kM2pR5sT9vY4aB",
+    name: "Reconnect Ideas",
+    role: "member" as const,
+  }
+  const sent: string[] = []
+  let handlers: import("@tuiscrib/terminal").BoardConnectionHandlers | undefined
+  const boardClient: BoardClient = {
+    createBoard: async () => { throw new Error("not used") },
+    renameBoard: async () => { throw new Error("not used") },
+    rotateJoinCode: async () => { throw new Error("not used") },
+    listBoards: async () => ({ boards: [board] }),
+    joinBoard: async () => { throw new Error("not used") },
+    leaveBoard: async () => ({ status: "left" }),
+    openBoard: async (_nextCredential, _boardId, nextHandlers) => {
+      handlers = nextHandlers
+      nextHandlers.onSnapshot({
+        type: "snapshot",
+        board,
+        revision: 8,
+        presence: [{ member: { username: "ada_lovelace" }, activity: "viewing" }],
+        stickyNotes: [],
+      })
+      return {
+        send(command) {
+          sent.push(JSON.stringify(command))
+        },
+        close: () => undefined,
+      }
+    },
+  }
+  const authClient: AuthClient = {
+    register: async () => { throw new Error("not used") },
+    signIn: async () => { throw new Error("not used") },
+    restore: async () => ({ user: { username: "ada_lovelace" } }),
+    signOut: async () => ({ status: "signed_out" }),
+  }
+  const credentialStore: CredentialStore = {
+    filePath: "memory://reconnect/session",
+    load: async () => credential,
+    save: async () => undefined,
+    remove: async () => undefined,
+  }
+
+  await act(async () => {
+    activeSetup = await testRender(
+      <TerminalShell
+        authClient={authClient}
+        boardClient={boardClient}
+        credentialStore={credentialStore}
+      />,
+      { width: 80, height: 24, kittyKeyboard: true },
+    )
+    await activeSetup.renderOnce()
+  })
+
+  const setup = activeSetup
+  if (!setup) {
+    throw new Error("terminal renderer did not start")
+  }
+  await setup.waitForFrame((frame) => frame.includes("Terminal Session restored"))
+  await act(async () => {
+    setup.mockInput.pressKey("b")
+    await setup.renderOnce()
+  })
+  await setup.waitForFrame((frame) => frame.includes("Reconnect Ideas"))
+  await act(async () => {
+    setup.mockInput.pressKey("o")
+    await setup.renderOnce()
+  })
+  await setup.waitForFrame((frame) => frame.includes("Board revision: 8"))
+
+  await act(async () => {
+    handlers?.onClose()
+    await setup.renderOnce()
+  })
+  const reconnecting = setup.captureCharFrame()
+  expect(reconnecting).toContain("Connection: RECONNECTING")
+  expect(reconnecting).toContain("Shared mutations disabled")
+  expect(reconnecting).not.toContain("Board revision: 8")
+
+  await act(async () => {
+    setup.mockInput.pressKey("n")
+    await setup.renderOnce()
+  })
+  expect(sent).toEqual([])
+  expect(setup.captureCharFrame()).toContain("Connection: RECONNECTING")
+
+  await act(async () => {
+    handlers?.onConnectionState?.("unavailable")
+    handlers?.onError(new Error("The Tuiscrib Service is unavailable."))
+    await setup.renderOnce()
+  })
+  const unavailable = setup.captureCharFrame()
+  expect(unavailable).toContain("Connection: UNAVAILABLE")
+  expect(unavailable).not.toContain("Connection: RECONNECTING")
+
+  await act(async () => {
+    handlers?.onConnectionState?.("unauthorized")
+    handlers?.onError(new Error("Your Terminal Session is invalid. Sign in again."))
+    await setup.renderOnce()
+  })
+  const unauthorized = setup.captureCharFrame()
+  expect(unauthorized).toContain("Connection: UNAUTHORIZED")
+  expect(unauthorized).not.toContain("Connection: UNAVAILABLE")
+})

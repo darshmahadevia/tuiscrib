@@ -193,8 +193,9 @@ export class AcceptanceHarness {
   }
 
   async restartService(): Promise<void> {
+    const port = this.server.port
     await this.server.stop(true)
-    this.server = this.createServer()
+    this.server = this.createServer(port)
   }
 
   async addClient(label: string): Promise<TerminalClient> {
@@ -299,7 +300,7 @@ export class AcceptanceHarness {
     }
   }
 
-  private createServer(): Bun.Server<BoardWebSocketData> {
+  private createServer(port = 0): Bun.Server<BoardWebSocketData> {
     const collaboration = createBoardCollaboration({
       persistence: this.persistence,
       clock: () => new Date(this.clock.now()),
@@ -313,7 +314,7 @@ export class AcceptanceHarness {
     })
     return Bun.serve({
       hostname: "127.0.0.1",
-      port: 0,
+      port,
       async fetch(request, bunServer) {
         const result = await collaboration.handleUpgrade(request, bunServer)
         if (result !== null) {
