@@ -1,0 +1,119 @@
+import { expect, test } from "bun:test"
+
+import {
+  applyCanvasNavigation,
+  canvasCoordinateToScreen,
+  canvasRectIntersectsViewport,
+  createCanvasNavigationState,
+  getCanvasStickyNoteCardHeight,
+  getCanvasViewportSize,
+  type CanvasViewportSize,
+} from "./canvas-navigation.ts"
+
+const viewportSize: CanvasViewportSize = { width: 4, height: 3 }
+
+test("opens at the stable origin and includes the visible edges", () => {
+  let state = createCanvasNavigationState()
+
+  expect(state).toEqual({
+    cursor: { x: 0, y: 0 },
+    viewport: { x: 0, y: 0 },
+  })
+
+  state = applyCanvasNavigation(state, "right", viewportSize)
+  state = applyCanvasNavigation(state, "right", viewportSize)
+  state = applyCanvasNavigation(state, "right", viewportSize)
+
+  expect(state).toEqual({
+    cursor: { x: 3, y: 0 },
+    viewport: { x: 0, y: 0 },
+  })
+
+  state = applyCanvasNavigation(state, "right", viewportSize)
+  expect(state).toEqual({
+    cursor: { x: 4, y: 0 },
+    viewport: { x: 1, y: 0 },
+  })
+})
+
+test("moves the cursor on the bounded integer coordinate plane", () => {
+  let state = createCanvasNavigationState()
+
+  state = applyCanvasNavigation(state, "left", viewportSize)
+  state = applyCanvasNavigation(state, "up", viewportSize)
+
+  expect(state.cursor).toEqual({ x: -1, y: -1 })
+  expect(state.viewport).toEqual({ x: -1, y: -1 })
+})
+
+test("Ctrl navigation pans the viewport without moving the cursor", () => {
+  let state = createCanvasNavigationState()
+  state = applyCanvasNavigation(state, "right", viewportSize)
+  state = applyCanvasNavigation(state, "right", viewportSize)
+
+  state = applyCanvasNavigation(state, "down", viewportSize, { pan: true })
+  state = applyCanvasNavigation(state, "left", viewportSize, { pan: true })
+
+  expect(state).toEqual({
+    cursor: { x: 2, y: 0 },
+    viewport: { x: -1, y: 1 },
+  })
+})
+
+test("rejects a viewport with no visible cells", () => {
+  expect(() => applyCanvasNavigation(createCanvasNavigationState(), "right", {
+    width: 0,
+    height: 3,
+  })).toThrow("Canvas viewport dimensions must be positive integers")
+})
+
+test("maps world coordinates to viewport cells and includes only visible edges", () => {
+  expect(canvasCoordinateToScreen({ x: 12, y: -4 }, { x: 10, y: -6 })).toEqual({ x: 2, y: 2 })
+
+  expect(canvasRectIntersectsViewport(
+    { left: 0, top: 0, width: 1, height: 1 },
+    { x: 0, y: 0 },
+    viewportSize,
+  )).toBe(true)
+  expect(canvasRectIntersectsViewport(
+    { left: 3, top: 2, width: 1, height: 1 },
+    { x: 0, y: 0 },
+    viewportSize,
+  )).toBe(true)
+  expect(canvasRectIntersectsViewport(
+    { left: 4, top: 0, width: 1, height: 1 },
+    { x: 0, y: 0 },
+    viewportSize,
+  )).toBe(false)
+  expect(canvasRectIntersectsViewport(
+    { left: -1, top: 0, width: 1, height: 1 },
+    { x: 0, y: 0 },
+    viewportSize,
+  )).toBe(false)
+})
+
+test("uses the rendered Sticky Note card dimensions for viewport culling", () => {
+  expect(getCanvasStickyNoteCardHeight(1)).toBe(8)
+  expect(getCanvasStickyNoteCardHeight(3)).toBe(10)
+  expect(() => getCanvasStickyNoteCardHeight(0)).toThrow(
+    "Sticky Note line count must be a positive integer",
+  )
+})
+
+test("derives deterministic viewport sizes for supported and below-minimum terminals", () => {
+  expect(getCanvasViewportSize(80, 24)).toEqual({ width: 64, height: 3 })
+  expect(getCanvasViewportSize(100, 30)).toEqual({ width: 64, height: 8 })
+  expect(getCanvasViewportSize(79, 24)).toEqual({ width: 64, height: 3 })
+})
+
+test("keeps the viewport inside the shared coordinate plane at its bounds", () => {
+  let state = createCanvasNavigationState()
+  for (let index = 0; index < 1_000_000; index += 1) {
+    state = applyCanvasNavigation(state, "right", viewportSize)
+  }
+  expect(state.cursor).toEqual({ x: 1_000_000, y: 0 })
+  expect(state.viewport.x).toBe(999_997)
+
+  state = applyCanvasNavigation(state, "right", viewportSize, { pan: true })
+  expect(state.viewport.x).toBe(999_997)
+})

@@ -43,4 +43,23 @@ export {
   type StickyNoteDebouncerOptions,
   type StickyNoteTimer,
 } from "./sticky-note-editor.ts"
+export {
+  applyCanvasNavigation,
+  canvasCoordinateToScreen,
+  canvasRectIntersectsViewport,
+  createCanvasNavigationState,
+  getCanvasPanelWidth,
+  getCanvasStickyNoteCardHeight,
+  getCanvasViewportSize,
+  CANVAS_MAX_COORDINATE,
+  CANVAS_MIN_COORDINATE,
+  CANVAS_PANEL_WIDTH,
+  CANVAS_STICKY_NOTE_CARD_WIDTH,
+  CANVAS_STICKY_NOTE_CARD_VERTICAL_OVERHEAD,
+  type CanvasCoordinate,
+  type CanvasDirection,
+  type CanvasNavigationState,
+  type CanvasRect,
+  type CanvasViewportSize,
+} from "./canvas-navigation.ts"
 export { STICKY_NOTE_WIDTH, wrapStickyNoteText } from "./sticky-notes.ts"

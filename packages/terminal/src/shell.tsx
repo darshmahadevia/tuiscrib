@@ -33,6 +33,18 @@ import {
   type StickyNoteTimer,
 } from "./sticky-note-editor.ts"
 import { wrapStickyNoteText } from "./sticky-notes.ts"
+import {
+  applyCanvasNavigation,
+  canvasCoordinateToScreen,
+  canvasRectIntersectsViewport,
+  createCanvasNavigationState,
+  getCanvasPanelWidth,
+  getCanvasStickyNoteCardHeight,
+  getCanvasViewportSize,
+  CANVAS_STICKY_NOTE_CARD_WIDTH,
+  type CanvasDirection,
+  type CanvasViewportSize,
+} from "./canvas-navigation.ts"
 
 export const MIN_TERMINAL_WIDTH = 80
 export const MIN_TERMINAL_HEIGHT = 24
@@ -236,6 +248,7 @@ export function TerminalShell({
 }: TerminalShellProps) {
   const renderer = useRenderer()
   const { width, height } = useTerminalDimensions()
+  const canvasViewportSize = getCanvasViewportSize(width, height)
   const [credentialStore] = useState<CredentialStore>(
     () => credentialStoreOverride ?? createCredentialStore(),
   )
@@ -257,7 +270,12 @@ export function TerminalShell({
   const [boardCodeNotice, setBoardCodeNotice] = useState<BoardCodeNotice | null>(null)
   const [boardSnapshot, setBoardSnapshot] = useState<BoardSnapshot | null>(null)
   const [boardConnectionState, setBoardConnectionState] = useState<BoardConnectionState | null>(null)
-  const [canvasCursor, setCanvasCursor] = useState<StickyNotePosition>({ x: 0, y: 0 })
+  const [canvasCursor, setCanvasCursor] = useState<StickyNotePosition>(
+    () => createCanvasNavigationState().cursor,
+  )
+  const [canvasViewport, setCanvasViewport] = useState<StickyNotePosition>(
+    () => createCanvasNavigationState().viewport,
+  )
   const [selectedStickyNoteId, setSelectedStickyNoteId] = useState<string | null>(null)
   const [provisionalStickyNote, setProvisionalStickyNote] =
     useState<ProvisionalStickyNote | null>(null)
@@ -287,6 +305,7 @@ export function TerminalShell({
   const boardConnectionStateRef = useRef<BoardConnectionState | null>(boardConnectionState)
   const boardSnapshotRef = useRef<BoardSnapshot | null>(boardSnapshot)
   const canvasCursorRef = useRef(canvasCursor)
+  const canvasViewportRef = useRef(canvasViewport)
   const selectedStickyNoteIdRef = useRef<string | null>(selectedStickyNoteId)
   const provisionalStickyNoteRef = useRef<ProvisionalStickyNote | null>(null)
   const establishedStickyNoteEditRef = useRef<EstablishedStickyNoteEdit | null>(
@@ -308,9 +327,23 @@ export function TerminalShell({
   boardConnectionStateRef.current = boardConnectionState
   boardSnapshotRef.current = boardSnapshot
   canvasCursorRef.current = canvasCursor
+  canvasViewportRef.current = canvasViewport
   selectedStickyNoteIdRef.current = selectedStickyNoteId
   provisionalStickyNoteRef.current = provisionalStickyNote
   establishedStickyNoteEditRef.current = establishedStickyNoteEdit
+
+  function resetCanvasNavigation(options: { render?: boolean } = {}) {
+    const initial = createCanvasNavigationState()
+    canvasCursorRef.current = initial.cursor
+    canvasViewportRef.current = initial.viewport
+    if (options.render !== false) {
+      flushSync(() => {
+        setCanvasCursor(initial.cursor)
+        setCanvasViewport(initial.viewport)
+      })
+    }
+    return initial
+  }
 
   useEffect(() => {
     if (capabilitiesOverride) {
@@ -411,12 +444,10 @@ export function TerminalShell({
     cancelledProvisionalIdsRef.current.clear()
     cancelledStickyNoteEditIdsRef.current.clear()
     boardSnapshotRef.current = null
-    selectedStickyNoteIdRef.current = null
     flushSync(() => {
       setProvisionalStickyNote(null)
       setEstablishedStickyNoteEdit(null)
       setBoardSnapshot(null)
-      setSelectedStickyNoteId(null)
       setMode("navigate")
     })
   }
@@ -534,33 +565,40 @@ export function TerminalShell({
     })
   }
 
-  const updateCanvasCursor = (dx: number, dy: number) => {
-    const current = canvasCursorRef.current
-    const next = {
-      x: Math.max(-1_000_000, Math.min(1_000_000, current.x + dx)),
-      y: Math.max(-1_000_000, Math.min(1_000_000, current.y + dy)),
-    }
-    canvasCursorRef.current = next
-    const noteAtNextCursor = boardSnapshotRef.current?.stickyNotes?.find(
-      (note) => note.position.x === next.x && note.position.y === next.y,
+  const updateCanvasNavigation = (direction: CanvasDirection, pan = false) => {
+    const next = applyCanvasNavigation(
+      {
+        cursor: canvasCursorRef.current,
+        viewport: canvasViewportRef.current,
+      },
+      direction,
+      canvasViewportSize,
+      { pan },
     )
-    selectedStickyNoteIdRef.current = noteAtNextCursor?.id ?? null
+    canvasCursorRef.current = next.cursor
+    canvasViewportRef.current = next.viewport
+    const notes = boardSnapshotRef.current?.stickyNotes ?? []
+    const selectedStillExists = selectedStickyNoteIdRef.current !== null && notes.some(
+      (note) => note.id === selectedStickyNoteIdRef.current,
+    )
+    const noteAtNextCursor = notes.find(
+      (note) => note.position.x === next.cursor.x && note.position.y === next.cursor.y,
+    )
+    const nextSelectedStickyNoteId = selectedStillExists
+      ? selectedStickyNoteIdRef.current
+      : noteAtNextCursor?.id ?? null
+    selectedStickyNoteIdRef.current = nextSelectedStickyNoteId
     flushSync(() => {
-      setCanvasCursor(next)
-      setSelectedStickyNoteId(noteAtNextCursor?.id ?? null)
+      setCanvasCursor(next.cursor)
+      setCanvasViewport(next.viewport)
+      setSelectedStickyNoteId(nextSelectedStickyNoteId)
     })
   }
 
   const selectedStickyNote = (): StickyNote | undefined => {
     const notes = boardSnapshotRef.current?.stickyNotes ?? []
     const selectedId = selectedStickyNoteIdRef.current
-    const selected = selectedId
-      ? notes.find((note) =>
-        note.id === selectedId &&
-        note.position.x === canvasCursorRef.current.x &&
-        note.position.y === canvasCursorRef.current.y,
-      )
-      : undefined
+    const selected = selectedId ? notes.find((note) => note.id === selectedId) : undefined
     return selected ?? notes.find((note) =>
       note.position.x === canvasCursorRef.current.x &&
       note.position.y === canvasCursorRef.current.y,
@@ -1249,6 +1287,7 @@ export function TerminalShell({
   const openSelectedBoard = async () => {
     const openBoard = boardClient?.openBoard
     if (!openBoard) {
+      resetCanvasNavigation()
       openView("canvas")
       return
     }
@@ -1270,6 +1309,7 @@ export function TerminalShell({
     }
 
     closeBoardConnection()
+    resetCanvasNavigation()
     const connectionGeneration = boardConnectionGenerationRef.current
     activeBoardIdRef.current = board.id
     const isCurrentBoardConnection = () =>
@@ -1296,6 +1336,7 @@ export function TerminalShell({
           if (!isCurrentBoardConnection()) {
             return
           }
+          const initialNavigation = resetCanvasNavigation({ render: false })
           boardConnectionStateRef.current = "connected"
           boardSnapshotRef.current = snapshot
           const selectedStillExists = selectedStickyNoteIdRef.current && snapshot.stickyNotes?.some(
@@ -1310,6 +1351,8 @@ export function TerminalShell({
             : noteAtCursor?.id ?? null
           selectedStickyNoteIdRef.current = nextSelectedStickyNoteId
           flushSync(() => {
+            setCanvasCursor(initialNavigation.cursor)
+            setCanvasViewport(initialNavigation.viewport)
             setBoardSnapshot(snapshot)
             setBoardConnectionState("connected")
             setSelectedStickyNoteId(nextSelectedStickyNoteId)
@@ -1925,20 +1968,17 @@ export function TerminalShell({
           cycleSelectedStickyNote()
           return
         }
-        if (key.name === "left" || key.name === "h") {
-          updateCanvasCursor(-1, 0)
-          return
-        }
-        if (key.name === "right" || key.name === "l") {
-          updateCanvasCursor(1, 0)
-          return
-        }
-        if (key.name === "up" || key.name === "k") {
-          updateCanvasCursor(0, -1)
-          return
-        }
-        if (key.name === "down" || key.name === "j") {
-          updateCanvasCursor(0, 1)
+        const direction = canvasDirectionForKey(key.name)
+        if (
+          direction &&
+          !key.shift &&
+          !key.meta &&
+          !key.option &&
+          !key.super &&
+          !key.hyper
+        ) {
+          key.preventDefault()
+          updateCanvasNavigation(direction, key.ctrl)
           return
         }
         if (key.name === "return") {
@@ -2123,6 +2163,9 @@ export function TerminalShell({
       error={notice?.kind === "error" ? notice.message : undefined}
       status={notice?.kind === "status" ? notice.message : undefined}
       cursor={canvasCursor}
+      viewport={canvasViewport}
+      viewportSize={canvasViewportSize}
+      panelWidth={getCanvasPanelWidth(width)}
       selectedStickyNoteId={selectedStickyNoteId ?? boardSnapshot?.stickyNotes?.find(
         (note) => note.position.x === canvasCursor.x && note.position.y === canvasCursor.y,
       )?.id ?? null}
@@ -2420,6 +2463,9 @@ function CanvasSurface({
   error,
   status,
   cursor,
+  viewport,
+  viewportSize,
+  panelWidth,
   selectedStickyNoteId,
   provisionalStickyNote,
   establishedStickyNoteEdit,
@@ -2433,12 +2479,34 @@ function CanvasSurface({
   error?: string
   status?: string
   cursor: StickyNotePosition
+  viewport: StickyNotePosition
+  viewportSize: CanvasViewportSize
+  panelWidth: number
   selectedStickyNoteId: string | null
   provisionalStickyNote: ProvisionalStickyNote | null
   establishedStickyNoteEdit: EstablishedStickyNoteEdit | null
   onProvisionalTextChange(text: string): boolean
   onEstablishedTextChange(text: string): boolean
 }) {
+  const notes = snapshot?.stickyNotes ?? []
+  const selectedNote = selectedStickyNoteId
+    ? notes.find((note) => note.id === selectedStickyNoteId)
+    : undefined
+  const selectedNoteText = establishedStickyNoteEdit && selectedNote &&
+    establishedStickyNoteEdit.stickyNoteId === selectedNote.id
+    ? establishedStickyNoteEdit.text
+    : selectedNote?.text
+  const visibleNotes = notes.filter((note) => canvasRectIntersectsViewport(
+    {
+      left: note.position.x,
+      top: note.position.y,
+      width: CANVAS_STICKY_NOTE_CARD_WIDTH,
+      height: getCanvasStickyNoteCardHeight(wrapStickyNoteText(note.text).length),
+    },
+    viewport,
+    viewportSize,
+  ))
+
   return (
     <box
       style={{
@@ -2450,12 +2518,12 @@ function CanvasSurface({
     >
       <box
         style={{
-          width: 72,
+          width: panelWidth,
           border: true,
           borderStyle: "rounded",
           borderColor: mode === "navigate" ? colors.accent : colors.warning,
           backgroundColor: colors.panel,
-          padding: 2,
+          padding: 1,
           flexDirection: "column",
         }}
       >
@@ -2497,36 +2565,90 @@ function CanvasSurface({
           <text fg={colors.error}>Error: {error}</text>
         ) : snapshot ? (
           <>
-            <text fg={colors.success}>Connection: CONNECTED</text>
-            <text fg={colors.text}>Board: {snapshot.board.name}</text>
-            <text fg={colors.accent}>Board revision: {snapshot.revision}</text>
-            <text fg={colors.muted}>
-              Canvas cursor: ({cursor.x}, {cursor.y}) · Enter edits selected Sticky Note; Tab cycles
+            <text fg={colors.success}>
+              Board revision: {snapshot.revision} · Connection: CONNECTED · Board: {snapshot.board.name}
             </text>
+            <text fg={colors.muted}>
+              Canvas cursor: ({cursor.x}, {cursor.y}) · Viewport origin: ({viewport.x}, {viewport.y}) · visible {viewportSize.width}×{viewportSize.height}
+            </text>
+            <text fg={colors.text}>Selected Sticky Note: {selectedNoteText ?? "none"}</text>
             <text fg={colors.text}>Viewing Presence</text>
             {snapshot.presence.map((presence) => (
               <text key={presence.member.username} fg={colors.muted}>
                 {presence.member.username} · {presence.activity}
               </text>
             ))}
-            <text fg={colors.accent}>Sticky Notes: {snapshot.stickyNotes?.length ?? 0}</text>
+            <text fg={colors.accent}>
+              Sticky Notes: {snapshot.stickyNotes?.length ?? 0} · {mode === "navigate"
+                ? selectedStickyNoteId
+                  ? "Navigate mode · Sticky Note selected"
+                  : cursor.x === 0 && cursor.y === 0
+                    ? "Navigate mode · cursor at the stable origin"
+                    : `Navigate mode · cursor at (${cursor.x}, ${cursor.y})`
+                : `Edit mode · ${provisionalStickyNote ? "creation text editing active" : "established text editing active"}`}
+                {mode === "edit" && establishedStickyNoteEdit
+                  ? ` · Claim ${establishedStickyNoteEdit.status}`
+                  : ""}
+            </text>
+            {selectedNote ? (
+              <text fg={colors.muted}>
+                Authored by {selectedNote.authorship.member.username} · Last edit by {selectedNote.lastEdit.member.username}
+              </text>
+            ) : null}
             {error && snapshot ? <text fg={colors.error}>Error: {error}</text> : null}
-            {snapshot.stickyNotes?.map((note) => (
-              establishedStickyNoteEdit?.stickyNoteId === note.id && mode === "edit" ? (
-                <EstablishedStickyNoteEditorCard
-                  key={note.id}
-                  note={note}
-                  draft={establishedStickyNoteEdit}
-                  onTextChange={onEstablishedTextChange}
-                />
-              ) : (
-                <StickyNoteCard
-                  key={note.id}
-                  note={note}
-                  selected={note.id === selectedStickyNoteId}
-                />
-              )
-            ))}
+            <box
+              style={{
+                width: viewportSize.width,
+                height: viewportSize.height,
+                backgroundColor: colors.background,
+                position: "relative",
+                overflow: "hidden",
+                flexShrink: 0,
+              }}
+            >
+              {visibleNotes.map((note) => {
+                const screen = canvasCoordinateToScreen(note.position, viewport)
+                const left = screen.x
+                const top = screen.y
+                return establishedStickyNoteEdit?.stickyNoteId === note.id && mode === "edit" ? (
+                  <EstablishedStickyNoteEditorCard
+                    key={note.id}
+                    note={note}
+                    draft={establishedStickyNoteEdit}
+                    left={left}
+                    top={top}
+                    onTextChange={onEstablishedTextChange}
+                  />
+                ) : (
+                  <StickyNoteCard
+                    key={note.id}
+                    note={note}
+                    selected={note.id === selectedStickyNoteId}
+                    left={left}
+                    top={top}
+                  />
+                )
+              })}
+              {cursor.x >= viewport.x &&
+                cursor.x < viewport.x + viewportSize.width &&
+                cursor.y >= viewport.y &&
+                cursor.y < viewport.y + viewportSize.height ? (() => {
+                  const screen = canvasCoordinateToScreen(cursor, viewport)
+                  return (
+                    <text
+                      style={{
+                        position: "absolute",
+                        left: screen.x,
+                        top: screen.y,
+                        zIndex: 100,
+                      }}
+                      fg={colors.accent}
+                    >
+                      +
+                    </text>
+                  )
+                })() : null}
+            </box>
             {provisionalStickyNote ? (
               <box
                 style={{
@@ -2563,19 +2685,6 @@ function CanvasSurface({
                 />
               </box>
             ) : null}
-            {mode === "navigate" ? (
-              <text fg={colors.accent}>
-                {selectedStickyNoteId
-                  ? "Navigate mode · Sticky Note selected"
-                  : cursor.x === 0 && cursor.y === 0
-                    ? "Navigate mode · cursor at the stable origin"
-                    : `Navigate mode · cursor at (${cursor.x}, ${cursor.y})`}
-              </text>
-            ) : (
-              <text fg={colors.warning}>
-                Edit mode · {provisionalStickyNote ? "creation text editing active" : "established text editing active"}
-              </text>
-            )}
             {status ? <text fg={colors.success}>Status: {status}</text> : null}
           </>
         ) : mode === "navigate" ? (
@@ -2598,6 +2707,25 @@ function CanvasSurface({
   )
 }
 
+function canvasDirectionForKey(name: string): CanvasDirection | undefined {
+  switch (name) {
+    case "left":
+    case "h":
+      return "left"
+    case "right":
+    case "l":
+      return "right"
+    case "up":
+    case "k":
+      return "up"
+    case "down":
+    case "j":
+      return "down"
+    default:
+      return undefined
+  }
+}
+
 function userPerceivedCharacterCountLabel(value: string): string {
   try {
     return String(countUserPerceivedCharacters(value))
@@ -2609,16 +2737,22 @@ function userPerceivedCharacterCountLabel(value: string): string {
 function EstablishedStickyNoteEditorCard({
   note,
   draft,
+  left,
+  top,
   onTextChange,
 }: {
   note: StickyNote
   draft: EstablishedStickyNoteEdit
+  left?: number
+  top?: number
   onTextChange(text: string): boolean
 }) {
+  const positioned = left !== undefined && top !== undefined
   return (
     <box
       style={{
-        width: 40,
+        width: CANVAS_STICKY_NOTE_CARD_WIDTH,
+        ...(positioned ? { position: "absolute" as const, left, top, zIndex: 2 } : {}),
         border: true,
         borderStyle: "rounded",
         borderColor: colors.warning,
@@ -2738,12 +2872,24 @@ function StickyNoteEditor({
   )
 }
 
-function StickyNoteCard({ note, selected = false }: { note: StickyNote; selected?: boolean }) {
+function StickyNoteCard({
+  note,
+  selected = false,
+  left,
+  top,
+}: {
+  note: StickyNote
+  selected?: boolean
+  left?: number
+  top?: number
+}) {
   const lines = wrapStickyNoteText(note.text)
+  const positioned = left !== undefined && top !== undefined
   return (
     <box
       style={{
-        width: 40,
+        width: CANVAS_STICKY_NOTE_CARD_WIDTH,
+        ...(positioned ? { position: "absolute" as const, left, top, zIndex: selected ? 2 : 1 } : {}),
         border: true,
         borderStyle: "rounded",
         borderColor: selected ? colors.accent : stickyNoteColor(note.color),

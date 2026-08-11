@@ -1,0 +1,162 @@
+export const CANVAS_MIN_COORDINATE = -1_000_000
+export const CANVAS_MAX_COORDINATE = 1_000_000
+export const CANVAS_PANEL_WIDTH = 72
+export const CANVAS_STICKY_NOTE_CARD_WIDTH = 40
+export const CANVAS_STICKY_NOTE_CARD_VERTICAL_OVERHEAD = 7
+
+export type CanvasCoordinate = {
+  x: number
+  y: number
+}
+
+export type CanvasViewportSize = {
+  width: number
+  height: number
+}
+
+export type CanvasNavigationState = {
+  cursor: CanvasCoordinate
+  viewport: CanvasCoordinate
+}
+
+export type CanvasDirection = "up" | "down" | "left" | "right"
+
+export type CanvasRect = {
+  left: number
+  top: number
+  width: number
+  height: number
+}
+
+export function createCanvasNavigationState(): CanvasNavigationState {
+  return {
+    cursor: { x: 0, y: 0 },
+    viewport: { x: 0, y: 0 },
+  }
+}
+
+export function getCanvasPanelWidth(terminalWidth: number): number {
+  return Math.max(1, Math.min(CANVAS_PANEL_WIDTH, terminalWidth - 4))
+}
+
+export function getCanvasViewportSize(
+  terminalWidth: number,
+  terminalHeight: number,
+): CanvasViewportSize {
+  const panelWidth = getCanvasPanelWidth(terminalWidth)
+  return {
+    width: Math.max(1, panelWidth - 8),
+    height: Math.max(3, Math.min(8, terminalHeight - 21)),
+  }
+}
+
+export function canvasCoordinateToScreen(
+  coordinate: CanvasCoordinate,
+  viewport: CanvasCoordinate,
+): CanvasCoordinate {
+  return {
+    x: coordinate.x - viewport.x,
+    y: coordinate.y - viewport.y,
+  }
+}
+
+export function canvasRectIntersectsViewport(
+  rect: CanvasRect,
+  viewport: CanvasCoordinate,
+  viewportSize: CanvasViewportSize,
+): boolean {
+  validateViewportSize(viewportSize)
+  return (
+    rect.left < viewport.x + viewportSize.width &&
+    rect.left + rect.width > viewport.x &&
+    rect.top < viewport.y + viewportSize.height &&
+    rect.top + rect.height > viewport.y
+  )
+}
+
+export function getCanvasStickyNoteCardHeight(lineCount: number): number {
+  if (!Number.isInteger(lineCount) || lineCount < 1) {
+    throw new RangeError("Sticky Note line count must be a positive integer")
+  }
+  return lineCount + CANVAS_STICKY_NOTE_CARD_VERTICAL_OVERHEAD
+}
+
+export function applyCanvasNavigation(
+  state: CanvasNavigationState,
+  direction: CanvasDirection,
+  viewportSize: CanvasViewportSize,
+  options: { pan?: boolean } = {},
+): CanvasNavigationState {
+  validateViewportSize(viewportSize)
+
+  const delta = directionDelta(direction)
+  if (options.pan) {
+    return {
+      cursor: { ...state.cursor },
+      viewport: {
+        x: clampViewportCoordinate(state.viewport.x + delta.x, viewportSize.width),
+        y: clampViewportCoordinate(state.viewport.y + delta.y, viewportSize.height),
+      },
+    }
+  }
+
+  const cursor = {
+    x: clampCoordinate(state.cursor.x + delta.x),
+    y: clampCoordinate(state.cursor.y + delta.y),
+  }
+
+  return {
+    cursor,
+    viewport: {
+      x: followCursor(cursor.x, state.viewport.x, viewportSize.width),
+      y: followCursor(cursor.y, state.viewport.y, viewportSize.height),
+    },
+  }
+}
+
+function directionDelta(direction: CanvasDirection): CanvasCoordinate {
+  switch (direction) {
+    case "up":
+      return { x: 0, y: -1 }
+    case "down":
+      return { x: 0, y: 1 }
+    case "left":
+      return { x: -1, y: 0 }
+    case "right":
+      return { x: 1, y: 0 }
+  }
+}
+
+function followCursor(cursor: number, viewportStart: number, size: number): number {
+  const viewportEnd = viewportStart + size - 1
+  if (cursor < viewportStart) {
+    return cursor
+  }
+  if (cursor > viewportEnd) {
+    return cursor - size + 1
+  }
+  return viewportStart
+}
+
+function clampCoordinate(value: number): number {
+  return Math.max(CANVAS_MIN_COORDINATE, Math.min(CANVAS_MAX_COORDINATE, value))
+}
+
+function clampViewportCoordinate(value: number, size: number): number {
+  const maximumStart = Math.max(
+    CANVAS_MIN_COORDINATE,
+    CANVAS_MAX_COORDINATE - size + 1,
+  )
+  return Math.max(CANVAS_MIN_COORDINATE, Math.min(maximumStart, value))
+}
+
+function validateViewportSize(size: CanvasViewportSize): void {
+  if (
+    !Number.isInteger(size.width) ||
+    !Number.isInteger(size.height) ||
+    size.width < 1 ||
+    size.height < 1
+  ) {
+    throw new RangeError("Canvas viewport dimensions must be positive integers")
+  }
+}
