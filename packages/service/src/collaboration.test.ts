@@ -1040,7 +1040,11 @@ test("holds a distinct established Edit Claim and broadcasts only its committed 
       stickyNoteId: note.id,
     }))
     await expect(nextMessageMatching(member, (message) => message.type === "error"))
-      .resolves.toMatchObject({ type: "error", code: "edit_claim_unavailable" })
+      .resolves.toMatchObject({
+        type: "error",
+        code: "edit_claim_unavailable",
+        claimHolder: { username: "ada_lovelace" },
+      })
 
     const claimId = String(claim.claimId)
     const publication = {
@@ -1088,6 +1092,236 @@ test("holds a distinct established Edit Claim and broadcasts only its committed 
       .resolves.toMatchObject({ type: "snapshot", revision: 2 })
   } finally {
     commitUpdate.resolve()
+    await Promise.all([closeSocket(owner.socket), closeSocket(member.socket)])
+    await server.stop(true)
+  }
+})
+
+test("rejects a stale publication with the authoritative note and preserves the successful editor Presence", async () => {
+  const note = {
+    id: "Lm7u3nW8kM2pR5sT9vY4aB",
+    text: "before winner",
+    textVersion: 1,
+    position: { x: 0, y: 0 },
+    color: "yellow" as const,
+    stackingOrder: 0,
+    authorship: { member: { username: "ada_lovelace" } },
+    createdAt: "2026-08-10T00:00:00.000Z",
+    lastEdit: {
+      member: { username: "ada_lovelace" },
+      at: "2026-08-10T00:00:00.000Z",
+    },
+  }
+  const authoritative = {
+    ...note,
+    text: "winner text",
+    textVersion: 2,
+    lastEdit: {
+      member: { username: "grace_hopper" },
+      at: "2026-08-10T00:00:01.000Z",
+    },
+  }
+  const updateStarted = Promise.withResolvers<void>()
+  const releaseUpdate = Promise.withResolvers<void>()
+  const collaboration = createBoardCollaboration({
+    persistence: {
+      openBoard: async ({ userId, publicId }) => ({
+        board: {
+          id: publicId,
+          name: "Stale Edit Ideas",
+          role: userId === 7 ? "owner" : "member",
+        },
+        revision: 1,
+        stickyNotes: [note],
+      }),
+      updateStickyNoteText: async () => {
+        updateStarted.resolve()
+        await releaseUpdate.promise
+        return {
+          kind: "text_version_conflict" as const,
+          revision: 2,
+          stickyNote: authoritative,
+        }
+      },
+    },
+    sessionAuthenticator: async (value) => {
+      if (value === credential) {
+        return { user: { id: 7, username: "ada_lovelace" } }
+      }
+      if (value === "b".repeat(43)) {
+        return { user: { id: 8, username: "grace_hopper" } }
+      }
+      return null
+    },
+  })
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request, bunServer) {
+      const result = await collaboration.handleUpgrade(request, bunServer)
+      return result === null ? new Response("not found", { status: 404 }) : result
+    },
+    websocket: collaboration.websocket,
+  })
+  const url = `ws://127.0.0.1:${server.port}/boards/${boardId}/collaboration`
+  const owner = createSocketClient(url, credential)
+  const observer = createSocketClient(url, "b".repeat(43))
+
+  try {
+    await Promise.all([waitForSocketOpen(owner.socket), waitForSocketOpen(observer.socket)])
+    await owner.nextMessage()
+    await observer.nextMessage()
+    await nextMessageMatching(owner, (message) => (message.presence as unknown[]).length === 2)
+
+    owner.socket.send(JSON.stringify({
+      type: "begin_sticky_note_edit",
+      stickyNoteId: note.id,
+    }))
+    const claim = await nextMessageMatching(
+      owner,
+      (message) => message.type === "sticky_note_edit_claim_granted",
+    )
+    await nextMessageMatching(
+      observer,
+      (message) => presenceFor(message, "ada_lovelace") === "editing",
+    )
+
+    const observerSnapshotPromise = nextMessageMatching(
+      observer,
+      (message) => message.type === "snapshot" && message.revision === 2,
+    )
+    owner.socket.send(JSON.stringify({
+      type: "publish_sticky_note_edit",
+      claimId: String(claim.claimId),
+      stickyNoteId: note.id,
+      text: "stale optimistic text",
+      expectedTextVersion: 1,
+    }))
+    await updateStarted.promise
+    releaseUpdate.resolve()
+
+    const ownerSnapshot = await nextMessageMatching(
+      owner,
+      (message) => message.type === "snapshot" && message.revision === 2,
+    )
+    const conflict = await nextMessageMatching(owner, (message) => message.type === "error")
+    const observerSnapshot = await observerSnapshotPromise
+    expect(conflict).toMatchObject({
+      type: "error",
+      code: "text_version_conflict",
+      authoritative: { revision: 2, stickyNote: authoritative },
+    })
+    expect(JSON.stringify(conflict)).not.toContain("stale optimistic text")
+    expect(ownerSnapshot).toMatchObject({
+      type: "snapshot",
+      revision: 2,
+      stickyNotes: [authoritative],
+    })
+    expect(ownerSnapshot.presence).toEqual(expect.arrayContaining([
+      { member: { username: "ada_lovelace" }, activity: "editing" },
+    ]))
+    expect(observerSnapshot).toMatchObject({
+      type: "snapshot",
+      revision: 2,
+      stickyNotes: [authoritative],
+    })
+    expect(JSON.stringify(observerSnapshot)).not.toContain("stale optimistic text")
+  } finally {
+    releaseUpdate.resolve()
+    await Promise.all([closeSocket(owner.socket), closeSocket(observer.socket)])
+    await server.stop(true)
+  }
+})
+
+test("serializes simultaneous established Edit Claim acquisition and names the winner", async () => {
+  const note = {
+    id: "Lm7u3nW8kM2pR5sT9vY4aB",
+    text: "shared note",
+    textVersion: 1,
+    position: { x: 0, y: 0 },
+    color: "yellow" as const,
+    stackingOrder: 0,
+    authorship: { member: { username: "ada_lovelace" } },
+    createdAt: "2026-08-10T00:00:00.000Z",
+    lastEdit: {
+      member: { username: "ada_lovelace" },
+      at: "2026-08-10T00:00:00.000Z",
+    },
+  }
+  const collaboration = createBoardCollaboration({
+    persistence: {
+      openBoard: async ({ userId, publicId }) => ({
+        board: {
+          id: publicId,
+          name: "Simultaneous Claim Board",
+          role: userId === 7 ? "owner" : "member",
+        },
+        revision: 1,
+        stickyNotes: [note],
+      }),
+      updateStickyNoteText: async () => ({ kind: "not_found" as const }),
+    },
+    sessionAuthenticator: async (value) => {
+      if (value === credential) {
+        return { user: { id: 7, username: "ada_lovelace" } }
+      }
+      if (value === "b".repeat(43)) {
+        return { user: { id: 8, username: "grace_hopper" } }
+      }
+      return null
+    },
+  })
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request, bunServer) {
+      const result = await collaboration.handleUpgrade(request, bunServer)
+      return result === null ? new Response("not found", { status: 404 }) : result
+    },
+    websocket: collaboration.websocket,
+  })
+  const url = `ws://127.0.0.1:${server.port}/boards/${boardId}/collaboration`
+  const owner = createSocketClient(url, credential)
+  const member = createSocketClient(url, "b".repeat(43))
+
+  try {
+    await Promise.all([waitForSocketOpen(owner.socket), waitForSocketOpen(member.socket)])
+    await owner.nextMessage()
+    await member.nextMessage()
+    await nextMessageMatching(owner, (message) => (message.presence as unknown[]).length === 2)
+
+    const begin = JSON.stringify({
+      type: "begin_sticky_note_edit",
+      stickyNoteId: note.id,
+    })
+    owner.socket.send(begin)
+    member.socket.send(begin)
+    const [ownerResult, memberResult] = await Promise.all([
+      nextMessageMatching(
+        owner,
+        (message) => message.type === "sticky_note_edit_claim_granted" || message.type === "error",
+      ),
+      nextMessageMatching(
+        member,
+        (message) => message.type === "sticky_note_edit_claim_granted" || message.type === "error",
+      ),
+    ])
+    const results = [ownerResult, memberResult]
+    expect(results.filter((message) => message.type === "sticky_note_edit_claim_granted")).toHaveLength(1)
+    expect(results.filter((message) => message.type === "error")).toHaveLength(1)
+
+    const winner = ownerResult.type === "sticky_note_edit_claim_granted"
+      ? "ada_lovelace"
+      : "grace_hopper"
+    const rejected = results.find((message) => message.type === "error")
+    expect(rejected).toMatchObject({
+      type: "error",
+      code: "edit_claim_unavailable",
+      claimHolder: { username: winner },
+    })
+    expect(JSON.stringify(rejected)).not.toContain(credential)
+    expect(JSON.stringify(rejected)).not.toContain("b".repeat(43))
+  } finally {
     await Promise.all([closeSocket(owner.socket), closeSocket(member.socket)])
     await server.stop(true)
   }

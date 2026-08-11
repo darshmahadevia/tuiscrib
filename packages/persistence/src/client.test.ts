@@ -484,8 +484,18 @@ integrationTest("serializes competing established text publications by the locke
     }),
   ])
 
-  expect(results.filter((result) => result.kind === "updated")).toHaveLength(1)
-  expect(results.filter((result) => result.kind === "text_version_conflict")).toHaveLength(1)
+  const winner = results.find((result) => result.kind === "updated")
+  const loser = results.find((result) => result.kind === "text_version_conflict")
+  expect(winner).toBeDefined()
+  expect(loser).toBeDefined()
+  expect(loser).toMatchObject({
+    kind: "text_version_conflict",
+    revision: 2,
+    stickyNote: {
+      text: winner?.kind === "updated" ? winner.stickyNote.text : "",
+      textVersion: 2,
+    },
+  })
   const opened = await persistence.openBoard({ userId: registered.user.id, publicId: boardId })
   expect(opened?.revision).toBe(2)
   expect(opened?.stickyNotes).toMatchObject([{

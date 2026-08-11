@@ -571,6 +571,7 @@ test("Board client sends established Edit Claim commands and delivers committed 
   let socket: BoardSocket | undefined
   let granted: unknown
   let updated: unknown
+  let commandError: unknown
   const client = createBoardClient(
     "http://tuiscrib.test",
     async () => new Response(JSON.stringify({ status: "ready" }), { status: 200 }),
@@ -601,6 +602,9 @@ test("Board client sends established Edit Claim commands and delivers committed 
     },
     onStickyNoteUpdated: (event) => {
       updated = event
+    },
+    onCommandError: (error) => {
+      commandError = error
     },
   })
   const note = {
@@ -670,9 +674,21 @@ test("Board client sends established Edit Claim commands and delivers committed 
   socket?.onmessage?.({
     data: JSON.stringify({ type: "sticky_note_updated", revision: 2, stickyNote: note }),
   })
+  socket?.onmessage?.({
+    data: JSON.stringify({
+      type: "error",
+      code: "text_version_conflict",
+      error: "Sticky Note text changed before this publication.",
+      authoritative: { revision: 2, stickyNote: note },
+    }),
+  })
 
   expect(granted).toMatchObject({ type: "sticky_note_edit_claim_granted", claimId })
   expect(updated).toMatchObject({ type: "sticky_note_updated", revision: 2, stickyNote: { text: "" } })
+  expect(commandError).toMatchObject({
+    code: "text_version_conflict",
+    authoritative: { revision: 2, stickyNote: { text: "" } },
+  })
   connection.close()
 })
 

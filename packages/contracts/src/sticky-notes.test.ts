@@ -149,3 +149,35 @@ test("recognizes an established Edit Claim acknowledgement and committed text up
     stickyNote: { text: "", textVersion: 2 },
   })
 })
+
+test("carries only public claim-holder identity and authoritative stale-edit state", () => {
+  const holderError = boardSocketMessageSchema.parse({
+    type: "error",
+    code: "edit_claim_unavailable",
+    error: "Sticky Note is already being edited.",
+    claimHolder: { username: "ada_lovelace" },
+  })
+  expect(holderError).toMatchObject({
+    code: "edit_claim_unavailable",
+    claimHolder: { username: "ada_lovelace" },
+  })
+  expect(holderError).not.toHaveProperty("connectionId")
+  expect(holderError).not.toHaveProperty("credential")
+
+  const conflictError = boardSocketMessageSchema.parse({
+    type: "error",
+    code: "text_version_conflict",
+    error: "Sticky Note text changed before this publication.",
+    authoritative: {
+      revision: 2,
+      stickyNote: { ...note, text: "authoritative text", textVersion: 2 },
+    },
+  })
+  expect(conflictError).toMatchObject({
+    code: "text_version_conflict",
+    authoritative: {
+      revision: 2,
+      stickyNote: { text: "authoritative text", textVersion: 2 },
+    },
+  })
+})

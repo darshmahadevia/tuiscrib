@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test"
 import { createTerminalCapabilities, type TestRendererSetup } from "@opentui/core/testing"
 import { testRender } from "@opentui/react/test-utils"
 import { act } from "react"
+import type { BoardSnapshot, StickyNote } from "@tuiscrib/contracts"
 
 import {
   TerminalShell,
@@ -1044,6 +1045,155 @@ test("opens the selected Board through its WebSocket and renders authoritative v
   expect(frame).toContain("Board revision: 3")
   expect(frame).toContain("ada_lovelace · viewing")
   expect(frame).toContain("grace_hopper · viewing")
+})
+
+test("replaces an optimistic Sticky Note edit with the authoritative conflict response", async () => {
+  const credential = "f".repeat(43)
+  const board = {
+    id: "Qx7u3nW8kM2pR5sT9vY4aB",
+    name: "Conflict Ideas",
+    role: "member" as const,
+  }
+  const originalNote: StickyNote = {
+    id: "Qx7u3nW8kM2pR5sT9vY4aB",
+    text: "durable text",
+    textVersion: 1,
+    position: { x: 0, y: 0 },
+    color: "yellow",
+    stackingOrder: 0,
+    authorship: { member: { username: "ada_lovelace" } },
+    createdAt: "2026-08-10T00:00:00.000Z",
+    lastEdit: {
+      member: { username: "ada_lovelace" },
+      at: "2026-08-10T00:00:00.000Z",
+    },
+  }
+  const authoritativeNote: StickyNote = {
+    ...originalNote,
+    text: "authoritative durable text",
+    textVersion: 2,
+    lastEdit: {
+      member: { username: "grace_hopper" },
+      at: "2026-08-10T00:01:00.000Z",
+    },
+  }
+  const snapshot: BoardSnapshot = {
+    type: "snapshot",
+    board,
+    revision: 1,
+    presence: [{ member: { username: "ada_lovelace" }, activity: "viewing" }],
+    stickyNotes: [originalNote],
+  }
+  let handlers: import("@tuiscrib/terminal").BoardConnectionHandlers | undefined
+  const sent: string[] = []
+  const boardClient: BoardClient = {
+    createBoard: async () => { throw new Error("not used") },
+    renameBoard: async () => { throw new Error("not used") },
+    rotateJoinCode: async () => { throw new Error("not used") },
+    listBoards: async () => ({ boards: [board] }),
+    joinBoard: async () => { throw new Error("not used") },
+    leaveBoard: async () => ({ status: "left" }),
+    openBoard: async (_nextCredential, _boardId, nextHandlers) => {
+      handlers = nextHandlers
+      nextHandlers.onSnapshot(snapshot)
+      return {
+        send(command) {
+          sent.push(JSON.stringify(command))
+          if (command.type === "begin_sticky_note_edit") {
+            nextHandlers.onStickyNoteEditClaimGranted?.({
+              type: "sticky_note_edit_claim_granted",
+              stickyNoteId: originalNote.id,
+              claimId: "00000000-0000-4000-8000-000000000017",
+              stickyNote: originalNote,
+            })
+          }
+        },
+        close: () => undefined,
+      }
+    },
+  }
+  const authClient: AuthClient = {
+    register: async () => { throw new Error("not used") },
+    signIn: async () => { throw new Error("not used") },
+    restore: async () => ({ user: { username: "ada_lovelace" } }),
+    signOut: async () => ({ status: "signed_out" }),
+  }
+  const credentialStore: CredentialStore = {
+    filePath: "memory://sticky-conflict/session",
+    load: async () => credential,
+    save: async () => undefined,
+    remove: async () => undefined,
+  }
+
+  await act(async () => {
+    activeSetup = await testRender(
+      <TerminalShell
+        label="conflict-client"
+        authClient={authClient}
+        boardClient={boardClient}
+        credentialStore={credentialStore}
+      />,
+      { width: 80, height: 24, kittyKeyboard: true },
+    )
+    await activeSetup.renderOnce()
+  })
+
+  const setup = activeSetup
+  if (!setup) {
+    throw new Error("terminal renderer did not start")
+  }
+  const waitForFrame = async (predicate: (frame: string) => boolean): Promise<string> => {
+    let lastFrame = ""
+    for (let attempt = 0; attempt < 300; attempt += 1) {
+      await Bun.sleep(5)
+      await setup.renderOnce()
+      lastFrame = setup.captureCharFrame()
+      if (predicate(lastFrame)) {
+        return lastFrame
+      }
+    }
+    throw new Error(`Timed out waiting for rendered frame\n${lastFrame}`)
+  }
+
+  await waitForFrame((frame) => frame.includes("Terminal Session restored"))
+  await act(async () => {
+    setup.mockInput.pressKey("b")
+    await setup.renderOnce()
+  })
+  await waitForFrame((frame) => frame.includes("Conflict Ideas · Member"))
+  await act(async () => {
+    setup.mockInput.pressKey("o")
+    await setup.renderOnce()
+  })
+  await waitForFrame((frame) => frame.includes("durable text") && frame.includes("Board revision: 1"))
+
+  await act(async () => {
+    setup.mockInput.pressEnter()
+    await setup.renderOnce()
+  })
+  await waitForFrame((frame) => frame.includes("Edit Claim granted"))
+  await act(async () => {
+    await setup.mockInput.typeText(" stale optimistic text")
+    await setup.renderOnce()
+  })
+  expect(setup.captureCharFrame()).toContain("stale optimistic text")
+
+  await act(async () => {
+    handlers?.onCommandError?.({
+      type: "error",
+      code: "text_version_conflict",
+      error: "Sticky Note text changed before this publication. Your local text was replaced with the authoritative text.",
+      authoritative: { revision: 2, stickyNote: authoritativeNote },
+    })
+    await setup.renderOnce()
+  })
+
+  const conflict = await waitForFrame((frame) => frame.includes("authoritative durable text"))
+  expect(conflict).toContain("Board revision: 2")
+  expect(conflict).toContain("Your local")
+  expect(conflict).toContain("replaced with the authoritative text")
+  expect(conflict).not.toContain("stale optimistic text")
+  expect(sent.some((command) => command.includes("begin_sticky_note_edit"))).toBe(true)
 })
 
 test("renders reconnecting after Board loss and does not send shared mutations while disconnected", async () => {

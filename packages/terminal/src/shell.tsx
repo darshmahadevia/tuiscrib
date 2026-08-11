@@ -982,6 +982,8 @@ export function TerminalShell({
   const handleStickyNoteCommandError = (commandError: {
     code: string
     error: string
+    claimHolder?: { username: string }
+    authoritative?: { revision: number; stickyNote: StickyNote }
   }) => {
     if (commandError.code === "creation_claim_unavailable") {
       stickyNoteDebouncerRef.current?.cancel()
@@ -999,7 +1001,12 @@ export function TerminalShell({
       flushSync(() => {
         setEstablishedStickyNoteEdit(null)
         setMode("navigate")
-        setNotice({ kind: "error", message: "Another Member already owns that Sticky Note Edit Claim." })
+        setNotice({
+          kind: "error",
+          message: commandError.claimHolder
+            ? `Edit Claim unavailable; holder: ${commandError.claimHolder.username}.`
+            : commandError.error,
+        })
       })
       return
     }
@@ -1041,11 +1048,15 @@ export function TerminalShell({
     }
     if (commandError.code === "text_version_conflict") {
       const currentEdit = establishedStickyNoteEditRef.current
-      const authoritative = boardSnapshotRef.current?.stickyNotes?.find(
-        (note) => note.id === currentEdit?.stickyNoteId,
-      )
+      const authoritative = commandError.authoritative?.stickyNote ??
+        boardSnapshotRef.current?.stickyNotes?.find(
+          (note) => note.id === currentEdit?.stickyNoteId,
+        )
+      const authoritativeRevision = commandError.authoritative?.revision ??
+        boardSnapshotRef.current?.revision ?? 0
       if (currentEdit && authoritative) {
         stickyNoteDebouncerRef.current?.cancel()
+        mergeStickyNoteIntoSnapshot(authoritative, authoritativeRevision)
         const releaseAfterConflict = currentEdit.releaseRequested
         const next: EstablishedStickyNoteEdit = {
           ...currentEdit,

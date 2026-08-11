@@ -113,6 +113,104 @@ test("renders one durable Sticky Note and its attribution in two live terminals"
   expect(memberFrame).toContain("Board revision: 1")
 })
 
+test("identifies the Member holding an established Edit Claim in the blocked terminal", async () => {
+  if (!harness) {
+    throw new Error("acceptance harness did not start")
+  }
+
+  const ownerCredential = await registerUser("claim_owner")
+  const memberCredential = await registerUser("claim_member")
+  const created = await requestJson<{ board: BoardSummary; joinCode: string }>(
+    "/boards",
+    ownerCredential,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Claim Holder Board" }),
+    },
+  )
+  const joined = await requestJson<{ board: BoardSummary }>(
+    "/boards/join",
+    memberCredential,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ joinCode: created.body.joinCode }),
+    },
+  )
+  expect(created.status).toBe(201)
+  expect(joined.status).toBe(201)
+
+  const owner = await harness.addShellClient(
+    "claim-owner",
+    createMemoryCredentialStore(ownerCredential, "memory://sticky/claim-owner"),
+    undefined,
+    {
+      schedule: (callback, delayMs) => harness?.clock.setTimeout(callback, delayMs),
+      cancel: (handle) => harness?.clock.clearTimeout(handle as number),
+    },
+  )
+  const member = await harness.addShellClient(
+    "claim-member",
+    createMemoryCredentialStore(memberCredential, "memory://sticky/claim-member"),
+  )
+
+  try {
+    await waitForFrame(owner, (frame) => frame.includes("Terminal Session restored"))
+    await waitForFrame(member, (frame) => frame.includes("Terminal Session restored"))
+    await openSelectedBoard(owner, created.body.board.name)
+    await openSelectedBoard(member, created.body.board.name)
+    await waitForFrame(owner, (frame) => frame.includes("claim_owner · viewing") && frame.includes("Sticky Notes: 0"))
+    await waitForFrame(member, (frame) => frame.includes("claim_owner · viewing") && frame.includes("Sticky Notes: 0"))
+
+    await act(async () => {
+      owner.setup.mockInput.pressKey("n")
+      await owner.setup.renderOnce()
+    })
+    await waitForFrame(owner, (frame) => frame.includes("authority") && frame.includes("granted"))
+    await act(async () => {
+      await owner.setup.mockInput.typeText("claim holder note")
+      await owner.setup.renderOnce()
+    })
+    await act(async () => {
+      harness?.clock.advance(STICKY_NOTE_TEXT_DEBOUNCE_MS)
+      await owner.setup.renderOnce()
+    })
+    await waitForFrame(owner, (frame) => frame.includes("claim holder note") && frame.includes("v1"))
+    await waitForFrame(member, (frame) => frame.includes("claim holder note") && frame.includes("v1"))
+
+    await act(async () => {
+      owner.setup.mockInput.pressEscape()
+      await owner.setup.renderOnce()
+    })
+    await waitForFrame(owner, (frame) => frame.includes("claim_owner · viewing"))
+    await waitForFrame(member, (frame) => frame.includes("claim_owner · viewing"))
+
+    await act(async () => {
+      member.setup.mockInput.pressEnter()
+      await member.setup.renderOnce()
+    })
+    await waitForFrame(member, (frame) => frame.includes("Established Sticky Note") && frame.includes("Claim granted"))
+    await waitForFrame(owner, (frame) => frame.includes("claim_member · editing"))
+
+    await act(async () => {
+      owner.setup.mockInput.pressEnter()
+      await owner.setup.renderOnce()
+    })
+    const blocked = await waitForFrame(
+      owner,
+      (frame) => frame.includes("Edit Claim unavailable") && frame.includes("claim_member"),
+    )
+    expect(blocked).toContain("claim_member")
+    expect(blocked).not.toContain(ownerCredential)
+    expect(blocked).not.toContain(memberCredential)
+    expect(blocked).toContain("Navigate mode")
+  } finally {
+    await harness.disposeClient(owner)
+    await harness.disposeClient(member)
+  }
+})
+
 test("edits an established Sticky Note with debounce, flush, attribution, empty text, and restart durability", async () => {
   if (!harness) {
     throw new Error("acceptance harness did not start")

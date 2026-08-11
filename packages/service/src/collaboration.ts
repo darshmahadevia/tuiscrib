@@ -609,10 +609,14 @@ export function createBoardCollaboration(
       if (existingClaim?.connectionId === socket.data.connectionId) {
         sendEditClaimAcknowledgement(socket, existingClaim, note)
       } else {
+        const holderUsername = existingClaim
+          ? state?.connections.get(existingClaim.connectionId)?.user.username
+          : undefined
         sendCommandError(
           socket,
           "edit_claim_unavailable",
           "Another Terminal Session already holds this Edit Claim.",
+          holderUsername ? { claimHolder: { username: holderUsername } } : undefined,
         )
       }
       return
@@ -714,7 +718,13 @@ export function createBoardCollaboration(
         sendCommandError(
           socket,
           "text_version_conflict",
-          "Sticky Note text changed before this publication.",
+          "Sticky Note text changed before this publication. Your local text was replaced with the authoritative text.",
+          {
+            authoritative: {
+              revision: result.revision,
+              stickyNote: result.stickyNote,
+            },
+          },
         )
       } else {
         sendEditPersistenceError(socket, result)
@@ -929,11 +939,16 @@ export function createBoardCollaboration(
     socket: BoardWebSocket,
     code: "invalid_command" | "creation_claim_unavailable" | "invalid_creation_claim" | "edit_claim_unavailable" | "invalid_edit_claim" | "empty_sticky_note" | "sticky_note_text_limit" | "sticky_note_capacity" | "sticky_note_rejected" | "text_version_conflict" | "revision_conflict",
     error: string,
+    details?: {
+      claimHolder?: { username: string }
+      authoritative?: { revision: number; stickyNote: StickyNoteRecord }
+    },
   ): void {
     socket.send(JSON.stringify(boardCommandErrorSchema.parse({
       type: "error",
       code,
       error,
+      ...details,
     })))
   }
 

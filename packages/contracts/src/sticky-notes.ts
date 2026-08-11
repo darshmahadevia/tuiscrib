@@ -200,6 +200,11 @@ export const boardCommandErrorSchema = z.object({
   type: z.literal("error"),
   code: boardCommandErrorCodeSchema,
   error: z.string().min(1).max(200),
+  claimHolder: z.object({ username: usernameSchema }).optional(),
+  authoritative: z.object({
+    revision: z.number().int().nonnegative(),
+    stickyNote: stickyNoteSchema,
+  }).optional(),
 })
 
 export type StickyNoteColor = z.infer<typeof stickyNoteColorSchema>
