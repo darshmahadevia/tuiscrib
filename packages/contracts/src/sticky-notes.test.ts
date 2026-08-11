@@ -58,6 +58,10 @@ test("requires creation authority before a non-empty Sticky Note publication", (
   })).toThrow()
 })
 
+test("accepts the authenticated Board heartbeat command", () => {
+  expect(boardCommandSchema.parse({ type: "heartbeat" })).toEqual({ type: "heartbeat" })
+})
+
 test("validates the claim acknowledgement and revisioned creation event at the public socket seam", () => {
   expect(boardSocketMessageSchema.parse({
     type: "sticky_note_creation_claim_granted",

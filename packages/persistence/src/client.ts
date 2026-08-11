@@ -215,9 +215,17 @@ export type PersistenceOptions = {
   databaseUrl: string
   migrationsFolder?: string
   maxConnections?: number
+  connectTimeoutSeconds?: number
+  idleTimeoutSeconds?: number
+  maxLifetimeSeconds?: number
+  migrationLockTimeoutMs?: number
+  migrationLockPollMs?: number
 }
 
 const defaultMigrationsFolder = fileURLToPath(new URL("../drizzle", import.meta.url))
+export const MIGRATION_LOCK_NAME = "tuiscrib:drizzle-migrations"
+export const MIN_PERSISTENCE_POOL_MAX = 2
+export const MAX_PERSISTENCE_POOL_MAX = 8
 
 function toStickyNoteRecord(note: {
   id: string
@@ -249,8 +257,19 @@ function toStickyNoteRecord(note: {
 }
 
 export function createPersistence(options: PersistenceOptions): Persistence {
+  const maxConnections = options.maxConnections ?? 4
+  if (
+    !Number.isInteger(maxConnections) ||
+    maxConnections < MIN_PERSISTENCE_POOL_MAX ||
+    maxConnections > MAX_PERSISTENCE_POOL_MAX
+  ) {
+    throw new Error(`Persistence pool max must be an integer from ${MIN_PERSISTENCE_POOL_MAX} through ${MAX_PERSISTENCE_POOL_MAX}.`)
+  }
   const client = postgres(options.databaseUrl, {
-    max: options.maxConnections ?? 4,
+    max: maxConnections,
+    connect_timeout: options.connectTimeoutSeconds ?? 10,
+    idle_timeout: options.idleTimeoutSeconds ?? 20,
+    max_lifetime: options.maxLifetimeSeconds ?? 300,
     prepare: false,
   })
   const database = drizzle(client)
@@ -258,7 +277,37 @@ export function createPersistence(options: PersistenceOptions): Persistence {
 
   return {
     async migrate() {
-      await migrate(database, { migrationsFolder })
+      const reservedClient = await client.reserve()
+      let lockAcquired = false
+      try {
+        const deadline = Date.now() + (options.migrationLockTimeoutMs ?? 30_000)
+        while (!lockAcquired) {
+          const result = await reservedClient`
+            select pg_try_advisory_lock(hashtext(${MIGRATION_LOCK_NAME})) as acquired
+          `
+          lockAcquired = result[0]?.acquired === true
+          if (lockAcquired) {
+            break
+          }
+          if (Date.now() >= deadline) {
+            throw new Error("database migration lock could not be acquired before the timeout")
+          }
+          await delay(options.migrationLockPollMs ?? 100)
+        }
+
+        // postgres.js reserved clients intentionally expose only the query
+        // function and release handle. Keep the advisory lock on that session
+        // while Drizzle uses one of the remaining bounded pool connections for
+        // its transactional migration runner.
+        await migrate(database, { migrationsFolder })
+      } finally {
+        if (lockAcquired) {
+          await reservedClient`
+            select pg_advisory_unlock(hashtext(${MIGRATION_LOCK_NAME}))
+          `.catch(() => undefined)
+        }
+        await reservedClient.release()
+      }
     },
 
     async healthCheck() {
@@ -976,4 +1025,8 @@ export function createPersistence(options: PersistenceOptions): Persistence {
       await client.end({ timeout: 5 })
     },
   }
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds))
 }

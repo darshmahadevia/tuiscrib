@@ -96,6 +96,7 @@ export type BoardReconnectPolicy = (attempt: number) => number
 export type BoardClientOptions = {
   scheduler?: BoardConnectionScheduler
   reconnectPolicy?: BoardReconnectPolicy
+  heartbeatIntervalMs?: number
 }
 
 export type BoardConnectionHandlers = {
@@ -122,6 +123,7 @@ type BoardSocketGeneration = {
   lastRevision: number | null
   pendingEvents: Map<number, StickyNoteCreated | StickyNoteUpdated>
   ending: boolean
+  heartbeatHandle: ReturnType<typeof setInterval> | null
 }
 
 export class ServiceRequestError extends Error {
@@ -233,6 +235,7 @@ export function createBoardClient(
 ): BoardClient {
   const scheduler = options.scheduler ?? defaultBoardConnectionScheduler
   const reconnectPolicy = options.reconnectPolicy ?? createBoundedReconnectPolicy()
+  const heartbeatIntervalMs = normalizeHeartbeatInterval(options.heartbeatIntervalMs)
 
   return {
     createBoard(credential, input) {
@@ -317,7 +320,10 @@ export function createBoardClient(
           }
           const generation = activeGeneration
           activeGeneration = null
-          generation?.socket.close()
+          if (generation) {
+            finishGeneration(generation)
+            generation.socket.close()
+          }
           handlers.onConnectionState?.("closed")
         },
       }
@@ -380,6 +386,7 @@ export function createBoardClient(
           lastRevision: null,
           pendingEvents: new Map(),
           ending: false,
+          heartbeatHandle: null,
         }
         activeGeneration = generation
         socket.onmessage = (event) => handleMessage(generation, event)
@@ -469,7 +476,27 @@ export function createBoardClient(
         reconnectAttempt = 0
         handlers.onSnapshot(snapshot)
         handlers.onConnectionState?.("connected")
+        startHeartbeat(generation)
         drainPendingEvents(generation)
+      }
+
+      function startHeartbeat(generation: BoardSocketGeneration): void {
+        if (heartbeatIntervalMs === 0 || generation.heartbeatHandle !== null) {
+          return
+        }
+        generation.heartbeatHandle = setInterval(() => {
+          if (!isCurrent(generation) || generation.awaitingSnapshot || generation.ending) {
+            return
+          }
+          try {
+            generation.socket.send(JSON.stringify({ type: "heartbeat" }))
+          } catch {
+            finishGenerationForRetry(
+              generation,
+              new Error("Board collaboration is unavailable."),
+            )
+          }
+        }, heartbeatIntervalMs)
       }
 
       function drainPendingEvents(generation: BoardSocketGeneration): void {
@@ -537,6 +564,7 @@ export function createBoardClient(
         }
         generation.ending = true
         activeGeneration = null
+        finishGeneration(generation)
         handlers.onError(new Error("Board collaboration sent an invalid snapshot."))
         generation.socket.close()
       }
@@ -550,6 +578,7 @@ export function createBoardClient(
         }
         generation.ending = true
         activeGeneration = null
+        finishGeneration(generation)
         if (error) {
           handlers.onError(error)
         }
@@ -611,6 +640,13 @@ export function createBoardClient(
 
       function isCurrent(generation: BoardSocketGeneration): boolean {
         return !closedByCaller && activeGeneration === generation && generation.id === nextGeneration
+      }
+
+      function finishGeneration(generation: BoardSocketGeneration): void {
+        if (generation.heartbeatHandle !== null) {
+          clearInterval(generation.heartbeatHandle)
+          generation.heartbeatHandle = null
+        }
       }
     },
   }
@@ -676,6 +712,15 @@ export function createBoundedReconnectPolicy(options: {
 
 function normalizeReconnectNumber(value: number | undefined, fallback: number): number {
   return value !== undefined && Number.isFinite(value) && value >= 0 ? value : fallback
+}
+
+function normalizeHeartbeatInterval(value: number | undefined): number {
+  if (value === 0) {
+    return 0
+  }
+  return value !== undefined && Number.isFinite(value) && value >= 1_000
+    ? Math.floor(value)
+    : 30_000
 }
 
 const defaultBoardWebSocketFactory: BoardWebSocketFactory = (url, options) => {

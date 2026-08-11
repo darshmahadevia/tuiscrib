@@ -29,6 +29,8 @@ import type {
 
 import {
   createAuthenticationService,
+  hashCredential,
+  TERMINAL_SESSION_INACTIVITY_MS,
   type AuthPersistence,
 } from "./auth.ts"
 import type { BoardUser } from "./boards.ts"
@@ -55,6 +57,8 @@ export type BoardWebSocketData = {
   board: OpenBoardRecord
   user: BoardUser
   connectionId: string
+  /** Only the one-way credential hash is retained for heartbeat re-authentication. */
+  credentialHash: string
 }
 
 export type BoardWebSocket = Bun.ServerWebSocket<BoardWebSocketData>
@@ -114,6 +118,9 @@ export type BoardCollaborationOptions = {
   sessionAuthenticator?: (
     credential: string | null,
   ) => Promise<TerminalSessionAuthentication | undefined>
+  sessionActivityAuthenticator?: (
+    credentialHash: string,
+  ) => Promise<TerminalSessionAuthentication | undefined>
 }
 
 export function createBoardCollaboration(
@@ -121,6 +128,8 @@ export function createBoardCollaboration(
 ): BoardCollaboration {
   const clock = options.clock ?? (() => new Date())
   const authenticate = options.sessionAuthenticator ?? createSessionAuthenticator(options, clock)
+  const authenticateActivity = options.sessionActivityAuthenticator ??
+    createSessionActivityAuthenticator(options, clock)
   const stickyNoteIdGenerator = options.stickyNoteIdGenerator ?? defaultStickyNoteIdGenerator
   const presenceByBoard = new Map<string, BoardPresenceState>()
   const creationClaimsById = new Map<string, StickyNoteCreationClaim>()
@@ -151,14 +160,21 @@ export function createBoardCollaboration(
         return serviceErrorResponse(503, { error: "service unavailable" })
       }
 
+      const credential = readBearerCredential(request)
       let authentication: Awaited<ReturnType<NonNullable<typeof authenticate>>>
       try {
-        authentication = await authenticate(readBearerCredential(request))
+        authentication = await authenticate(credential)
       } catch {
         return serviceErrorResponse(503, { error: "service unavailable" })
       }
 
       if (!authentication || "status" in authentication) {
+        return serviceErrorResponse(401, {
+          error: "Your Terminal Session is invalid. Sign in again.",
+          code: "invalid_session",
+        })
+      }
+      if (!credential) {
         return serviceErrorResponse(401, {
           error: "Your Terminal Session is invalid. Sign in again.",
           code: "invalid_session",
@@ -181,6 +197,7 @@ export function createBoardCollaboration(
           board: authorized.board,
           user: authentication.user,
           connectionId: crypto.randomUUID(),
+          credentialHash: hashCredential(credential),
         },
       })
       return upgraded ? undefined : serviceErrorResponse(400, { error: "WebSocket upgrade failed." })
@@ -357,6 +374,9 @@ export function createBoardCollaboration(
 
     try {
       switch (parsed.data.type) {
+        case "heartbeat":
+          await refreshHeartbeat(socket)
+          return
         case "begin_sticky_note":
           beginStickyNote(socket, parsed.data)
           return
@@ -383,6 +403,26 @@ export function createBoardCollaboration(
         ? "Sticky Note editing was rejected."
         : "Sticky Note creation was rejected."
       sendCommandError(socket, "sticky_note_rejected", rejectedMessage)
+    }
+  }
+
+  async function refreshHeartbeat(socket: BoardWebSocket): Promise<void> {
+    if (!authenticateActivity) {
+      socket.close()
+      return
+    }
+    const credentialHash = socket.data.credentialHash
+    if (!credentialHash) {
+      socket.close()
+      return
+    }
+    try {
+      const authentication = await authenticateActivity(credentialHash)
+      if (!authentication || "status" in authentication) {
+        socket.close()
+      }
+    } catch {
+      socket.close()
     }
   }
 
@@ -977,6 +1017,25 @@ function createSessionAuthenticator(
     clock,
   })
   return (credential) => authentication.authenticate(credential)
+}
+
+function createSessionActivityAuthenticator(
+  options: BoardCollaborationOptions,
+  clock: () => Date,
+): BoardCollaborationOptions["sessionActivityAuthenticator"] {
+  const authenticateTerminalSession = options.persistence.authenticateTerminalSession
+  if (typeof authenticateTerminalSession !== "function") {
+    return undefined
+  }
+
+  return (credentialHash) => {
+    const now = clock()
+    return authenticateTerminalSession({
+      credentialHash,
+      now,
+      expiresAt: new Date(now.getTime() + TERMINAL_SESSION_INACTIVITY_MS),
+    })
+  }
 }
 
 function getBoardIdFromRequest(request: Request): string | null {

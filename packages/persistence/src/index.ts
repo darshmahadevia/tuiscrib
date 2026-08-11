@@ -1,5 +1,8 @@
 export {
   createPersistence,
+  MIGRATION_LOCK_NAME,
+  MIN_PERSISTENCE_POOL_MAX,
+  MAX_PERSISTENCE_POOL_MAX,
   type BoardSummaryRecord,
   type AuthenticateTerminalSessionInput,
   type AuthUserRecord,

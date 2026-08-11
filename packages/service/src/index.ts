@@ -1,5 +1,11 @@
 export { createServiceApp, type ServiceAppOptions } from "./app.ts"
 export {
+  loadServiceEnvironment,
+  redactServiceError,
+  ServiceEnvironmentError,
+  type ServiceEnvironment,
+} from "./config.ts"
+export {
   AuthRateLimiter,
   TERMINAL_SESSION_INACTIVITY_MS,
   createAuthenticationService,

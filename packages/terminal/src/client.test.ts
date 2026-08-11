@@ -345,6 +345,55 @@ test("Board client preflights Membership, opens the authenticated WebSocket, and
   connection.close()
 })
 
+test("Board client sends authenticated application heartbeats and clears them on close", async () => {
+  const credential = "a".repeat(43)
+  const boardId = "Qx7u3nW8kM2pR5sT9vY4aB"
+  const sent: string[] = []
+  let socket: BoardSocket | undefined
+  const client = createBoardClient(
+    "http://tuiscrib.test",
+    async () => new Response(JSON.stringify({ status: "ready" }), { status: 200 }),
+    () => {
+      socket = {
+        onmessage: null,
+        onerror: null,
+        onclose: null,
+        send: (data) => sent.push(data),
+        close: () => undefined,
+      }
+      return socket
+    },
+    { heartbeatIntervalMs: 1_000 },
+  )
+  const openBoard = client.openBoard
+  if (!openBoard) {
+    throw new Error("Board client does not support Board collaboration")
+  }
+
+  const connection = await openBoard(credential, boardId, {
+    onSnapshot: () => undefined,
+    onError: (error) => {
+      throw error
+    },
+    onClose: () => undefined,
+  })
+  socket?.onmessage?.({
+    data: JSON.stringify({
+      type: "snapshot",
+      board: { id: boardId, name: "Ideas", role: "member" },
+      revision: 0,
+      presence: [{ member: { username: "ada_lovelace" }, activity: "viewing" }],
+    }),
+  })
+
+  await Bun.sleep(1_050)
+  expect(sent).toContain(JSON.stringify({ type: "heartbeat" }))
+  connection.close()
+  const sentAtClose = sent.length
+  await Bun.sleep(1_050)
+  expect(sent).toHaveLength(sentAtClose)
+})
+
 test("Board client fails closed when a WebSocket sends malformed snapshot data", async () => {
   const credential = "b".repeat(43)
   let socket: BoardSocket | undefined

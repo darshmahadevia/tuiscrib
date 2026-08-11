@@ -9,6 +9,7 @@
   },
   "scripts": {
     "dev": "bun --watch src/main.ts",
+    "migrate": "bun src/migrate.ts",
     "start": "bun src/main.ts",
     "typecheck": "tsc --noEmit"
   },

@@ -1,14 +1,26 @@
 import { afterAll, beforeAll, expect, test } from "bun:test"
 
 import { MAX_STICKY_NOTES } from "@tuiscrib/contracts"
+import postgres from "postgres"
 
-import { createPersistence, type Persistence } from "./client.ts"
+import {
+  createPersistence,
+  MIGRATION_LOCK_NAME,
+  type Persistence,
+} from "./client.ts"
 
 const databaseUrl = process.env.TEST_DATABASE_URL ?? process.env.DATABASE_URL
 const integrationTest = databaseUrl ? test : test.skip
 
 let persistence: Persistence | null = null
 let concurrentPersistence: Persistence | null = null
+
+test("keeps the persistence pool within the migration-safe bounded range", () => {
+  const options = { databaseUrl: "postgresql://postgres:postgres@127.0.0.1:5432/tuiscrib" }
+
+  expect(() => createPersistence({ ...options, maxConnections: 1 })).toThrow("2 through 8")
+  expect(() => createPersistence({ ...options, maxConnections: 9 })).toThrow("2 through 8")
+})
 
 beforeAll(async () => {
   if (!databaseUrl) {
@@ -87,6 +99,30 @@ integrationTest("creates a durable Sticky Note with attribution and one later Bo
   })
   expect(opened?.revision).toBe(1)
   expect(opened?.stickyNotes).toHaveLength(1)
+})
+
+integrationTest("fails clearly when another process holds the migration lock", async () => {
+  if (!databaseUrl) {
+    throw new Error("database URL was not configured")
+  }
+
+  const blocker = postgres(databaseUrl, { max: 1, prepare: false })
+  const reserved = await blocker.reserve()
+  const migrating = createPersistence({
+    databaseUrl,
+    migrationLockTimeoutMs: 75,
+    migrationLockPollMs: 10,
+  })
+
+  try {
+    await reserved`select pg_advisory_lock(hashtext(${MIGRATION_LOCK_NAME}))`
+    await expect(migrating.migrate()).rejects.toThrow("migration lock")
+  } finally {
+    await reserved`select pg_advisory_unlock(hashtext(${MIGRATION_LOCK_NAME}))`.catch(() => undefined)
+    await reserved.release()
+    await blocker.end({ timeout: 5 })
+    await migrating.close()
+  }
 })
 
 integrationTest("rejects empty creation without a durable row or a Board revision", async () => {

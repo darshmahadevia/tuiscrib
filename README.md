@@ -52,3 +52,22 @@ Standalone release builds for macOS, Linux, and Windows are documented in [docs/
 bun install --frozen-lockfile --os="*" --cpu="*"
 bun run build:release -- --all --output dist/releases
 ```
+
+## Hosted deployment
+
+The first hosted two-user collaboration slice is defined by [`render.yaml`](render.yaml), [`Dockerfile`](Dockerfile), and [docs/deployment.md](docs/deployment.md). It uses one Render Free Bun/Hono service with HTTPS/WebSockets and a pooled Neon PostgreSQL runtime URL. Render's pre-deploy command uses a separate direct Neon URL to apply the current Drizzle migrations under a PostgreSQL advisory lock before the service starts accepting traffic; Neon transaction pooling does not support session-level migration locks.
+
+Build and verify the local image plus a disposable PostgreSQL instance with:
+
+```bash
+bun run smoke:container
+```
+
+After a real Render service and Neon database are provisioned, verify the public URL with:
+
+```bash
+TUISCRIB_SMOKE_REQUIRE_HTTPS=true \
+  bun run smoke:hosted -- --url https://your-render-service.onrender.com
+```
+
+Free-tier sleep, restart, quota, and single-instance behavior are accepted portfolio constraints; this repository makes no production-reliability claim. See [docs/deployment.md](docs/deployment.md) for the environment contract and deployment evidence required for issue #16.

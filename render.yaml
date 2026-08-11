@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: tuiscrib
+    runtime: docker
+    plan: free
+    region: ohio
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    preDeployCommand: bun run service:migrate
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: MIGRATION_DATABASE_URL
+        sync: false
+      - key: NODE_ENV
+        value: production
+      - key: TUISCRIB_REQUIRE_POOLED_DATABASE_URL
+        value: "true"
+      - key: TUISCRIB_MIGRATIONS_PREDEPLOYED
+        value: "true"
+      - key: DATABASE_POOL_MAX
+        value: "4"
+      - key: DATABASE_CONNECT_TIMEOUT_SECONDS
+        value: "10"
+      - key: DATABASE_IDLE_TIMEOUT_SECONDS
+        value: "20"
+      - key: MIGRATION_LOCK_TIMEOUT_MS
+        value: "30000"
+      - key: WEBSOCKET_IDLE_TIMEOUT_SECONDS
+        value: "120"

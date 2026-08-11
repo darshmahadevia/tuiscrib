@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test"
 
 import { createServiceApp } from "./app.ts"
+import { hashCredential } from "./auth.ts"
 import { createBoardCollaboration } from "./collaboration.ts"
 
 const credential = "a".repeat(43)
@@ -148,6 +149,58 @@ test("refreshes the authoritative Board snapshot at WebSocket open after the HTT
   await Promise.resolve()
 
   expect(messages[0]).toMatchObject({ type: "snapshot", revision: 2 })
+})
+
+test("re-authenticates an authenticated Board heartbeat to refresh Terminal Session activity", async () => {
+  const heartbeatHashes: string[] = []
+  let upgradedData: Record<string, unknown> | undefined
+  const collaboration = createBoardCollaboration({
+    persistence: {
+      openBoard: async ({ publicId }) => ({
+        board: { ...board, id: publicId },
+        revision: 0,
+      }),
+    },
+    sessionAuthenticator: async (value) => {
+      return value === credential ? { user: { id: 7, username: "ada_lovelace" } } : null
+    },
+    sessionActivityAuthenticator: async (credentialHash) => {
+      heartbeatHashes.push(credentialHash)
+      return credentialHash === hashCredential(credential)
+        ? { user: { id: 7, username: "ada_lovelace" } }
+        : null
+    },
+  })
+
+  const response = await collaboration.handleUpgrade(
+    new Request(`http://tuiscrib.test/boards/${boardId}/collaboration`, {
+      headers: {
+        upgrade: "websocket",
+        authorization: `Bearer ${credential}`,
+      },
+    }),
+    {
+      upgrade: (_request: Request, options: { data: Record<string, unknown> }) => {
+        upgradedData = options.data
+        return true
+      },
+    } as never,
+  )
+  expect(response).toBeUndefined()
+
+  const socket = {
+    data: upgradedData,
+    send: () => undefined,
+    close: () => undefined,
+  }
+  collaboration.websocket.open?.(socket as never)
+  await Promise.resolve()
+  await Promise.resolve()
+  collaboration.websocket.message?.(socket as never, JSON.stringify({ type: "heartbeat" }))
+  await Promise.resolve()
+  await Promise.resolve()
+
+  expect(heartbeatHashes).toEqual([hashCredential(credential)])
 })
 
 type SocketClient = {
