@@ -9,7 +9,10 @@ on:
       - "package.json"
       - "packages/contracts/**"
       - "packages/terminal/**"
+      - "README.md"
+      - "LICENSE"
       - "docs/release.md"
+      - "docs/portfolio-demo.md"
   pull_request:
     paths:
       - ".github/workflows/release-binaries.yml"
@@ -17,7 +20,10 @@ on:
       - "package.json"
       - "packages/contracts/**"
       - "packages/terminal/**"
+      - "README.md"
+      - "LICENSE"
       - "docs/release.md"
+      - "docs/portfolio-demo.md"
   workflow_dispatch:
 
 permissions:
@@ -65,9 +71,10 @@ jobs:
       - name: Test release, capability, and config seams
         run: |
           bun test packages/terminal/src/release.test.ts
+          bun test packages/terminal/src/server.test.ts
           bun test packages/terminal/src/credentials.test.ts --test-name-pattern "uses the protected platform config location"
 
-      - name: Build and verify reproducibility
+      - name: Build artifacts and verify reproducibility
         run: bun run build:release -- --target "${{ matrix.target }}" --output artifacts --verify-reproducible
 
       - name: Smoke test first render and clean exit
@@ -76,9 +83,12 @@ jobs:
           ${{ matrix.target == 'win32-x64' && 'packages/terminal/src/release-smoke.ts' || '' }}
           --binary "artifacts/${{ matrix.artifact }}"
 
-      - name: Upload standalone binary
+      - name: Upload release binary and SHA-256 checksum
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: artifacts/${{ matrix.artifact }}
+          name: release-input-${{ matrix.target }}
+          path: |
+            artifacts/${{ matrix.artifact }}
+            artifacts/${{ matrix.artifact }}.sha256
           if-no-files-found: error
+          retention-days: 90

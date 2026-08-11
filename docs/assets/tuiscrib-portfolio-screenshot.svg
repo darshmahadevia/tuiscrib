@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 760" role="img" aria-labelledby="title description">
+  <title id="title">Tuiscrib terminal collaboration canvas</title>
+  <desc id="description">A dark terminal window showing two members collaborating on colorful Sticky Notes in a Board.</desc>
+  <rect width="1280" height="760" fill="#0b1017"/>
+  <rect x="34" y="30" width="1212" height="700" rx="18" fill="#111923" stroke="#303d4d" stroke-width="2"/>
+  <rect x="34" y="30" width="1212" height="52" rx="18" fill="#182431"/>
+  <circle cx="68" cy="56" r="7" fill="#f85149"/>
+  <circle cx="94" cy="56" r="7" fill="#d29922"/>
+  <circle cx="120" cy="56" r="7" fill="#3fb950"/>
+  <text x="154" y="63" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="20">tuiscrib · shared Board</text>
+
+  <text x="70" y="126" fill="#58a6ff" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="24" font-weight="700">TUISCRIB · SHELL</text>
+  <text x="1090" y="126" fill="#3fb950" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18">● CONNECTED</text>
+  <text x="70" y="162" fill="#e6edf3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="20">Board: launch ideas   ·   Revision: 7   ·   2 Members</text>
+  <text x="70" y="194" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="17">MODE  NAVIGATE   arrows/hjkl move   n new Sticky Note   ? help</text>
+
+  <rect x="70" y="222" width="840" height="406" rx="8" fill="#0d1117" stroke="#303d4d" stroke-width="2"/>
+  <path d="M70 290H910 M70 358H910 M70 426H910 M70 494H910 M70 562H910 M175 222V628 M280 222V628 M385 222V628 M490 222V628 M595 222V628 M700 222V628 M805 222V628" stroke="#1b2733" stroke-width="1"/>
+  <text x="94" y="254" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16">Board canvas · Position (0, 0)</text>
+
+  <rect x="164" y="326" width="310" height="168" rx="8" fill="#3d2e18" stroke="#d29922" stroke-width="2"/>
+  <rect x="164" y="326" width="310" height="32" rx="8" fill="#5a421c"/>
+  <text x="184" y="349" fill="#f2cc60" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16" font-weight="700">● amber · selected</text>
+  <text x="184" y="391" fill="#f0e6cf" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="21">Ship a focused demo</text>
+  <text x="184" y="423" fill="#c9b98f" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16">durable hosted state</text>
+  <text x="184" y="463" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="15">darsh · Last Edit just now</text>
+
+  <rect x="526" y="408" width="310" height="168" rx="8" fill="#172f43" stroke="#58a6ff" stroke-width="2"/>
+  <rect x="526" y="408" width="310" height="32" rx="8" fill="#1d4664"/>
+  <text x="546" y="431" fill="#79c0ff" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16" font-weight="700">● blue · shared</text>
+  <text x="546" y="473" fill="#dbeeff" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="21">Try two terminal clients</text>
+  <text x="546" y="505" fill="#9ec8eb" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16">edit claims keep typing safe</text>
+  <text x="546" y="545" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="15">ada_lovelace · Last Edit 2m ago</text>
+
+  <rect x="938" y="222" width="274" height="406" rx="8" fill="#161b22" stroke="#303d4d" stroke-width="2"/>
+  <text x="966" y="262" fill="#e6edf3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="19" font-weight="700">Presence</text>
+  <line x1="966" y1="280" x2="1184" y2="280" stroke="#303d4d"/>
+  <circle cx="978" cy="316" r="6" fill="#3fb950"/>
+  <text x="996" y="322" fill="#e6edf3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16">darsh</text>
+  <text x="996" y="346" fill="#d29922" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="15">editing · amber</text>
+  <circle cx="978" cy="392" r="6" fill="#3fb950"/>
+  <text x="996" y="398" fill="#e6edf3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16">ada_lovelace</text>
+  <text x="996" y="422" fill="#58a6ff" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="15">viewing · blue</text>
+  <text x="966" y="480" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="15">Connection: CONNECTED</text>
+  <text x="966" y="510" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="15">Sticky Notes: 2</text>
+  <text x="966" y="540" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="15">Board revision: 7</text>
+  <text x="966" y="588" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14">reconnects from snapshots</text>
+
+  <text x="70" y="674" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16">Enter edit · c color · [/] stacking order · Tab overlap selection · q quit</text>
+</svg>

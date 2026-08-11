@@ -48,4 +48,6 @@ This URL is a portfolio demo, not a production guarantee:
 - Terminal credentials are unrecoverable by design: losing both the password and the protected local Terminal Session credential permanently loses access. There is no email, password reset, identity closure, offline cache, or mutation queue.
 - The service is one Render instance with process-local Presence and Edit Claims. No uptime, horizontal scaling, outage durability, backup, restore, signing, notarization, or production support guarantee is claimed.
 
+The Public Portfolio Release is for non-sensitive data only. GitHub Issues is the reporting channel, with no response-time promise or support commitment. The free Render and Supabase plans may sleep, pause, restart, or lose data; Tuiscrib does not provide application-managed backups, recovery, monitoring, or uptime guarantees.
+
 See [`docs/deployment.md`](deployment.md), [`docs/release.md`](release.md), and the ADRs for the complete provider and release constraints.

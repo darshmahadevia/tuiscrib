@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto"
-import { mkdtemp, mkdir, readFile, rm } from "node:fs/promises"
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -26,6 +26,7 @@ export type ReleaseBuildArguments = {
 export type BuiltReleaseArtifact = {
   target: ReleaseTarget
   path: string
+  checksumPath: string
   bytes: number
   sha256: string
 }
@@ -122,11 +123,15 @@ export async function buildReleaseArtifact(
   }
 
   const contents = await readFile(outputPath)
+  const sha256 = createHash("sha256").update(contents).digest("hex")
+  const checksumPath = `${outputPath}.sha256`
+  await writeFile(checksumPath, `${sha256}  ${target.artifactFile}\n`, "utf8")
   return {
     target,
     path: outputPath,
+    checksumPath,
     bytes: contents.byteLength,
-    sha256: createHash("sha256").update(contents).digest("hex"),
+    sha256,
   }
 }
 

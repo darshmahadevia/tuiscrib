@@ -2,6 +2,17 @@
 
 Tuiscrib ships one Bun standalone executable per supported platform architecture. The executable contains the Bun runtime, the React-bound OpenTUI client, and the OpenTUI native runtime assets; running a release binary does not require Bun, Node.js, a package install, or the repository.
 
+## Service URL configuration
+
+Standalone binaries connect to the hosted Tuiscrib Service at `https://tuiscrib.onrender.com` when no override is supplied. The client accepts an explicit `--server <url>` flag and continues to accept `TUISCRIB_URL` for environment-based configuration:
+
+```bash
+./tuiscrib-linux-x64 --server https://your-service.example
+TUISCRIB_URL=https://your-service.example ./tuiscrib-linux-x64
+```
+
+The precedence is `--server <url>` flag, then `TUISCRIB_URL`, then the hosted default. The value must be an `http://` or `https://` server origin. Credentials, a path, query string, and fragment are rejected because the terminal client derives the HTTP and WebSocket endpoints from the origin. Invalid values stop the client before it opens the terminal renderer. `TUISCRIB_URL=http://127.0.0.1:3000` remains the local-development configuration.
+
 ## Support matrix
 
 | Platform | Architecture | Bun target | Artifact | Linux libc | Startup smoke |
@@ -62,4 +73,19 @@ bun run smoke:release -- --binary dist/releases/tuiscrib-darwin-arm64
 
 The GitHub Actions matrix runs this build, reproducibility check, and smoke test on native macOS, Linux, and Windows runners for every architecture in the matrix. It does not require a service or database because the startup shell can render the signed-out state without network access.
 
-Release executables are currently unsigned; platform signing credentials and distribution notarization are release-operator concerns, not runtime prerequisites.
+Release executables are unsigned. Signing and notarization are outside the v0.1.0 Public Portfolio Release boundary.
+
+## Manual v0.1.0 GitHub Release inputs
+
+The `Standalone terminal binaries` workflow builds and smoke-tests the five targets above on their native CI runners. Each matrix job uploads one durable workflow artifact named `release-input-<target>` containing:
+
+- the standalone binary; and
+- a matching `<binary>.sha256` sidecar containing the SHA-256 digest and filename.
+
+The workflow has read-only repository permissions and does not create tags or publish a GitHub Release. The maintainer must perform the final release manually after the workflow succeeds:
+
+1. Download all five `release-input-*` workflow artifacts from the successful run.
+2. Keep each binary beside its `.sha256` sidecar and verify the digest with the platform's SHA-256 tool (`sha256sum`, `shasum -a 256`, or `Get-FileHash`).
+3. Create the `v0.1.0` GitHub Release manually, upload the five binaries and five checksum sidecars, and include the Public Portfolio Release limitations from the README and ADR 0012 in the release notes.
+
+This is a one-time portfolio release preparation. It does not establish an ongoing release cadence, automatic updates, installers, package-manager distribution, or signing workflow.

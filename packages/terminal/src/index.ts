@@ -28,6 +28,12 @@ export {
   type CredentialStoreOptions,
 } from "./credentials.ts"
 export {
+  DEFAULT_TUISCRIB_SERVER_URL,
+  parseServerArgument,
+  resolveServerUrl,
+  validateServerUrl,
+} from "./server.ts"
+export {
   MIN_TERMINAL_HEIGHT,
   MIN_TERMINAL_WIDTH,
   TerminalShell,
