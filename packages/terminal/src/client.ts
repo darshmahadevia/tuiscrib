@@ -19,6 +19,7 @@ import {
   type BoardCommandError,
   type StickyNoteCreated,
   type StickyNoteCreationClaimGranted,
+  type StickyNoteDeleted,
   type StickyNoteEditClaimGranted,
   type StickyNoteMoved,
   type StickyNoteRecolored,
@@ -111,6 +112,7 @@ export type BoardConnectionHandlers = {
   onConnectionState?(state: BoardConnectionState): void
   onStickyNoteCreationClaimGranted?(claim: StickyNoteCreationClaimGranted): void
   onStickyNoteCreated?(event: StickyNoteCreated): void
+  onStickyNoteDeleted?(event: StickyNoteDeleted): void
   onStickyNoteEditClaimGranted?(claim: StickyNoteEditClaimGranted): void
   onStickyNoteUpdated?(event: StickyNoteUpdated): void
   onStickyNoteMoved?(event: StickyNoteMoved): void
@@ -130,7 +132,7 @@ type BoardSocketGeneration = {
   awaitingSnapshot: boolean
   lastRevision: number | null
   lastSnapshotFingerprint: string | null
-  pendingEvents: Map<number, StickyNoteCreated | StickyNoteUpdated | StickyNoteMoved | StickyNoteRecolored | StickyNoteReordered>
+  pendingEvents: Map<number, StickyNoteCreated | StickyNoteDeleted | StickyNoteUpdated | StickyNoteMoved | StickyNoteRecolored | StickyNoteReordered>
   ending: boolean
   heartbeatHandle: unknown | null
 }
@@ -550,7 +552,7 @@ export function createBoardClient(
 
       function applyDurableEvent(
         generation: BoardSocketGeneration,
-        event: StickyNoteCreated | StickyNoteUpdated | StickyNoteMoved | StickyNoteRecolored | StickyNoteReordered,
+        event: StickyNoteCreated | StickyNoteDeleted | StickyNoteUpdated | StickyNoteMoved | StickyNoteRecolored | StickyNoteReordered,
       ): void {
         if (!isCurrent(generation) || generation.lastRevision === null) {
           return
@@ -565,6 +567,8 @@ export function createBoardClient(
         generation.lastRevision = event.revision
         if (event.type === "sticky_note_created") {
           handlers.onStickyNoteCreated?.(event)
+        } else if (event.type === "sticky_note_deleted") {
+          handlers.onStickyNoteDeleted?.(event)
         } else if (event.type === "sticky_note_moved") {
           handlers.onStickyNoteMoved?.(event)
         } else if (event.type === "sticky_note_recolored") {

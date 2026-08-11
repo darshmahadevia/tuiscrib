@@ -66,7 +66,7 @@ export type TerminalShellProps = {
 
 type ShellOverlay = "none" | "help"
 type ShellView = "home" | "boards" | "board-actions" | "canvas" | "form" | "confirmation"
-type ConfirmationAction = "placeholder" | "leave"
+type ConfirmationAction = "placeholder" | "leave" | "delete-sticky-note"
 
 type FormKind =
   | "sign-in"
@@ -133,6 +133,13 @@ type EstablishedStickyNoteEdit = {
   releaseSent: boolean
   claimRequestSent: boolean
   reconnecting: boolean
+}
+
+type StickyNoteDeletion = {
+  stickyNoteId: string
+  note: StickyNote
+  status: "requesting" | "confirming" | "deleting"
+  claimId?: string
 }
 
 type StickyNoteColorChoice = {
@@ -324,6 +331,7 @@ export function TerminalShell({
     useState<ProvisionalStickyNote | null>(null)
   const [establishedStickyNoteEdit, setEstablishedStickyNoteEdit] =
     useState<EstablishedStickyNoteEdit | null>(null)
+  const [stickyNoteDeletion, setStickyNoteDeletion] = useState<StickyNoteDeletion | null>(null)
   const [boardOpenPending, setBoardOpenPending] = useState(false)
   const [formPending, setFormPending] = useState(false)
   const [sessionState, setSessionState] = useState<SessionState>(
@@ -356,9 +364,12 @@ export function TerminalShell({
   const establishedStickyNoteEditRef = useRef<EstablishedStickyNoteEdit | null>(
     establishedStickyNoteEdit,
   )
+  const stickyNoteDeletionRef = useRef<StickyNoteDeletion | null>(stickyNoteDeletion)
   const cancelledProvisionalIdsRef = useRef(new Set<string>())
   const cancelledStickyNoteEditIdsRef = useRef(new Set<string>())
   const cancelledStickyNoteEditRequestsRef = useRef(new Set<string>())
+  const cancelledStickyNoteDeletionIdsRef = useRef(new Set<string>())
+  const cancelledStickyNoteDeletionRequestsRef = useRef(new Set<string>())
   const stickyNoteDebouncerRef = useRef<StickyNoteDebouncer | null>(null)
   overlayRef.current = overlay
   viewRef.current = view
@@ -379,6 +390,7 @@ export function TerminalShell({
   colorPickerStickyNoteIdRef.current = colorPickerStickyNoteId
   provisionalStickyNoteRef.current = provisionalStickyNote
   establishedStickyNoteEditRef.current = establishedStickyNoteEdit
+  stickyNoteDeletionRef.current = stickyNoteDeletion
 
   function resetCanvasNavigation(options: { render?: boolean } = {}) {
     const initial = createCanvasNavigationState()
@@ -481,6 +493,14 @@ export function TerminalShell({
     flushSync(() => setEstablishedStickyNoteEdit(next))
   }
 
+  function updateStickyNoteDeletion(
+    update: (current: StickyNoteDeletion | null) => StickyNoteDeletion | null,
+  ) {
+    const next = update(stickyNoteDeletionRef.current)
+    stickyNoteDeletionRef.current = next
+    flushSync(() => setStickyNoteDeletion(next))
+  }
+
   function sharedBoardMutationsEnabled(): boolean {
     return !boardClient?.openBoard || boardConnectionStateRef.current === "connected"
   }
@@ -490,6 +510,11 @@ export function TerminalShell({
   ): void {
     stickyNoteDebouncerRef.current?.cancel()
     provisionalStickyNoteRef.current = null
+    const deletion = stickyNoteDeletionRef.current
+    if (deletion) {
+      cancelledStickyNoteDeletionIdsRef.current.add(deletion.stickyNoteId)
+    }
+    stickyNoteDeletionRef.current = null
     colorPickerStickyNoteIdRef.current = null
     cancelledProvisionalIdsRef.current.clear()
     if (!preserveEstablishedEdit) {
@@ -514,6 +539,7 @@ export function TerminalShell({
     flushSync(() => {
       setProvisionalStickyNote(null)
       setEstablishedStickyNoteEdit(preservedEdit)
+      setStickyNoteDeletion(null)
       setColorPickerStickyNoteId(null)
       setBoardSnapshot(null)
       setMode("navigate")
@@ -933,6 +959,62 @@ export function TerminalShell({
     }
   }
 
+  const startStickyNoteDeletion = () => {
+    if (
+      provisionalStickyNoteRef.current ||
+      establishedStickyNoteEditRef.current ||
+      stickyNoteDeletionRef.current
+    ) {
+      return
+    }
+    if (!sharedBoardMutationsEnabled()) {
+      flushSync(() => {
+        setNotice({ kind: "error", message: "Shared mutations are disabled while the Board reconnects." })
+      })
+      return
+    }
+    const connection = boardConnectionRef.current
+    if (!connection) {
+      flushSync(() => {
+        setNotice({ kind: "error", message: "Open a live Board before deleting a Sticky Note." })
+      })
+      return
+    }
+    const note = selectedStickyNote()
+    if (!note) {
+      flushSync(() => {
+        setNotice({ kind: "error", message: "Select a Sticky Note before deleting it." })
+      })
+      return
+    }
+
+    const deletion: StickyNoteDeletion = {
+      stickyNoteId: note.id,
+      note,
+      status: "requesting",
+    }
+    selectedStickyNoteIdRef.current = note.id
+    stickyNoteDeletionRef.current = deletion
+    flushSync(() => {
+      setSelectedStickyNoteId(note.id)
+      setStickyNoteDeletion(deletion)
+      setMode("navigate")
+      setNotice({ kind: "status", message: "Requesting Sticky Note Edit Claim before deletion…" })
+    })
+    try {
+      connection.send({
+        type: "begin_sticky_note_edit",
+        stickyNoteId: note.id,
+      })
+    } catch (error) {
+      stickyNoteDeletionRef.current = null
+      flushSync(() => {
+        setStickyNoteDeletion(null)
+        setNotice({ kind: "error", message: formatBoardError(error) })
+      })
+    }
+  }
+
   const releaseProvisionalStickyNote = () => {
     stickyNoteDebouncerRef.current?.cancel()
     const draft = provisionalStickyNoteRef.current
@@ -989,6 +1071,72 @@ export function TerminalShell({
   const clearEstablishedStickyNoteEdit = () => {
     establishedStickyNoteEditRef.current = null
     flushSync(() => setEstablishedStickyNoteEdit(null))
+  }
+
+  const cancelStickyNoteDeletion = () => {
+    const deletion = stickyNoteDeletionRef.current
+    if (!deletion) {
+      flushSync(() => setView("canvas"))
+      return
+    }
+    if (deletion.status === "deleting") {
+      flushSync(() => {
+        setNotice({ kind: "status", message: "Deletion is already being committed; confirmation cannot be cancelled." })
+      })
+      return
+    }
+
+    if (deletion.claimId && boardConnectionStateRef.current === "connected") {
+      try {
+        boardConnectionRef.current?.send({
+          type: "release_sticky_note_edit",
+          claimId: deletion.claimId,
+          stickyNoteId: deletion.stickyNoteId,
+        })
+      } catch {
+        cancelledStickyNoteDeletionIdsRef.current.add(deletion.stickyNoteId)
+      }
+    } else {
+      cancelledStickyNoteDeletionIdsRef.current.add(deletion.stickyNoteId)
+    }
+    stickyNoteDeletionRef.current = null
+    selectedStickyNoteIdRef.current = deletion.stickyNoteId
+    flushSync(() => {
+      setStickyNoteDeletion(null)
+      setView("canvas")
+      setMode("navigate")
+      setConfirmationAction("placeholder")
+      setSelectedStickyNoteId(deletion.stickyNoteId)
+      setNotice({ kind: "status", message: "Sticky Note deletion cancelled; Edit Claim released." })
+    })
+  }
+
+  const confirmStickyNoteDeletion = () => {
+    const deletion = stickyNoteDeletionRef.current
+    const connection = boardConnectionRef.current
+    if (!deletion || deletion.status !== "confirming" || !deletion.claimId || !connection) {
+      return
+    }
+    if (boardConnectionStateRef.current !== "connected") {
+      flushSync(() => setNotice({ kind: "error", message: "Shared mutations are disabled while the Board reconnects." }))
+      return
+    }
+    const next = { ...deletion, status: "deleting" as const }
+    stickyNoteDeletionRef.current = next
+    flushSync(() => setStickyNoteDeletion(next))
+    try {
+      connection.send({
+        type: "delete_sticky_note",
+        claimId: deletion.claimId,
+        stickyNoteId: deletion.stickyNoteId,
+      })
+    } catch (error) {
+      stickyNoteDeletionRef.current = deletion
+      flushSync(() => {
+        setStickyNoteDeletion(deletion)
+        setNotice({ kind: "error", message: formatBoardError(error) })
+      })
+    }
   }
 
   const releaseEstablishedStickyNoteEdit = () => {
@@ -1073,6 +1221,19 @@ export function TerminalShell({
     stickyNote: StickyNote
   }) => {
     cancelledStickyNoteEditRequestsRef.current.delete(claim.stickyNoteId)
+    cancelledStickyNoteDeletionRequestsRef.current.delete(claim.stickyNoteId)
+    if (cancelledStickyNoteDeletionIdsRef.current.delete(claim.stickyNoteId)) {
+      try {
+        boardConnectionRef.current?.send({
+          type: "release_sticky_note_edit",
+          claimId: claim.claimId,
+          stickyNoteId: claim.stickyNoteId,
+        })
+      } catch {
+        // The connection may have closed between local cancellation and this acknowledgement.
+      }
+      return
+    }
     if (cancelledStickyNoteEditIdsRef.current.delete(claim.stickyNoteId)) {
       try {
         boardConnectionRef.current?.send({
@@ -1083,6 +1244,29 @@ export function TerminalShell({
       } catch {
         // The connection may have closed between local cancellation and this acknowledgement.
       }
+      return
+    }
+
+    const deletion = stickyNoteDeletionRef.current
+    if (deletion?.stickyNoteId === claim.stickyNoteId) {
+      mergeStickyNoteIntoSnapshot(claim.stickyNote, boardSnapshotRef.current?.revision ?? 0)
+      const next: StickyNoteDeletion = {
+        ...deletion,
+        note: claim.stickyNote,
+        claimId: claim.claimId,
+        status: "confirming",
+      }
+      stickyNoteDeletionRef.current = next
+      selectedStickyNoteIdRef.current = claim.stickyNoteId
+      flushSync(() => {
+        setStickyNoteDeletion(next)
+        setSelectedStickyNoteId(claim.stickyNoteId)
+        setView("confirmation")
+        setConfirmationReturnView("canvas")
+        setConfirmationAction("delete-sticky-note")
+        setMode("navigate")
+        setNotice({ kind: "status", message: "Edit Claim granted. Confirm permanent Sticky Note deletion." })
+      })
       return
     }
 
@@ -1270,6 +1454,41 @@ export function TerminalShell({
     }
   }
 
+  const releaseCancelledStickyNoteDeletionClaimsAfterReconnect = (
+    snapshot: BoardSnapshot,
+  ): void => {
+    const connection = boardConnectionRef.current
+    if (!connection || boardConnectionStateRef.current !== "connected") {
+      return
+    }
+
+    for (const stickyNoteId of [...cancelledStickyNoteDeletionIdsRef.current]) {
+      const claim = snapshot.editClaims?.find(
+        (currentClaim) => currentClaim.stickyNoteId === stickyNoteId,
+      )
+      if (!claim) {
+        cancelledStickyNoteDeletionIdsRef.current.delete(stickyNoteId)
+        cancelledStickyNoteDeletionRequestsRef.current.delete(stickyNoteId)
+        continue
+      }
+      if (!editClaimBelongsToAuthenticatedMember(claim)) {
+        cancelledStickyNoteDeletionIdsRef.current.delete(stickyNoteId)
+        cancelledStickyNoteDeletionRequestsRef.current.delete(stickyNoteId)
+        continue
+      }
+      if (cancelledStickyNoteDeletionRequestsRef.current.has(stickyNoteId)) {
+        continue
+      }
+
+      cancelledStickyNoteDeletionRequestsRef.current.add(stickyNoteId)
+      try {
+        connection.send({ type: "begin_sticky_note_edit", stickyNoteId })
+      } catch {
+        cancelledStickyNoteDeletionRequestsRef.current.delete(stickyNoteId)
+      }
+    }
+  }
+
   const requestEstablishedStickyNoteEditReclaim = (snapshot: BoardSnapshot): void => {
     const edit = establishedStickyNoteEditRef.current
     const connection = boardConnectionRef.current
@@ -1372,6 +1591,54 @@ export function TerminalShell({
     }
   }
 
+  const handleStickyNoteDeleted = (event: {
+    revision: number
+    stickyNoteId: string
+    affectedStickyNotes?: StickyNote[]
+  }) => {
+    const current = boardSnapshotRef.current
+    if (!current) {
+      return
+    }
+    const affectedIds = new Set((event.affectedStickyNotes ?? []).map((note) => note.id))
+    const nextNotes = sortCanvasStackingOrder(
+      [
+        ...(current.stickyNotes ?? [])
+          .filter((note) => note.id !== event.stickyNoteId && !affectedIds.has(note.id)),
+        ...(event.affectedStickyNotes ?? []),
+      ],
+    )
+    const selectedWasDeleted = selectedStickyNoteIdRef.current === event.stickyNoteId
+    const nextSelectedStickyNoteId = selectedWasDeleted
+      ? stickyNotesAtCanvasCursor(nextNotes, canvasCursorRef.current)[0]?.id ?? null
+      : selectedStickyNoteIdRef.current
+    const nextSnapshot = {
+      ...current,
+      revision: event.revision,
+      stickyNotes: nextNotes,
+    }
+    boardSnapshotRef.current = nextSnapshot
+    selectedStickyNoteIdRef.current = nextSelectedStickyNoteId
+    const deletion = stickyNoteDeletionRef.current
+    if (deletion?.stickyNoteId === event.stickyNoteId) {
+      stickyNoteDeletionRef.current = null
+    }
+    flushSync(() => {
+      setBoardSnapshot(nextSnapshot)
+      setSelectedStickyNoteId(nextSelectedStickyNoteId)
+      if (deletion?.stickyNoteId === event.stickyNoteId) {
+        setStickyNoteDeletion(null)
+        setView("canvas")
+        setMode("navigate")
+        setConfirmationAction("placeholder")
+      }
+      setNotice({
+        kind: "status",
+        message: `Sticky Note deleted at Board revision ${event.revision}.`,
+      })
+    })
+  }
+
   const handleStickyNoteRecolored = (event: {
     revision: number
     stickyNote: StickyNote
@@ -1437,6 +1704,23 @@ export function TerminalShell({
     }
     if (commandError.code === "edit_claim_unavailable") {
       stickyNoteDebouncerRef.current?.cancel()
+      const deletion = stickyNoteDeletionRef.current
+      if (deletion) {
+        stickyNoteDeletionRef.current = null
+        flushSync(() => {
+          setStickyNoteDeletion(null)
+          setView("canvas")
+          setMode("navigate")
+          setConfirmationAction("placeholder")
+          setNotice({
+            kind: "error",
+            message: commandError.claimHolder
+              ? `Deletion unavailable; Edit Claim holder: ${commandError.claimHolder.username} (${commandError.claimConnection ?? "connected"}).`
+              : commandError.error,
+          })
+        })
+        return
+      }
       establishedStickyNoteEditRef.current = null
       flushSync(() => {
         setEstablishedStickyNoteEdit(null)
@@ -1470,6 +1754,19 @@ export function TerminalShell({
       flushSync(() => setNotice({ kind: "error", message: commandError.error }))
       return
     }
+    if (commandError.code === "sticky_note_rejected" && stickyNoteDeletionRef.current) {
+      const deletion = stickyNoteDeletionRef.current
+      stickyNoteDeletionRef.current = null
+      flushSync(() => {
+        setStickyNoteDeletion(null)
+        setView("canvas")
+        setMode("navigate")
+        setConfirmationAction("placeholder")
+        setSelectedStickyNoteId(deletion.stickyNoteId)
+        setNotice({ kind: "error", message: commandError.error })
+      })
+      return
+    }
     if (commandError.code === "sticky_note_rejected" && establishedStickyNoteEditRef.current) {
       const edit = establishedStickyNoteEditRef.current
       if (edit.status === "requesting" && !edit.publicationRequested) {
@@ -1495,6 +1792,19 @@ export function TerminalShell({
       return
     }
     if (commandError.code === "invalid_edit_claim") {
+      if (stickyNoteDeletionRef.current) {
+        const deletion = stickyNoteDeletionRef.current
+        stickyNoteDeletionRef.current = null
+        flushSync(() => {
+          setStickyNoteDeletion(null)
+          setView("canvas")
+          setMode("navigate")
+          setConfirmationAction("placeholder")
+          setSelectedStickyNoteId(deletion.stickyNoteId)
+          setNotice({ kind: "error", message: commandError.error })
+        })
+        return
+      }
       if (!establishedStickyNoteEditRef.current?.publicationRequested) {
         stickyNoteDebouncerRef.current?.cancel()
         establishedStickyNoteEditRef.current = null
@@ -1680,6 +1990,19 @@ export function TerminalShell({
     stickyNoteDebouncerRef.current?.cancel()
     colorPickerStickyNoteIdRef.current = null
     releaseProvisionalStickyNote()
+    const deletion = stickyNoteDeletionRef.current
+    if (deletion?.claimId && boardConnectionStateRef.current === "connected") {
+      try {
+        boardConnectionRef.current?.send({
+          type: "release_sticky_note_edit",
+          claimId: deletion.claimId,
+          stickyNoteId: deletion.stickyNoteId,
+        })
+      } catch {
+        // The connection is already closing; the service releases the claim on disconnect.
+      }
+    }
+    stickyNoteDeletionRef.current = null
     const edit = establishedStickyNoteEditRef.current
     if (edit && (edit.status === "requesting" || edit.reconnecting || !edit.claimId)) {
       cancelledStickyNoteEditIdsRef.current.add(edit.stickyNoteId)
@@ -1696,9 +2019,12 @@ export function TerminalShell({
     }
     establishedStickyNoteEditRef.current = null
     cancelledStickyNoteEditIdsRef.current.clear()
+    cancelledStickyNoteDeletionIdsRef.current.clear()
+    cancelledStickyNoteDeletionRequestsRef.current.clear()
     boardConnectionStateRef.current = null
     flushSync(() => {
       setEstablishedStickyNoteEdit(null)
+      setStickyNoteDeletion(null)
       setColorPickerStickyNoteId(null)
     })
     activeBoardIdRef.current = null
@@ -1712,6 +2038,19 @@ export function TerminalShell({
     return () => {
       stickyNoteDebouncerRef.current?.cancel()
       releaseProvisionalStickyNote()
+      const deletion = stickyNoteDeletionRef.current
+      if (deletion?.claimId && boardConnectionStateRef.current === "connected") {
+        try {
+          boardConnectionRef.current?.send({
+            type: "release_sticky_note_edit",
+            claimId: deletion.claimId,
+            stickyNoteId: deletion.stickyNoteId,
+          })
+        } catch {
+          // The renderer is shutting down; the service releases the claim on disconnect.
+        }
+      }
+      stickyNoteDeletionRef.current = null
       const edit = establishedStickyNoteEditRef.current
       if (edit && (edit.status === "requesting" || edit.reconnecting || !edit.claimId)) {
         cancelledStickyNoteEditIdsRef.current.add(edit.stickyNoteId)
@@ -1845,6 +2184,7 @@ export function TerminalShell({
           })
           reconcileEstablishedStickyNoteEditFromSnapshot(snapshot)
           releaseCancelledEditClaimsAfterReconnect(snapshot)
+          releaseCancelledStickyNoteDeletionClaimsAfterReconnect(snapshot)
           requestEstablishedStickyNoteEditReclaim(snapshot)
         },
         onStickyNoteCreationClaimGranted: (claim) => {
@@ -1855,6 +2195,11 @@ export function TerminalShell({
         onStickyNoteCreated: (event) => {
           if (isCurrentBoardConnection()) {
             handleStickyNoteCreated(event)
+          }
+        },
+        onStickyNoteDeleted: (event) => {
+          if (isCurrentBoardConnection()) {
+            handleStickyNoteDeleted(event)
           }
         },
         onStickyNoteEditClaimGranted: (claim) => {
@@ -1894,6 +2239,7 @@ export function TerminalShell({
           renderBoardConnectionState(state)
           if (state === "connected" && boardSnapshotRef.current) {
             releaseCancelledEditClaimsAfterReconnect(boardSnapshotRef.current)
+            releaseCancelledStickyNoteDeletionClaimsAfterReconnect(boardSnapshotRef.current)
             requestEstablishedStickyNoteEditReclaim(boardSnapshotRef.current)
           }
         },
@@ -1982,6 +2328,14 @@ export function TerminalShell({
   }
 
   const resolveConfirmation = (confirmed: boolean) => {
+    if (confirmationActionRef.current === "delete-sticky-note") {
+      if (confirmed) {
+        confirmStickyNoteDeletion()
+      } else {
+        cancelStickyNoteDeletion()
+      }
+      return
+    }
     flushSync(() => {
       setView(confirmationReturnView)
       setSelectedIndex(0)
@@ -2481,6 +2835,12 @@ export function TerminalShell({
           startProvisionalStickyNote()
           return
         }
+        if (key.name === "d") {
+          key.preventDefault()
+          key.stopPropagation()
+          startStickyNoteDeletion()
+          return
+        }
         if (key.name === "tab") {
           key.preventDefault()
           cycleSelectedStickyNote()
@@ -2693,7 +3053,7 @@ export function TerminalShell({
       error={notice?.kind === "error" ? notice.message : undefined}
     />
   ) : view === "confirmation" ? (
-    <ShellConfirmation action={confirmationAction} />
+    <ShellConfirmation action={confirmationAction} deletion={stickyNoteDeletion} />
   ) : view === "canvas" ? (
     <CanvasSurface
       mode={mode}
@@ -2971,7 +3331,14 @@ function BoardActions({
   )
 }
 
-function ShellConfirmation({ action }: { action: ConfirmationAction }) {
+function ShellConfirmation({
+  action,
+  deletion,
+}: {
+  action: ConfirmationAction
+  deletion: StickyNoteDeletion | null
+}) {
+  const deletingStickyNote = action === "delete-sticky-note" && deletion
   return (
     <box
       style={{
@@ -2992,13 +3359,39 @@ function ShellConfirmation({ action }: { action: ConfirmationAction }) {
           flexDirection: "column",
         }}
       >
-        <text fg={colors.warning}>{action === "leave" ? "Confirm leaving Board" : "Confirm Board action"}</text>
-        <text fg={colors.text}>This action changes shared Board state.</text>
-        <text fg={colors.muted}>Review the action before continuing.</text>
-        <text fg={colors.warning}>y confirm · n cancel · Escape cancel</text>
+        <text fg={deletingStickyNote ? colors.error : colors.warning}>
+          {deletingStickyNote
+            ? "Permanently delete Sticky Note"
+            : action === "leave"
+              ? "Confirm leaving Board"
+              : "Confirm Board action"}
+        </text>
+        {deletingStickyNote ? (
+          <>
+            <text fg={colors.text}>Sticky Note: {previewStickyNoteText(deletion.note.text)}</text>
+            <text fg={colors.warning}>This permanently changes shared Board state.</text>
+            <text fg={colors.muted}>
+              {deletion.status === "deleting"
+                ? "Deletion is being committed before acknowledgement…"
+                : "The Edit Claim is held for this confirmation."}
+            </text>
+            <text fg={colors.warning}>y permanently delete · n cancel + release Edit Claim · Escape cancel</text>
+          </>
+        ) : (
+          <>
+            <text fg={colors.text}>This action changes shared Board state.</text>
+            <text fg={colors.muted}>Review the action before continuing.</text>
+            <text fg={colors.warning}>y confirm · n cancel · Escape cancel</text>
+          </>
+        )}
       </box>
     </box>
   )
+}
+
+function previewStickyNoteText(text: string): string {
+  const oneLine = text.replaceAll("\n", " ")
+  return oneLine.length > 48 ? `${oneLine.slice(0, 45)}…` : oneLine
 }
 
 function CanvasSurface({

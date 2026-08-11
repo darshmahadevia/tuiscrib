@@ -718,6 +718,268 @@ integrationTest("serializes concurrent Color changes by Board revision and prese
   expect(["blue", "magenta"]).toContain(opened?.stickyNotes?.[0]?.color ?? "")
 })
 
+integrationTest("deletes a Sticky Note transactionally, compacts Stacking Order, and rejects later mutations", async () => {
+  if (!persistence) {
+    throw new Error("persistence was not initialized")
+  }
+
+  const now = new Date("2026-08-10T00:00:00.000Z")
+  const registered = await persistence.registerUser({
+    username: "delete_writer",
+    passwordHash: "$argon2id$v=19$m=65536,t=3,p=1$test$hash",
+    credentialHash: "p".repeat(64),
+    now,
+    expiresAt: new Date(now.getTime() + 30 * 24 * 60 * 60 * 1_000),
+  })
+  if (!registered) {
+    throw new Error("user was not registered")
+  }
+
+  const boardId = "WdeFgHiJkLmNoPqRsTuVwX"
+  const noteIds = [
+    "XdeFgHiJkLmNoPqRsTuVwX",
+    "YdeFgHiJkLmNoPqRsTuVwX",
+    "ZdeFgHiJkLmNoPqRsTuVwX",
+  ]
+  await persistence.createBoard({
+    publicId: boardId,
+    name: "Deletion",
+    ownerUserId: registered.user.id,
+    joinCodeHash: "d".repeat(64),
+    now,
+  })
+  for (const [index, noteId] of noteIds.entries()) {
+    await persistence.createStickyNote({
+      publicId: noteId,
+      boardId,
+      userId: registered.user.id,
+      text: `delete ${index}`,
+      position: { x: index, y: 0 },
+      color: "yellow",
+      now,
+    })
+  }
+
+  const deleted = await persistence.deleteStickyNote({
+    boardId,
+    stickyNoteId: noteIds[1]!,
+    userId: registered.user.id,
+  })
+  expect(deleted).toMatchObject({
+    kind: "deleted",
+    stickyNoteId: noteIds[1],
+    revision: 4,
+    affectedStickyNotes: [{ id: noteIds[2], stackingOrder: 1 }],
+  })
+
+  const opened = await persistence.openBoard({ userId: registered.user.id, publicId: boardId })
+  expect(opened).toMatchObject({
+    revision: 4,
+    stickyNotes: [
+      { id: noteIds[0], stackingOrder: 0 },
+      { id: noteIds[2], stackingOrder: 1 },
+    ],
+  })
+  expect(opened?.stickyNotes).toHaveLength(2)
+
+  await expect(persistence.deleteStickyNote({
+    boardId,
+    stickyNoteId: noteIds[1]!,
+    userId: registered.user.id,
+  })).resolves.toEqual({
+    kind: "not_found",
+    revision: 4,
+  })
+  await expect(persistence.moveStickyNote({
+    boardId,
+    stickyNoteId: noteIds[1]!,
+    userId: registered.user.id,
+    direction: "right",
+  })).resolves.toEqual({ kind: "not_found" })
+  await expect(persistence.openBoard({ userId: registered.user.id, publicId: boardId })).resolves.toMatchObject({
+    revision: 4,
+    stickyNotes: [
+      { id: noteIds[0], stackingOrder: 0 },
+      { id: noteIds[2], stackingOrder: 1 },
+    ],
+  })
+})
+
+integrationTest("rolls back Sticky Note deletion and Board revision together on PostgreSQL failure", async () => {
+  if (!persistence || !databaseUrl) {
+    throw new Error("persistence was not initialized")
+  }
+
+  const now = new Date("2026-08-10T00:00:00.000Z")
+  const registered = await persistence.registerUser({
+    username: "delete_rollback",
+    passwordHash: "$argon2id$v=19$m=65536,t=3,p=1$test$hash",
+    credentialHash: "rollback-delete-23".padEnd(64, "r"),
+    now,
+    expiresAt: new Date(now.getTime() + 30 * 24 * 60 * 60 * 1_000),
+  })
+  if (!registered) {
+    throw new Error("user was not registered")
+  }
+
+  const boardId = "delete23-rb-board-001x"
+  const noteId = "delete23-rb-note-001xx"
+  await persistence.createBoard({
+    publicId: boardId,
+    name: "Delete Rollback",
+    ownerUserId: registered.user.id,
+    joinCodeHash: "a".repeat(64),
+    now,
+  })
+  await persistence.createStickyNote({
+    publicId: noteId,
+    boardId,
+    userId: registered.user.id,
+    text: "must survive rollback",
+    position: { x: 0, y: 0 },
+    color: "yellow",
+    now,
+  })
+
+  const triggerClient = postgres(databaseUrl, { max: 1, prepare: false })
+  try {
+    await triggerClient.unsafe(`
+      create or replace function tuiscrib_delete23_rollback() returns trigger
+      language plpgsql as $$
+      begin
+        if new.public_id = '${boardId}' and new.revision = 2 then
+          raise exception 'delete23 rollback sentinel';
+        end if;
+        return new;
+      end;
+      $$;
+      create trigger tuiscrib_delete23_rollback_trigger
+      before update of revision on boards
+      for each row execute function tuiscrib_delete23_rollback();
+    `)
+
+    await expect(persistence.deleteStickyNote({
+      boardId,
+      stickyNoteId: noteId,
+      userId: registered.user.id,
+    })).rejects.toThrow("Failed query: update")
+
+    await expect(persistence.openBoard({
+      userId: registered.user.id,
+      publicId: boardId,
+    })).resolves.toMatchObject({
+      revision: 1,
+      stickyNotes: [{ id: noteId, text: "must survive rollback", stackingOrder: 0 }],
+    })
+
+    await triggerClient.unsafe(`
+      drop trigger tuiscrib_delete23_rollback_trigger on boards;
+      drop function tuiscrib_delete23_rollback();
+    `)
+    await expect(persistence.deleteStickyNote({
+      boardId,
+      stickyNoteId: noteId,
+      userId: registered.user.id,
+    })).resolves.toMatchObject({ kind: "deleted", stickyNoteId: noteId, revision: 2 })
+  } finally {
+    await triggerClient.unsafe(`
+      drop trigger if exists tuiscrib_delete23_rollback_trigger on boards;
+      drop function if exists tuiscrib_delete23_rollback();
+    `).catch(() => undefined)
+    await triggerClient.end({ timeout: 5 })
+  }
+})
+
+integrationTest("resolves delete races by PostgreSQL commit order in both directions", async () => {
+  if (!persistence || !concurrentPersistence) {
+    throw new Error("persistence was not initialized")
+  }
+
+  const now = new Date("2026-08-10T00:00:00.000Z")
+  const registered = await persistence.registerUser({
+    username: "delete_racer",
+    passwordHash: "$argon2id$v=19$m=65536,t=3,p=1$test$hash",
+    credentialHash: "q".repeat(64),
+    now,
+    expiresAt: new Date(now.getTime() + 30 * 24 * 60 * 60 * 1_000),
+  })
+  if (!registered) {
+    throw new Error("user was not registered")
+  }
+
+  const deleteFirstBoard = "delete23-race-board-01"
+  const deleteFirstNote = "delete23-race-note-001"
+  await persistence.createBoard({
+    publicId: deleteFirstBoard,
+    name: "Delete first",
+    ownerUserId: registered.user.id,
+    joinCodeHash: "e".repeat(64),
+    now,
+  })
+  await persistence.createStickyNote({
+    publicId: deleteFirstNote,
+    boardId: deleteFirstBoard,
+    userId: registered.user.id,
+    text: "delete first",
+    position: { x: 0, y: 0 },
+    color: "yellow",
+    now,
+  })
+  const deleteFirst = await persistence.deleteStickyNote({
+    boardId: deleteFirstBoard,
+    stickyNoteId: deleteFirstNote,
+    userId: registered.user.id,
+  })
+  const moveAfterDelete = await concurrentPersistence.moveStickyNote({
+    boardId: deleteFirstBoard,
+    stickyNoteId: deleteFirstNote,
+    userId: registered.user.id,
+    direction: "right",
+  })
+  expect(deleteFirst).toEqual({ kind: "deleted", stickyNoteId: deleteFirstNote, revision: 2 })
+  expect(moveAfterDelete).toEqual({ kind: "not_found" })
+  await expect(persistence.openBoard({ userId: registered.user.id, publicId: deleteFirstBoard })).resolves.toMatchObject({
+    revision: 2,
+    stickyNotes: [],
+  })
+
+  const moveFirstBoard = "delete23-race-board-02"
+  const moveFirstNote = "delete23-race-note-002"
+  await persistence.createBoard({
+    publicId: moveFirstBoard,
+    name: "Move first",
+    ownerUserId: registered.user.id,
+    joinCodeHash: "f".repeat(64),
+    now,
+  })
+  await persistence.createStickyNote({
+    publicId: moveFirstNote,
+    boardId: moveFirstBoard,
+    userId: registered.user.id,
+    text: "move first",
+    position: { x: 0, y: 0 },
+    color: "yellow",
+    now,
+  })
+  const moveFirst = await persistence.moveStickyNote({
+    boardId: moveFirstBoard,
+    stickyNoteId: moveFirstNote,
+    userId: registered.user.id,
+    direction: "right",
+  })
+  const deleteAfterMove = await concurrentPersistence.deleteStickyNote({
+    boardId: moveFirstBoard,
+    stickyNoteId: moveFirstNote,
+    userId: registered.user.id,
+  })
+  expect(moveFirst).toMatchObject({ kind: "moved", revision: 2, stickyNote: { position: { x: 1, y: 0 } } })
+  expect(deleteAfterMove).toEqual({ kind: "deleted", stickyNoteId: moveFirstNote, revision: 3 })
+  await expect(persistence.openBoard({ userId: registered.user.id, publicId: moveFirstBoard })).resolves.toMatchObject({
+    revision: 3,
+    stickyNotes: [],
+  })
+})
+
 integrationTest("recreates pooled connections after disposable PostgreSQL terminates them", async () => {
   if (!persistence || !databaseUrl) {
     throw new Error("persistence was not initialized")

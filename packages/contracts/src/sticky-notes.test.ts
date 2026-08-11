@@ -4,6 +4,7 @@ import {
   beginStickyNoteEditSchema,
   boardCommandSchema,
   DEFAULT_STICKY_NOTE_COLOR,
+  deleteStickyNoteSchema,
   MAX_STICKY_NOTE_CHARACTERS,
   moveStickyNoteSchema,
   recolorStickyNoteSchema,
@@ -14,6 +15,7 @@ import {
   stickyNoteMovedSchema,
   stickyNoteRecoloredSchema,
   stickyNoteReorderedSchema,
+  stickyNoteDeletedSchema,
 } from "./sticky-notes.ts"
 import { boardSnapshotSchema, boardSocketMessageSchema } from "./collaboration.ts"
 
@@ -154,6 +156,30 @@ test("recognizes an established Edit Claim acknowledgement and committed text up
     revision: 2,
     stickyNote: { text: "", textVersion: 2 },
   })
+})
+
+test("models confirmed Sticky Note deletion through the established Edit Claim", () => {
+  const command = {
+    type: "delete_sticky_note" as const,
+    claimId: "5ab7d4c2-2a35-4ee3-9f0f-9d0d2a92f36a",
+    stickyNoteId: note.id,
+  }
+
+  expect(boardCommandSchema.parse(deleteStickyNoteSchema.parse(command))).toEqual(command)
+  expect(stickyNoteDeletedSchema.parse({
+    type: "sticky_note_deleted",
+    revision: 2,
+    stickyNoteId: note.id,
+  })).toEqual({
+    type: "sticky_note_deleted",
+    revision: 2,
+    stickyNoteId: note.id,
+  })
+  expect(boardSocketMessageSchema.parse({
+    type: "error",
+    code: "sticky_note_rejected",
+    error: "Sticky Note was already deleted by an earlier committed mutation.",
+  })).toMatchObject({ code: "sticky_note_rejected" })
 })
 
 test("models Color changes as independent revisioned mutations without an Edit Claim", () => {

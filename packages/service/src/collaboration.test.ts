@@ -2135,6 +2135,165 @@ test("persists Position before acknowledging a move and cancels stale moving Pre
   }
 })
 
+test("requires the established Edit Claim and explicit confirmation before durable deletion", async () => {
+  const note = {
+    id: "Lm7u3nW8kM2pR5sT9vY4aB",
+    text: "delete me after confirmation",
+    textVersion: 1,
+    position: { x: 0, y: 0 },
+    color: "yellow" as const,
+    stackingOrder: 0,
+    authorship: { member: { username: "ada_lovelace" } },
+    createdAt: "2026-08-10T00:00:00.000Z",
+    lastEdit: {
+      member: { username: "ada_lovelace" },
+      at: "2026-08-10T00:00:00.000Z",
+    },
+  }
+  const deleteInputs: Array<Record<string, unknown>> = []
+  const deleteStarted = Promise.withResolvers<void>()
+  const allowDelete = Promise.withResolvers<void>()
+  const collaboration = createBoardCollaboration({
+    persistence: {
+      openBoard: async ({ userId, publicId }) => ({
+        board: {
+          id: publicId,
+          name: "Delete Ideas",
+          role: userId === 7 ? "owner" : "member",
+        },
+        revision: 1,
+        stickyNotes: [note],
+      }),
+      updateStickyNoteText: async () => ({ kind: "not_found" as const }),
+      deleteStickyNote: async (input: Record<string, unknown>) => {
+        deleteInputs.push(input)
+        deleteStarted.resolve()
+        await allowDelete.promise
+        return { kind: "deleted" as const, stickyNoteId: note.id, revision: 2 }
+      },
+      moveStickyNote: async () => ({ kind: "not_found" as const }),
+    },
+    sessionAuthenticator: async (value) => {
+      if (value === credential) {
+        return { user: { id: 7, username: "ada_lovelace" } }
+      }
+      if (value === "b".repeat(43)) {
+        return { user: { id: 8, username: "grace_hopper" } }
+      }
+      return null
+    },
+  })
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request, bunServer) {
+      const result = await collaboration.handleUpgrade(request, bunServer)
+      return result === null ? new Response("not found", { status: 404 }) : result
+    },
+    websocket: collaboration.websocket,
+  })
+  const url = `ws://127.0.0.1:${server.port}/boards/${boardId}/collaboration`
+  const owner = createSocketClient(url, credential)
+  const member = createSocketClient(url, "b".repeat(43))
+
+  try {
+    await Promise.all([waitForSocketOpen(owner.socket), waitForSocketOpen(member.socket)])
+    await owner.nextMessage()
+    await member.nextMessage()
+    await nextMessageMatching(owner, (message) => (message.presence as unknown[]).length === 2)
+
+    owner.socket.send(JSON.stringify({
+      type: "begin_sticky_note_edit",
+      stickyNoteId: note.id,
+    }))
+    const firstClaim = await nextMessageMatching(
+      owner,
+      (message) => message.type === "sticky_note_edit_claim_granted",
+    )
+    await nextMessageMatching(member, (message) => presenceFor(message, "ada_lovelace") === "editing")
+
+    member.socket.send(JSON.stringify({
+      type: "begin_sticky_note_edit",
+      stickyNoteId: note.id,
+    }))
+    await expect(nextMessageMatching(member, (message) => message.type === "error"))
+      .resolves.toMatchObject({
+        type: "error",
+        code: "edit_claim_unavailable",
+        claimHolder: { username: "ada_lovelace" },
+      })
+
+    owner.socket.send(JSON.stringify({
+      type: "release_sticky_note_edit",
+      claimId: firstClaim.claimId,
+      stickyNoteId: note.id,
+    }))
+    await expect(nextMessageMatching(member, (message) => presenceFor(message, "ada_lovelace") === "viewing"))
+      .resolves.toMatchObject({ revision: 1, stickyNotes: [note], editClaims: [] })
+
+    owner.socket.send(JSON.stringify({
+      type: "begin_sticky_note_edit",
+      stickyNoteId: note.id,
+    }))
+    const secondClaim = await nextMessageMatching(
+      owner,
+      (message) => message.type === "sticky_note_edit_claim_granted",
+    )
+    await nextMessageMatching(member, (message) => presenceFor(message, "ada_lovelace") === "editing")
+
+    owner.socket.send(JSON.stringify({
+      type: "delete_sticky_note",
+      claimId: secondClaim.claimId,
+      stickyNoteId: note.id,
+    }))
+    await deleteStarted.promise
+    const ownerDeletion = nextMessageMatching(
+      owner,
+      (message) => message.type === "sticky_note_deleted",
+    )
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(deleteInputs).toHaveLength(1)
+    expect(deleteInputs[0]).toMatchObject({
+      boardId,
+      stickyNoteId: note.id,
+      userId: 7,
+    })
+    allowDelete.resolve()
+
+    const [ownerDeleted, memberDeleted] = await Promise.all([
+      ownerDeletion,
+      nextMessageMatching(member, (message) => message.type === "sticky_note_deleted"),
+    ])
+    expect(ownerDeleted).toEqual({
+      type: "sticky_note_deleted",
+      revision: 2,
+      stickyNoteId: note.id,
+    })
+    expect(memberDeleted).toEqual(ownerDeleted)
+    const [ownerSnapshot, memberSnapshot] = await Promise.all([
+      nextMessageMatching(owner, (message) => message.type === "snapshot" && message.revision === 2),
+      nextMessageMatching(member, (message) => message.type === "snapshot" && message.revision === 2),
+    ])
+    expect(ownerSnapshot).toMatchObject({ stickyNotes: [], editClaims: [] })
+    expect(memberSnapshot).toMatchObject({ stickyNotes: [], editClaims: [] })
+    owner.socket.send(JSON.stringify({
+      type: "move_sticky_note",
+      stickyNoteId: note.id,
+      direction: "right",
+    }))
+    await expect(nextMessageMatching(owner, (message) => message.type === "error"))
+      .resolves.toMatchObject({
+        type: "error",
+        code: "sticky_note_rejected",
+        error: "Sticky Note Position change was rejected.",
+      })
+  } finally {
+    allowDelete.resolve()
+    await Promise.all([closeSocket(owner.socket), closeSocket(member.socket)])
+    await server.stop(true)
+  }
+})
+
 function presenceFor(message: Record<string, unknown>, username: string): string | undefined {
   const presence = message.presence as Array<{ member: { username: string }; activity: string }> | undefined
   return presence?.find((entry) => entry.member.username === username)?.activity

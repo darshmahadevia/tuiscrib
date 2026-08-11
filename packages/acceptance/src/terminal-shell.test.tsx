@@ -1196,6 +1196,158 @@ test("replaces an optimistic Sticky Note edit with the authoritative conflict re
   expect(sent.some((command) => command.includes("begin_sticky_note_edit"))).toBe(true)
 })
 
+test("uses a clear destructive confirmation mode for Sticky Note deletion and keeps cancellation selectable", async () => {
+  const credential = "g".repeat(43)
+  const board = {
+    id: "Qx7u3nW8kM2pR5sT9vY4aB",
+    name: "Deletion Ideas",
+    role: "member" as const,
+  }
+  const note: StickyNote = {
+    id: "Lm7u3nW8kM2pR5sT9vY4aB",
+    text: "delete me",
+    textVersion: 1,
+    position: { x: 0, y: 0 },
+    color: "yellow",
+    stackingOrder: 0,
+    authorship: { member: { username: "ada_lovelace" } },
+    createdAt: "2026-08-10T00:00:00.000Z",
+    lastEdit: {
+      member: { username: "ada_lovelace" },
+      at: "2026-08-10T00:00:00.000Z",
+    },
+  }
+  const snapshot: BoardSnapshot = {
+    type: "snapshot",
+    board,
+    revision: 1,
+    presence: [{ member: { username: "ada_lovelace" }, activity: "viewing" }],
+    stickyNotes: [note],
+  }
+  const sent: string[] = []
+  let handlers: import("@tuiscrib/terminal").BoardConnectionHandlers | undefined
+  let claimNumber = 0
+  const boardClient: BoardClient = {
+    createBoard: async () => { throw new Error("not used") },
+    renameBoard: async () => { throw new Error("not used") },
+    rotateJoinCode: async () => { throw new Error("not used") },
+    listBoards: async () => ({ boards: [board] }),
+    joinBoard: async () => { throw new Error("not used") },
+    leaveBoard: async () => ({ status: "left" }),
+    openBoard: async (_nextCredential, _boardId, nextHandlers) => {
+      handlers = nextHandlers
+      nextHandlers.onSnapshot(snapshot)
+      return {
+        send(command) {
+          sent.push(JSON.stringify(command))
+          if (command.type === "delete_sticky_note") {
+            nextHandlers.onStickyNoteDeleted?.({
+              type: "sticky_note_deleted",
+              revision: 2,
+              stickyNoteId: note.id,
+            })
+          }
+        },
+        close: () => undefined,
+      }
+    },
+  }
+  const authClient: AuthClient = {
+    register: async () => { throw new Error("not used") },
+    signIn: async () => { throw new Error("not used") },
+    restore: async () => ({ user: { username: "ada_lovelace" } }),
+    signOut: async () => ({ status: "signed_out" }),
+  }
+  const credentialStore: CredentialStore = {
+    filePath: "memory://sticky-delete/session",
+    load: async () => credential,
+    save: async () => undefined,
+    remove: async () => undefined,
+  }
+
+  await act(async () => {
+    activeSetup = await testRender(
+      <TerminalShell
+        label="delete-client"
+        authClient={authClient}
+        boardClient={boardClient}
+        credentialStore={credentialStore}
+      />,
+      { width: 80, height: 24, kittyKeyboard: true },
+    )
+    await activeSetup.renderOnce()
+  })
+  const setup = activeSetup
+  if (!setup) {
+    throw new Error("terminal renderer did not start")
+  }
+  await setup.waitForFrame((frame) => frame.includes("Terminal Session restored"))
+  await act(async () => {
+    setup.mockInput.pressKey("b")
+    await setup.renderOnce()
+    setup.mockInput.pressKey("o")
+    await setup.renderOnce()
+  })
+  await setup.waitForFrame((frame) => frame.includes("Board revision: 1") && frame.includes("delete me"))
+
+  await act(async () => {
+    setup.mockInput.pressKey("d")
+    await setup.renderOnce()
+  })
+  expect(sent).toHaveLength(1)
+  expect(sent[0]).toContain('"type":"begin_sticky_note_edit"')
+  expect(setup.captureCharFrame()).not.toContain("Permanently delete")
+
+  await act(async () => {
+    claimNumber += 1
+    handlers?.onStickyNoteEditClaimGranted?.({
+      type: "sticky_note_edit_claim_granted",
+      stickyNoteId: note.id,
+      claimId: `00000000-0000-4000-8000-00000000001${claimNumber}`,
+      stickyNote: note,
+    })
+    await setup.renderOnce()
+  })
+  const confirmation = setup.captureCharFrame()
+  expect(confirmation).toContain("Permanently delete Sticky Note")
+  expect(confirmation).toContain("delete me")
+  expect(confirmation).toContain("release Edit Claim")
+
+  await act(async () => {
+    setup.mockInput.pressKey("x")
+    await setup.renderOnce()
+  })
+  expect(setup.captureCharFrame()).toContain("Permanently delete Sticky Note")
+  expect(sent.some((command) => command.includes('"type":"delete_sticky_note"'))).toBe(false)
+
+  await act(async () => {
+    setup.mockInput.pressKey("n")
+    await setup.renderOnce()
+  })
+  expect(sent.some((command) => command.includes('"type":"release_sticky_note_edit"'))).toBe(true)
+  expect(setup.captureCharFrame()).toContain("Board revision: 1")
+  expect(setup.captureCharFrame()).toContain("delete me")
+
+  await act(async () => {
+    setup.mockInput.pressKey("d")
+    await setup.renderOnce()
+    handlers?.onStickyNoteEditClaimGranted?.({
+      type: "sticky_note_edit_claim_granted",
+      stickyNoteId: note.id,
+      claimId: "00000000-0000-4000-8000-000000000019",
+      stickyNote: note,
+    })
+    await setup.renderOnce()
+    setup.mockInput.pressKey("y")
+    await setup.renderOnce()
+  })
+  const deleted = setup.captureCharFrame()
+  expect(sent.some((command) => command.includes('"type":"delete_sticky_note"'))).toBe(true)
+  expect(deleted).toContain("Board revision: 2")
+  expect(deleted).toContain("Sticky Notes: 0")
+  expect(deleted).not.toContain("delete me")
+})
+
 test("renders reconnecting after Board loss and does not send shared mutations while disconnected", async () => {
   const credential = "e".repeat(43)
   const board = {

@@ -8,6 +8,7 @@ import {
   type BoardEditClaim,
   stickyNoteCreatedSchema,
   stickyNoteCreationClaimGrantedSchema,
+  stickyNoteDeletedSchema,
   stickyNoteEditClaimGrantedSchema,
   stickyNoteMovedSchema,
   stickyNoteRecoloredSchema,
@@ -105,6 +106,7 @@ export const boardSocketMessageSchema = z.discriminatedUnion("type", [
   stickyNoteMovedSchema,
   stickyNoteRecoloredSchema,
   stickyNoteReorderedSchema,
+  stickyNoteDeletedSchema,
   stickyNoteUpdatedSchema,
   boardCommandErrorSchema,
 ])

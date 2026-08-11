@@ -11,6 +11,7 @@ import {
   STICKY_NOTE_TEXT_LIMIT_ERROR,
   stickyNoteCreationClaimGrantedSchema,
   stickyNoteCreatedSchema,
+  stickyNoteDeletedSchema,
   stickyNoteEditClaimGrantedSchema,
   stickyNoteMovedSchema,
   stickyNoteRecoloredSchema,
@@ -26,6 +27,7 @@ import {
 } from "@tuiscrib/contracts"
 import type {
   CreateStickyNoteResult,
+  DeleteStickyNoteResult,
   MoveStickyNoteResult,
   OpenBoardRecord,
   Persistence,
@@ -58,6 +60,7 @@ export type BoardCollaborationPersistence = Pick<Persistence, "openBoard"> &
     Persistence,
     | "createStickyNote"
     | "updateStickyNoteText"
+    | "deleteStickyNote"
     | "recolorStickyNote"
     | "reorderStickyNote"
     | "moveStickyNote"
@@ -128,7 +131,7 @@ type StickyNoteEditClaim = {
   holder: BoardUser
   connectionId: string | null
   stickyNoteId: string
-  status: "editing" | "publishing"
+  status: "editing" | "publishing" | "deleting"
   connectionState: "connected" | "disconnected"
   graceHandle: unknown | null
   graceToken: number
@@ -439,10 +442,22 @@ export function createBoardCollaboration(
           beginStickyNoteEdit(socket, parsed.data.stickyNoteId)
           return
         case "publish_sticky_note_edit":
-          await publishStickyNoteEdit(socket, parsed.data)
+          await publishStickyNoteEdit(
+            socket,
+            parsed.data as Extract<BoardCommand, { type: "publish_sticky_note_edit" }>,
+          )
           return
         case "release_sticky_note_edit":
           releaseStickyNoteEdit(socket, parsed.data.claimId, parsed.data.stickyNoteId)
+          return
+        case "delete_sticky_note":
+          await runBoardMutation(
+            socket.data.boardId,
+            () => deleteStickyNote(
+              socket,
+              parsed.data as Extract<BoardCommand, { type: "delete_sticky_note" }>,
+            ),
+          )
           return
         case "recolor_sticky_note":
           await runBoardMutation(
@@ -483,6 +498,8 @@ export function createBoardCollaboration(
         parsed.data.type === "publish_sticky_note_edit" ||
         parsed.data.type === "release_sticky_note_edit"
         ? "Sticky Note editing was rejected."
+        : parsed.data.type === "delete_sticky_note"
+        ? "Sticky Note deletion was rejected."
         : "Sticky Note creation was rejected."
       sendCommandError(socket, "sticky_note_rejected", rejectedMessage)
     }
@@ -873,6 +890,86 @@ export function createBoardCollaboration(
     }
   }
 
+  async function deleteStickyNote(
+    socket: BoardWebSocket,
+    command: Extract<BoardCommand, { type: "delete_sticky_note" }>,
+  ): Promise<void> {
+    const claim = editClaimsById.get(command.claimId)
+    if (
+      !claim ||
+      claim.connectionId !== socket.data.connectionId ||
+      claim.connectionState !== "connected" ||
+      claim.ownerSessionKey !== socket.data.credentialHash ||
+      claim.invalidated ||
+      claim.expired ||
+      claim.boardId !== socket.data.boardId ||
+      claim.stickyNoteId !== command.stickyNoteId ||
+      claim.status !== "editing"
+    ) {
+      sendCommandError(
+        socket,
+        "invalid_edit_claim",
+        "Sticky Note Edit Claim is invalid or already used.",
+      )
+      return
+    }
+
+    const deleteStickyNote = options.persistence.deleteStickyNote
+    if (typeof deleteStickyNote !== "function") {
+      sendCommandError(socket, "sticky_note_rejected", "Sticky Note deletion is unavailable.")
+      return
+    }
+
+    claim.status = "deleting"
+    try {
+      const result = await deleteStickyNote({
+        boardId: socket.data.boardId,
+        stickyNoteId: command.stickyNoteId,
+        userId: socket.data.user.id,
+      })
+      if (result.kind !== "deleted") {
+        removeEditClaim(claim)
+        setActivity(socket, "viewing")
+        const state = presenceByBoard.get(socket.data.boardId)
+        if (state && result.kind === "not_found" && result.revision !== undefined) {
+          applyDeletedNote(state, command.stickyNoteId, result.revision)
+          broadcastPresenceForBoard(socket.data.boardId)
+        } else {
+          broadcastPresenceForBoard(socket.data.boardId)
+        }
+        sendDeletePersistenceError(socket, result)
+        return
+      }
+
+      const event = stickyNoteDeletedSchema.parse({
+        type: "sticky_note_deleted",
+        revision: result.revision,
+        stickyNoteId: result.stickyNoteId,
+        affectedStickyNotes: result.affectedStickyNotes,
+      })
+      removeEditClaim(claim)
+
+      const state = presenceByBoard.get(socket.data.boardId)
+      if (!state) {
+        return
+      }
+      setActivity(socket, "viewing")
+      applyDeletedNote(
+        state,
+        result.stickyNoteId,
+        result.revision,
+        result.affectedStickyNotes,
+      )
+      broadcastStickyNoteDeleted(state, event)
+      broadcastSnapshot(state)
+    } catch {
+      if (claim.status === "deleting") {
+        claim.status = "editing"
+      }
+      throw new Error("Sticky Note deletion was rejected.")
+    }
+  }
+
   async function recolorStickyNote(
     socket: BoardWebSocket,
     command: Extract<BoardCommand, { type: "recolor_sticky_note" }>,
@@ -1031,6 +1128,14 @@ export function createBoardCollaboration(
 
     if (claim.status === "publishing") {
       claim.releaseRequested = true
+      return
+    }
+    if (claim.status === "deleting") {
+      sendCommandError(
+        socket,
+        "invalid_edit_claim",
+        "Sticky Note deletion is already being committed.",
+      )
       return
     }
 
@@ -1291,6 +1396,26 @@ export function createBoardCollaboration(
     }
   }
 
+  function applyDeletedNote(
+    state: BoardPresenceState,
+    stickyNoteId: string,
+    revision: number,
+    affectedStickyNotes: readonly StickyNoteRecord[] = [],
+  ): void {
+    for (const connection of state.connections.values()) {
+      const affectedIds = new Set(affectedStickyNotes.map((note) => note.id))
+      const stickyNotes = (connection.board.stickyNotes ?? [])
+        .filter((note) => note.id !== stickyNoteId && !affectedIds.has(note.id))
+      stickyNotes.push(...affectedStickyNotes)
+      stickyNotes.sort(compareStickyNoteStackingOrder)
+      connection.board = {
+        ...connection.board,
+        revision,
+        stickyNotes,
+      }
+    }
+  }
+
   function broadcastStickyNoteCreated(
     state: BoardPresenceState,
     event: ReturnType<typeof stickyNoteCreatedSchema.parse>,
@@ -1306,6 +1431,18 @@ export function createBoardCollaboration(
   function broadcastStickyNoteUpdated(
     state: BoardPresenceState,
     event: ReturnType<typeof stickyNoteUpdatedSchema.parse>,
+  ): void {
+    const serialized = JSON.stringify(event)
+    for (const connection of state.connections.values()) {
+      if (connection.ready) {
+        connection.socket.send(serialized)
+      }
+    }
+  }
+
+  function broadcastStickyNoteDeleted(
+    state: BoardPresenceState,
+    event: ReturnType<typeof stickyNoteDeletedSchema.parse>,
   ): void {
     const serialized = JSON.stringify(event)
     for (const connection of state.connections.values()) {
@@ -1408,6 +1545,23 @@ export function createBoardCollaboration(
         return
       case "updated":
       case "text_version_conflict":
+        return
+    }
+  }
+
+  function sendDeletePersistenceError(socket: BoardWebSocket, result: DeleteStickyNoteResult): void {
+    switch (result.kind) {
+      case "not_found":
+        sendCommandError(
+          socket,
+          "sticky_note_rejected",
+          "Sticky Note deletion was rejected because an earlier committed mutation already deleted it.",
+        )
+        return
+      case "not_member":
+        sendCommandError(socket, "sticky_note_rejected", "Sticky Note deletion was rejected.")
+        return
+      case "deleted":
         return
     }
   }

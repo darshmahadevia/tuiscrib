@@ -29,6 +29,8 @@ export {
   type CreateStickyNoteResult,
   type UpdateStickyNoteTextInput,
   type UpdateStickyNoteTextResult,
+  type DeleteStickyNoteInput,
+  type DeleteStickyNoteResult,
   type RecolorStickyNoteInput,
   type RecolorStickyNoteResult,
   type ReorderStickyNoteInput,

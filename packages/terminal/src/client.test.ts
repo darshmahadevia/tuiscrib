@@ -636,6 +636,76 @@ test("Board client sends creation commands and rejects stale or gapped durable r
   connection.close()
 })
 
+test("Board client delivers committed Sticky Note deletion as the next durable revision", async () => {
+  const credential = "e".repeat(43)
+  const boardId = "Qx7u3nW8kM2pR5sT9vY4aB"
+  const note = {
+    id: "Lm7u3nW8kM2pR5sT9vY4aB",
+    text: "delete through client",
+    textVersion: 1,
+    position: { x: 0, y: 0 },
+    color: "yellow" as const,
+    stackingOrder: 0,
+    authorship: { member: { username: "ada_lovelace" } },
+    createdAt: "2026-08-10T00:00:00.000Z",
+    lastEdit: {
+      member: { username: "ada_lovelace" },
+      at: "2026-08-10T00:00:00.000Z",
+    },
+  }
+  let socket: BoardSocket | undefined
+  const deleted: Array<{ revision: number; stickyNoteId: string }> = []
+  const snapshots: number[] = []
+  const client = createBoardClient(
+    "http://tuiscrib.test",
+    async () => new Response(JSON.stringify({ status: "ready" }), { status: 200 }),
+    () => {
+      socket = {
+        onmessage: null,
+        onerror: null,
+        onclose: null,
+        send: () => undefined,
+        close: () => undefined,
+      }
+      return socket
+    },
+  )
+  const openBoard = client.openBoard
+  if (!openBoard) {
+    throw new Error("Board client does not support Board collaboration")
+  }
+
+  const connection = await openBoard(credential, boardId, {
+    onSnapshot: (snapshot) => snapshots.push(snapshot.revision),
+    onError: (error) => { throw error },
+    onClose: () => undefined,
+    onStickyNoteDeleted: (event) => deleted.push({
+      revision: event.revision,
+      stickyNoteId: event.stickyNoteId,
+    }),
+  })
+  socket?.onmessage?.({
+    data: JSON.stringify({
+      type: "snapshot",
+      board: { id: boardId, name: "Ideas", role: "member" },
+      revision: 4,
+      presence: [{ member: { username: "ada_lovelace" }, activity: "viewing" }],
+      stickyNotes: [note],
+    }),
+  })
+  socket?.onmessage?.({
+    data: JSON.stringify({
+      type: "sticky_note_deleted",
+      revision: 5,
+      stickyNoteId: note.id,
+    }),
+  })
+
+  expect(snapshots).toEqual([4])
+  expect(deleted).toEqual([{ revision: 5, stickyNoteId: note.id }])
+  connection.close()
+})
+
 test("Board client sends established Edit Claim commands and delivers committed text updates", async () => {
   const credential = "d".repeat(43)
   const boardId = "Qx7u3nW8kM2pR5sT9vY4aB"

@@ -1,8 +1,17 @@
 import { afterAll, beforeAll, expect, test } from "bun:test"
 import { act } from "react"
 
-import { MAX_STICKY_NOTE_CHARACTERS, type BoardSummary } from "@tuiscrib/contracts"
-import { STICKY_NOTE_TEXT_DEBOUNCE_MS } from "@tuiscrib/terminal"
+import {
+  MAX_STICKY_NOTE_CHARACTERS,
+  type BoardCommandError,
+  type BoardSnapshot,
+  type BoardSummary,
+} from "@tuiscrib/contracts"
+import {
+  createBoardClient,
+  STICKY_NOTE_TEXT_DEBOUNCE_MS,
+  type BoardConnection,
+} from "@tuiscrib/terminal"
 
 import {
   AcceptanceHarness,
@@ -11,6 +20,15 @@ import {
 } from "./harness.tsx"
 
 let harness: AcceptanceHarness | null = null
+
+type RawBoardClient = {
+  connection: BoardConnection
+  snapshots: BoardSnapshot[]
+  claims: Array<{ stickyNoteId: string; claimId: string }>
+  deleted: Array<{ revision: number; stickyNoteId: string }>
+  moved: Array<{ revision: number; stickyNote: { id: string } }>
+  errors: BoardCommandError[]
+}
 
 beforeAll(async () => {
   harness = await AcceptanceHarness.start()
@@ -377,6 +395,386 @@ test("identifies the Member holding an established Edit Claim in the blocked ter
   } finally {
     await harness.disposeClient(owner)
     await harness.disposeClient(member)
+  }
+})
+
+test("deletes a Sticky Note through its Edit Claim across two live terminals", async () => {
+  if (!harness) {
+    throw new Error("acceptance harness did not start")
+  }
+
+  const ownerCredential = await registerUser("delete23_owner")
+  const memberCredential = await registerUser("delete23_member")
+  const created = await requestJson<{ board: BoardSummary; joinCode: string }>(
+    "/boards",
+    ownerCredential,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Delete Sticky Note Board" }),
+    },
+  )
+  const joined = await requestJson<{ board: BoardSummary }>(
+    "/boards/join",
+    memberCredential,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ joinCode: created.body.joinCode }),
+    },
+  )
+  expect(created.status).toBe(201)
+  expect(joined.status).toBe(201)
+
+  const owner = await harness.addShellClient(
+    "delete23-owner",
+    createMemoryCredentialStore(ownerCredential, "memory://sticky/delete23-owner"),
+    undefined,
+    {
+      schedule: (callback, delayMs) => harness?.clock.setTimeout(callback, delayMs),
+      cancel: (handle) => harness?.clock.clearTimeout(handle as number),
+    },
+  )
+  const member = await harness.addShellClient(
+    "delete23-member",
+    createMemoryCredentialStore(memberCredential, "memory://sticky/delete23-member"),
+  )
+
+  try {
+    await waitForFrame(owner, (frame) => frame.includes("Terminal Session restored"))
+    await waitForFrame(member, (frame) => frame.includes("Terminal Session restored"))
+    await openSelectedBoard(owner, created.body.board.name)
+    await openSelectedBoard(member, created.body.board.name)
+    await waitForFrame(owner, (frame) => frame.includes("delete23_owner · viewing") && frame.includes("Sticky Notes: 0"))
+    await waitForFrame(member, (frame) => frame.includes("delete23_member · viewing") && frame.includes("Sticky Notes: 0"))
+
+    await act(async () => {
+      owner.setup.mockInput.pressKey("n")
+      await owner.setup.renderOnce()
+    })
+    await waitForFrame(owner, (frame) => frame.includes("Provisional Sticky Note") && frame.includes("authority") && frame.includes("granted"))
+    await act(async () => {
+      await owner.setup.mockInput.typeText("delete through edit claim")
+      harness?.clock.advance(STICKY_NOTE_TEXT_DEBOUNCE_MS)
+      await owner.setup.renderOnce()
+    })
+    await waitForFrame(owner, (frame) => frame.includes("delete through edit claim") && frame.includes("Board revision: 1"))
+    await waitForFrame(member, (frame) => frame.includes("delete through edit claim") && frame.includes("Board revision: 1"))
+
+    await act(async () => {
+      owner.setup.mockInput.pressEscape()
+      await owner.setup.renderOnce()
+    })
+    await waitForFrame(owner, (frame) => frame.includes("delete23_owner · viewing"))
+    await waitForFrame(member, (frame) => frame.includes("delete23_owner · viewing"))
+
+    await act(async () => {
+      member.setup.mockInput.pressEnter()
+      await member.setup.renderOnce()
+    })
+    await waitForFrame(member, (frame) => frame.includes("Established Sticky Note") && frame.includes("Claim granted"))
+    await waitForFrame(owner, (frame) => frame.includes("delete23_member · editing"))
+
+    await act(async () => {
+      owner.setup.mockInput.pressKey("d")
+      await owner.setup.renderOnce()
+    })
+    const blocked = await waitForFrame(
+      owner,
+      (frame) => frame.includes("Deletion unavailable") && frame.includes("delete23_member"),
+    )
+    expect(blocked).toContain("Edit Claim holder: delete23_member")
+    expect(blocked).not.toContain("Permanently delete Sticky Note")
+
+    await act(async () => {
+      member.setup.mockInput.pressEscape()
+      await member.setup.renderOnce()
+    })
+    await waitForFrame(owner, (frame) => frame.includes("delete23_owner · viewing"))
+    await waitForFrame(member, (frame) => frame.includes("delete23_member · viewing"))
+
+    await act(async () => {
+      owner.setup.mockInput.pressKey("d")
+      await owner.setup.renderOnce()
+    })
+    const confirmation = await waitForFrame(
+      owner,
+      (frame) => frame.includes("Permanently delete Sticky Note") && frame.includes("delete through edit claim"),
+    )
+    expect(confirmation).toContain("y permanently delete")
+    expect(confirmation).toContain("n cancel + release Edit Claim")
+    expect(confirmation).toContain("Escape cancel")
+
+    await act(async () => {
+      owner.setup.mockInput.pressKey("n")
+      await owner.setup.renderOnce()
+    })
+    const cancelled = await waitForFrame(
+      owner,
+      (frame) => frame.includes("Board revision: 1") &&
+        frame.includes("Sticky Notes: 1") &&
+        frame.includes("delete through edit claim") &&
+        !frame.includes("Permanently delete Sticky Note"),
+    )
+    expect(cancelled).toContain("delete through edit claim")
+    expect(cancelled).not.toContain("Permanently delete Sticky Note")
+    await waitForFrame(member, (frame) => frame.includes("delete23_owner · viewing") && frame.includes("Board revision: 1"))
+
+    await act(async () => {
+      owner.setup.mockInput.pressKey("d")
+      await owner.setup.renderOnce()
+    })
+    await waitForFrame(owner, (frame) => frame.includes("Permanently delete Sticky Note"))
+    await act(async () => {
+      owner.setup.mockInput.pressKey("y")
+      await owner.setup.renderOnce()
+    })
+
+    const ownerDeleted = await waitForFrame(
+      owner,
+      (frame) => frame.includes("Board revision: 2") && frame.includes("Sticky Notes: 0"),
+    )
+    const memberDeleted = await waitForFrame(
+      member,
+      (frame) => frame.includes("Board revision: 2") && frame.includes("Sticky Notes: 0"),
+    )
+    expect(ownerDeleted).not.toContain("delete through edit claim")
+    expect(memberDeleted).not.toContain("delete through edit claim")
+    expect(ownerDeleted).toContain("delete23_owner · viewing")
+    expect(memberDeleted).toContain("delete23_owner · viewing")
+  } finally {
+    await harness.disposeClient(owner)
+    await harness.disposeClient(member)
+  }
+})
+
+test("resolves two-client Sticky Note delete races by committed Board revision", async () => {
+  if (!harness) {
+    throw new Error("acceptance harness did not start")
+  }
+
+  const ownerCredential = await registerUser("delete23race_owner")
+  const memberCredential = await registerUser("delete23race_member")
+  const created = await requestJson<{ board: BoardSummary; joinCode: string }>(
+    "/boards",
+    ownerCredential,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Delete Race Board" }),
+    },
+  )
+  const joined = await requestJson<{ board: BoardSummary }>(
+    "/boards/join",
+    memberCredential,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ joinCode: created.body.joinCode }),
+    },
+  )
+  expect(created.status).toBe(201)
+  expect(joined.status).toBe(201)
+
+  const owner = await harness.addShellClient(
+    "delete23race-owner",
+    createMemoryCredentialStore(ownerCredential, "memory://sticky/delete23race-owner"),
+    undefined,
+    {
+      schedule: (callback, delayMs) => harness?.clock.setTimeout(callback, delayMs),
+      cancel: (handle) => harness?.clock.clearTimeout(handle as number),
+    },
+  )
+  const member = await harness.addShellClient(
+    "delete23race-member",
+    createMemoryCredentialStore(memberCredential, "memory://sticky/delete23race-member"),
+  )
+
+  let rawOwner: RawBoardClient | undefined
+  let rawMember: RawBoardClient | undefined
+  try {
+    await waitForFrame(owner, (frame) => frame.includes("Terminal Session restored"))
+    await waitForFrame(member, (frame) => frame.includes("Terminal Session restored"))
+    await openSelectedBoard(owner, created.body.board.name)
+    await openSelectedBoard(member, created.body.board.name)
+    await waitForFrame(owner, (frame) => frame.includes("Board revision: 0"))
+    await waitForFrame(member, (frame) => frame.includes("Board revision: 0"))
+
+    await createNote("delete23 move-first")
+    await act(async () => {
+      owner.setup.mockInput.pressEscape()
+      await owner.setup.renderOnce()
+    })
+    await waitForFrame(owner, (frame) => frame.includes("delete23race_owner · viewing"))
+    await waitForFrame(member, (frame) => frame.includes("Board revision: 1") && frame.includes("delete23 move-first"))
+
+    await act(async () => {
+      owner.setup.mockInput.pressArrow("right")
+      await owner.setup.renderOnce()
+    })
+    await createNote("delete23 delete-first")
+    await waitForFrame(owner, (frame) => frame.includes("delete23 delete-first") && frame.includes("Board revision: 2"))
+    await waitForFrame(member, (frame) => frame.includes("delete23 delete-first") && frame.includes("Board revision: 2"))
+    await act(async () => {
+      owner.setup.mockInput.pressEscape()
+      await owner.setup.renderOnce()
+    })
+    await waitForFrame(owner, (frame) => frame.includes("delete23race_owner · viewing"))
+    await waitForFrame(member, (frame) => frame.includes("delete23race_member · viewing"))
+
+    await harness.disposeClient(owner)
+    await harness.disposeClient(member)
+
+    rawOwner = await openRawBoardClient(ownerCredential)
+    rawMember = await openRawBoardClient(memberCredential)
+    const initial = rawOwner.snapshots.at(-1)
+    expect(initial?.revision).toBe(2)
+    expect(initial?.stickyNotes).toHaveLength(2)
+    const moveFirstNote = initial?.stickyNotes?.find((note) => note.text === "delete23 move-first")
+    const deleteFirstNote = initial?.stickyNotes?.find((note) => note.text === "delete23 delete-first")
+    if (!moveFirstNote || !deleteFirstNote) {
+      throw new Error("race fixture did not contain both Sticky Notes")
+    }
+
+    // Mutation first: the move commits at revision 3; deletion then commits at revision 4.
+    rawMember.connection.send({
+      type: "move_sticky_note",
+      stickyNoteId: moveFirstNote.id,
+      direction: "right",
+    })
+    await waitForRaw(
+      rawOwner,
+      (client) => client.moved.some((event) => event.stickyNote.id === moveFirstNote.id && event.revision === 3),
+      "move-first movement",
+    )
+    const moveFirstClaim = await claimRawNote(rawOwner, moveFirstNote.id)
+    rawOwner.connection.send({
+      type: "delete_sticky_note",
+      claimId: moveFirstClaim,
+      stickyNoteId: moveFirstNote.id,
+    })
+    await waitForRaw(
+      rawMember,
+      (client) => client.deleted.some((event) => event.stickyNoteId === moveFirstNote.id && event.revision === 4),
+      "move-first deletion",
+    )
+    await waitForRaw(
+      rawOwner,
+      (client) => client.snapshots.at(-1)?.revision === 4,
+      "move-first authoritative snapshot",
+    )
+    expect(rawOwner.snapshots.at(-1)?.revision).toBe(4)
+
+    // Delete first: the later move is rejected against the authoritative deleted state.
+    const deleteFirstClaim = await claimRawNote(rawOwner, deleteFirstNote.id)
+    rawOwner.connection.send({
+      type: "delete_sticky_note",
+      claimId: deleteFirstClaim,
+      stickyNoteId: deleteFirstNote.id,
+    })
+    await waitForRaw(
+      rawMember,
+      (client) => client.deleted.some((event) => event.stickyNoteId === deleteFirstNote.id && event.revision === 5),
+      "delete-first deletion",
+    )
+    rawMember.connection.send({
+      type: "move_sticky_note",
+      stickyNoteId: deleteFirstNote.id,
+      direction: "right",
+    })
+    await waitForRaw(
+      rawMember,
+      (client) => client.errors.some(
+        (error) => error.code === "sticky_note_rejected" && error.error.includes("Position change was rejected"),
+      ),
+      "invalid later movement rejection",
+    )
+    await waitForRaw(
+      rawMember,
+      (client) => client.snapshots.at(-1)?.revision === 5,
+      "delete-first authoritative snapshot",
+    )
+    expect(rawMember.snapshots.at(-1)?.revision).toBe(5)
+    expect(rawMember.snapshots.at(-1)?.stickyNotes).toHaveLength(0)
+  } finally {
+    rawOwner?.connection.close()
+    rawMember?.connection.close()
+    if (harness.clients.includes(owner)) {
+      await harness.disposeClient(owner)
+    }
+    if (harness.clients.includes(member)) {
+      await harness.disposeClient(member)
+    }
+  }
+
+  async function createNote(text: string): Promise<void> {
+    await act(async () => {
+      owner.setup.mockInput.pressKey("n")
+      await owner.setup.renderOnce()
+    })
+    await waitForFrame(owner, (frame) => frame.includes("Provisional Sticky Note") && frame.includes("authority") && frame.includes("granted"))
+    await act(async () => {
+      await owner.setup.mockInput.typeText(text)
+      harness?.clock.advance(STICKY_NOTE_TEXT_DEBOUNCE_MS)
+      await owner.setup.renderOnce()
+    })
+    await waitForFrame(owner, (frame) => frame.includes(text) && frame.includes("Board revision:"))
+  }
+
+  async function openRawBoardClient(credential: string): Promise<RawBoardClient> {
+    const snapshots: BoardSnapshot[] = []
+    const claims: Array<{ stickyNoteId: string; claimId: string }> = []
+    const deleted: Array<{ revision: number; stickyNoteId: string }> = []
+    const moved: Array<{ revision: number; stickyNote: { id: string } }> = []
+    const errors: BoardCommandError[] = []
+    const client = createBoardClient(harness!.baseUrl, fetch, undefined, { heartbeatIntervalMs: 0 })
+    const openBoard = client.openBoard
+    if (!openBoard) {
+      throw new Error("Board client does not support Board collaboration")
+    }
+    const connection = await openBoard(credential, created.body.board.id, {
+      onSnapshot: (snapshot) => snapshots.push(snapshot),
+      onError: (error) => {
+        throw error
+      },
+      onClose: () => undefined,
+      onStickyNoteEditClaimGranted: (claim) => claims.push(claim),
+      onStickyNoteDeleted: (event) => deleted.push(event),
+      onStickyNoteMoved: (event) => moved.push(event),
+      onCommandError: (error) => errors.push(error),
+    })
+    const raw = { snapshots, claims, deleted, moved, errors, connection }
+    await waitForRaw(raw, (current) => current.snapshots.length > 0, "raw Board snapshot")
+    return raw
+  }
+
+  async function claimRawNote(client: RawBoardClient, stickyNoteId: string): Promise<string> {
+    const claimCount = client.claims.length
+    client.connection.send({ type: "begin_sticky_note_edit", stickyNoteId })
+    await waitForRaw(
+      client,
+      (current) => current.claims.length > claimCount && current.claims.some((claim) => claim.stickyNoteId === stickyNoteId),
+      `Edit Claim for ${stickyNoteId}`,
+    )
+    const claim = client.claims.find((current) => current.stickyNoteId === stickyNoteId)
+    if (!claim) {
+      throw new Error(`Edit Claim was not granted for ${stickyNoteId}`)
+    }
+    return claim.claimId
+  }
+
+  async function waitForRaw(
+    client: RawBoardClient,
+    predicate: (client: RawBoardClient) => boolean,
+    description: string,
+  ): Promise<void> {
+    for (let attempt = 0; attempt < 500; attempt += 1) {
+      if (predicate(client)) {
+        return
+      }
+      await Bun.sleep(5)
+    }
+    throw new Error(`Timed out waiting for ${description}`)
   }
 })
 

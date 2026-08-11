@@ -187,6 +187,22 @@ export type UpdateStickyNoteTextResult =
   | { kind: "not_found" }
   | { kind: "not_member" }
 
+export type DeleteStickyNoteInput = {
+  boardId: string
+  stickyNoteId: string
+  userId: number
+}
+
+export type DeleteStickyNoteResult =
+  | {
+      kind: "deleted"
+      stickyNoteId: string
+      revision: number
+      affectedStickyNotes?: StickyNoteRecord[]
+    }
+  | { kind: "not_found"; revision?: number }
+  | { kind: "not_member" }
+
 export type RecolorStickyNoteInput = {
   boardId: string
   stickyNoteId: string
@@ -256,6 +272,7 @@ export type Persistence = {
   openBoard(input: OpenBoardInput): Promise<OpenBoardRecord | null>
   createStickyNote(input: CreateStickyNoteInput): Promise<CreateStickyNoteResult>
   updateStickyNoteText(input: UpdateStickyNoteTextInput): Promise<UpdateStickyNoteTextResult>
+  deleteStickyNote(input: DeleteStickyNoteInput): Promise<DeleteStickyNoteResult>
   recolorStickyNote(input: RecolorStickyNoteInput): Promise<RecolorStickyNoteResult>
   reorderStickyNote(input: ReorderStickyNoteInput): Promise<ReorderStickyNoteResult>
   moveStickyNote(input: MoveStickyNoteInput): Promise<MoveStickyNoteResult>
@@ -951,6 +968,128 @@ export function createPersistence(options: PersistenceOptions): Persistence {
             authoredByUsername,
             lastEditedByUsername: member.username,
           }),
+        }
+      })
+    },
+
+    async deleteStickyNote(input) {
+      return database.transaction(async (transaction) => {
+        const boardRows = await transaction
+          .select({ id: boards.id, revision: boards.revision })
+          .from(boards)
+          .where(eq(boards.publicId, input.boardId))
+          .for("update")
+        const board = boardRows[0]
+        if (!board) {
+          return { kind: "not_found" as const }
+        }
+
+        const memberRows = await transaction
+          .select({ username: users.username })
+          .from(memberships)
+          .innerJoin(users, eq(memberships.userId, users.id))
+          .where(
+            and(
+              eq(memberships.boardId, board.id),
+              eq(memberships.userId, input.userId),
+            ),
+          )
+          .limit(1)
+        if (!memberRows[0]) {
+          return { kind: "not_member" as const }
+        }
+
+        const noteRows = await transaction
+          .select({
+            internalId: stickyNotes.id,
+            publicId: stickyNotes.publicId,
+            stackingOrder: stickyNotes.stackingOrder,
+          })
+          .from(stickyNotes)
+          .where(
+            and(
+              eq(stickyNotes.boardId, board.id),
+              eq(stickyNotes.publicId, input.stickyNoteId),
+            ),
+          )
+          .for("update")
+        const note = noteRows[0]
+        if (!note) {
+          return { kind: "not_found" as const, revision: board.revision }
+        }
+
+        const notesAfterTarget = await transaction
+          .select({
+            internalId: stickyNotes.id,
+            publicId: stickyNotes.publicId,
+            text: stickyNotes.text,
+            textVersion: stickyNotes.textVersion,
+            positionX: stickyNotes.positionX,
+            positionY: stickyNotes.positionY,
+            color: stickyNotes.color,
+            stackingOrder: stickyNotes.stackingOrder,
+            createdAt: stickyNotes.createdAt,
+            lastEditedAt: stickyNotes.lastEditedAt,
+            authoredByUsername: stickyNoteAuthors.username,
+            lastEditedByUsername: stickyNoteEditors.username,
+          })
+          .from(stickyNotes)
+          .innerJoin(stickyNoteAuthors, eq(stickyNotes.authoredByUserId, stickyNoteAuthors.id))
+          .innerJoin(stickyNoteEditors, eq(stickyNotes.lastEditedByUserId, stickyNoteEditors.id))
+          .where(
+            and(
+              eq(stickyNotes.boardId, board.id),
+              gt(stickyNotes.stackingOrder, note.stackingOrder),
+            ),
+          )
+          .orderBy(asc(stickyNotes.stackingOrder), asc(stickyNotes.id))
+          .for("update")
+
+        const deletedRows = await transaction
+          .delete(stickyNotes)
+          .where(eq(stickyNotes.id, note.internalId))
+          .returning({ id: stickyNotes.id })
+        if (!deletedRows[0]) {
+          throw new Error("Sticky Note could not be deleted")
+        }
+
+        if (notesAfterTarget.length > 0) {
+          await transaction
+            .update(stickyNotes)
+            .set({ stackingOrder: sql`${stickyNotes.stackingOrder} - 1` })
+            .where(
+              and(
+                eq(stickyNotes.boardId, board.id),
+                gt(stickyNotes.stackingOrder, note.stackingOrder),
+              ),
+            )
+        }
+
+        const revisionRows = await transaction
+          .update(boards)
+          .set({ revision: sql`${boards.revision} + 1` })
+          .where(eq(boards.id, board.id))
+          .returning({ revision: boards.revision })
+        const revision = revisionRows[0]?.revision
+        if (revision === undefined) {
+          throw new Error("Board revision could not be advanced")
+        }
+
+        return {
+          kind: "deleted" as const,
+          stickyNoteId: note.publicId,
+          revision,
+          ...(notesAfterTarget.length > 0
+            ? {
+                affectedStickyNotes: notesAfterTarget
+                  .map((affectedNote) => toStickyNoteRecord({
+                    ...affectedNote,
+                    id: affectedNote.publicId,
+                    stackingOrder: affectedNote.stackingOrder - 1,
+                  }))
+                  .sort(compareStickyNoteStackingOrder),
+              }
+            : {}),
         }
       })
     },
