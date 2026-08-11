@@ -764,6 +764,102 @@ test("Board client sends established Edit Claim commands and delivers committed 
   connection.close()
 })
 
+test("Board client sends independent recolor commands and delivers revisioned Color events separately from text", async () => {
+  const credential = "r".repeat(43)
+  const boardId = "Qx7u3nW8kM2pR5sT9vY4aB"
+  const sent: string[] = []
+  let socket: BoardSocket | undefined
+  const recolored: unknown[] = []
+  const textUpdates: unknown[] = []
+  const client = createBoardClient(
+    "http://tuiscrib.test",
+    async () => new Response(JSON.stringify({ status: "ready" }), { status: 200 }),
+    () => {
+      socket = {
+        onmessage: null,
+        onerror: null,
+        onclose: null,
+        send: (data) => sent.push(data),
+        close: () => undefined,
+      }
+      return socket
+    },
+  )
+  const openBoard = client.openBoard
+  if (!openBoard) {
+    throw new Error("Board client does not support Board collaboration")
+  }
+
+  const connection = await openBoard(credential, boardId, {
+    onSnapshot: () => undefined,
+    onError: (error) => {
+      throw error
+    },
+    onClose: () => undefined,
+    onStickyNoteRecolored: (event) => recolored.push(event),
+    onStickyNoteUpdated: (event) => textUpdates.push(event),
+  })
+  const note = {
+    id: "Lm7u3nW8kM2pR5sT9vY4aB",
+    text: "editor draft remains independent",
+    textVersion: 1,
+    position: { x: 0, y: 0 },
+    color: "yellow" as const,
+    stackingOrder: 0,
+    authorship: { member: { username: "ada_lovelace" } },
+    createdAt: "2026-08-10T00:00:00.000Z",
+    lastEdit: {
+      member: { username: "ada_lovelace" },
+      at: "2026-08-10T00:00:00.000Z",
+    },
+  }
+  socket?.onmessage?.({
+    data: JSON.stringify({
+      type: "snapshot",
+      board: { id: boardId, name: "Ideas", role: "member" },
+      revision: 1,
+      presence: [{ member: { username: "ada_lovelace" }, activity: "editing" }],
+      stickyNotes: [note],
+    }),
+  })
+  connection.send({ type: "recolor_sticky_note", stickyNoteId: note.id, color: "magenta" })
+  expect(JSON.parse(sent[0] ?? "{}")).toEqual({
+    type: "recolor_sticky_note",
+    stickyNoteId: note.id,
+    color: "magenta",
+  })
+
+  socket?.onmessage?.({
+    data: JSON.stringify({
+      type: "sticky_note_recolored",
+      revision: 2,
+      stickyNote: { ...note, color: "magenta" },
+    }),
+  })
+  expect(recolored).toHaveLength(1)
+  expect(recolored[0]).toMatchObject({
+    type: "sticky_note_recolored",
+    revision: 2,
+    stickyNote: { color: "magenta", text: note.text },
+  })
+  expect(textUpdates).toHaveLength(0)
+
+  socket?.onmessage?.({
+    data: JSON.stringify({
+      type: "sticky_note_updated",
+      revision: 3,
+      stickyNote: { ...note, color: "magenta", text: "committed text", textVersion: 2 },
+    }),
+  })
+  expect(textUpdates).toHaveLength(1)
+  expect(textUpdates[0]).toMatchObject({
+    type: "sticky_note_updated",
+    revision: 3,
+    stickyNote: { text: "committed text", color: "magenta" },
+  })
+  connection.close()
+})
+
 test("Board client reconnects after a dropped socket and replaces state from the next authoritative snapshot", async () => {
   const credential = "e".repeat(43)
   const boardId = "Qx7u3nW8kM2pR5sT9vY4aB"

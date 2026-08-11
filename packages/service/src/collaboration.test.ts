@@ -1103,6 +1103,149 @@ test("holds a distinct established Edit Claim and broadcasts only its committed 
   }
 })
 
+test("allows recoloring during text editing and broadcasts concurrent Colors in committed revision order", async () => {
+  const note = {
+    id: "Lm7u3nW8kM2pR5sT9vY4aB",
+    text: "text stays unchanged",
+    textVersion: 1,
+    position: { x: 4, y: -2 },
+    color: "yellow" as const,
+    stackingOrder: 0,
+    authorship: { member: { username: "ada_lovelace" } },
+    createdAt: "2026-08-10T00:00:00.000Z",
+    lastEdit: {
+      member: { username: "ada_lovelace" },
+      at: "2026-08-10T00:00:00.000Z",
+    },
+  }
+  let revision = 1
+  let currentColor = note.color
+  const recolorInputs: string[] = []
+  const firstRecolorStarted = Promise.withResolvers<void>()
+  const allowFirstRecolor = Promise.withResolvers<void>()
+  const collaboration = createBoardCollaboration({
+    persistence: {
+      openBoard: async ({ userId, publicId }) => ({
+        board: {
+          id: publicId,
+          name: "Color Ideas",
+          role: userId === 7 ? "owner" : "member",
+        },
+        revision,
+        stickyNotes: [{ ...note, color: currentColor }],
+      }),
+      updateStickyNoteText: async () => ({ kind: "not_found" as const }),
+      recolorStickyNote: async ({ color }: { color: string }) => {
+        recolorInputs.push(color)
+        if (recolorInputs.length === 1) {
+          firstRecolorStarted.resolve()
+          await allowFirstRecolor.promise
+        }
+        currentColor = color as typeof note.color
+        revision += 1
+        return {
+          kind: "recolored" as const,
+          revision,
+          stickyNote: { ...note, color: currentColor },
+        }
+      },
+    },
+    sessionAuthenticator: async (value) => {
+      if (value === credential) {
+        return { user: { id: 7, username: "ada_lovelace" } }
+      }
+      if (value === "b".repeat(43)) {
+        return { user: { id: 8, username: "grace_hopper" } }
+      }
+      return null
+    },
+  })
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request, bunServer) {
+      const result = await collaboration.handleUpgrade(request, bunServer)
+      return result === null ? new Response("not found", { status: 404 }) : result
+    },
+    websocket: collaboration.websocket,
+  })
+  const url = `ws://127.0.0.1:${server.port}/boards/${boardId}/collaboration`
+  const owner = createSocketClient(url, credential)
+  const member = createSocketClient(url, "b".repeat(43))
+
+  try {
+    await Promise.all([waitForSocketOpen(owner.socket), waitForSocketOpen(member.socket)])
+    await owner.nextMessage()
+    await member.nextMessage()
+    await nextMessageMatching(owner, (message) => (message.presence as unknown[]).length === 2)
+
+    owner.socket.send(JSON.stringify({
+      type: "begin_sticky_note_edit",
+      stickyNoteId: note.id,
+    }))
+    const claim = await nextMessageMatching(
+      owner,
+      (message) => message.type === "sticky_note_edit_claim_granted",
+    )
+    await nextMessageMatching(member, (message) => presenceFor(message, "ada_lovelace") === "editing")
+
+    member.socket.send(JSON.stringify({
+      type: "recolor_sticky_note",
+      stickyNoteId: note.id,
+      color: "blue",
+    }))
+    await firstRecolorStarted.promise
+    expect(recolorInputs).toEqual(["blue"])
+
+    owner.socket.send(JSON.stringify({
+      type: "recolor_sticky_note",
+      stickyNoteId: note.id,
+      color: "magenta",
+    }))
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(recolorInputs).toEqual(["blue"])
+    allowFirstRecolor.resolve()
+
+    const [ownerBlue, memberBlue, ownerMagenta, memberMagenta] = await Promise.all([
+      nextMessageMatching(owner, (message) => message.type === "sticky_note_recolored" && message.revision === 2),
+      nextMessageMatching(member, (message) => message.type === "sticky_note_recolored" && message.revision === 2),
+      nextMessageMatching(owner, (message) => message.type === "sticky_note_recolored" && message.revision === 3),
+      nextMessageMatching(member, (message) => message.type === "sticky_note_recolored" && message.revision === 3),
+    ])
+    expect(ownerBlue).toEqual(memberBlue)
+    expect(ownerMagenta).toEqual(memberMagenta)
+    expect(ownerBlue).toMatchObject({
+      type: "sticky_note_recolored",
+      revision: 2,
+      stickyNote: { color: "blue", text: note.text, textVersion: note.textVersion, position: note.position },
+    })
+    expect(ownerMagenta).toMatchObject({
+      type: "sticky_note_recolored",
+      revision: 3,
+      stickyNote: { color: "magenta", text: note.text, textVersion: note.textVersion, position: note.position },
+    })
+
+    const ownerFinal = await nextMessageMatching(
+      owner,
+      (message) => message.type === "snapshot" && message.revision === 3,
+    )
+    expect(ownerFinal).toMatchObject({
+      type: "snapshot",
+      revision: 3,
+      stickyNotes: [{ color: "magenta", text: note.text }],
+      presence: [
+        { member: { username: "ada_lovelace" }, activity: "editing" },
+        { member: { username: "grace_hopper" }, activity: "viewing" },
+      ],
+    })
+    expect(claim).toMatchObject({ type: "sticky_note_edit_claim_granted", stickyNote: note })
+  } finally {
+    allowFirstRecolor.resolve()
+    await Promise.all([closeSocket(owner.socket), closeSocket(member.socket)])
+    await server.stop(true)
+  }
+})
+
 test("rejects a stale publication with the authoritative note and preserves the successful editor Presence", async () => {
   const note = {
     id: "Lm7u3nW8kM2pR5sT9vY4aB",

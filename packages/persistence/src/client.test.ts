@@ -518,6 +518,64 @@ integrationTest("serializes competing established text publications by the locke
   expect(finalText === "first committed writer" || finalText === "second stale writer").toBe(true)
 })
 
+integrationTest("serializes concurrent Color changes by Board revision and preserves other Sticky Note fields", async () => {
+  if (!persistence || !concurrentPersistence) {
+    throw new Error("persistence was not initialized")
+  }
+
+  const now = new Date("2026-08-10T00:00:00.000Z")
+  const registered = await persistence.registerUser({
+    username: "color_racer",
+    passwordHash: "$argon2id$v=19$m=65536,t=3,p=1$test$hash",
+    credentialHash: "n".repeat(64),
+    now,
+    expiresAt: new Date(now.getTime() + 30 * 24 * 60 * 60 * 1_000),
+  })
+  if (!registered) {
+    throw new Error("user was not registered")
+  }
+
+  const boardId = "OdeFgHiJkLmNoPqRsTuVwX"
+  const noteId = "PdeFgHiJkLmNoPqRsTuVwX"
+  await persistence.createBoard({
+    publicId: boardId,
+    name: "Color Race",
+    ownerUserId: registered.user.id,
+    joinCodeHash: "c".repeat(64),
+    now,
+  })
+  await persistence.createStickyNote({
+    publicId: noteId,
+    boardId,
+    userId: registered.user.id,
+    text: "text remains durable",
+    position: { x: 7, y: -3 },
+    color: "yellow",
+    now,
+  })
+
+  const results = await Promise.all([
+    persistence.recolorStickyNote({ boardId, stickyNoteId: noteId, userId: registered.user.id, color: "blue" }),
+    concurrentPersistence.recolorStickyNote({ boardId, stickyNoteId: noteId, userId: registered.user.id, color: "magenta" }),
+  ])
+
+  expect(results.map((result) => result.kind)).toEqual(["recolored", "recolored"])
+  expect(results.map((result) => result.kind === "recolored" ? result.revision : 0).sort()).toEqual([2, 3])
+  const opened = await persistence.openBoard({ userId: registered.user.id, publicId: boardId })
+  expect(opened).toMatchObject({
+    revision: 3,
+    stickyNotes: [{
+      id: noteId,
+      text: "text remains durable",
+      textVersion: 1,
+      position: { x: 7, y: -3 },
+      authorship: { member: { username: "color_racer" } },
+      lastEdit: { member: { username: "color_racer" } },
+    }],
+  })
+  expect(["blue", "magenta"]).toContain(opened?.stickyNotes?.[0]?.color ?? "")
+})
+
 integrationTest("recreates pooled connections after disposable PostgreSQL terminates them", async () => {
   if (!persistence || !databaseUrl) {
     throw new Error("persistence was not initialized")

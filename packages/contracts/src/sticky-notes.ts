@@ -140,6 +140,12 @@ export const releaseStickyNoteEditSchema = z.object({
   stickyNoteId: boardIdentifierSchema,
 })
 
+export const recolorStickyNoteSchema = z.object({
+  type: z.literal("recolor_sticky_note"),
+  stickyNoteId: boardIdentifierSchema,
+  color: stickyNoteColorSchema,
+})
+
 export const boardHeartbeatSchema = z.object({
   type: z.literal("heartbeat"),
 })
@@ -151,6 +157,7 @@ export const boardCommandSchema = z.discriminatedUnion("type", [
   beginStickyNoteEditSchema,
   publishStickyNoteEditSchema,
   releaseStickyNoteEditSchema,
+  recolorStickyNoteSchema,
   boardHeartbeatSchema,
 ])
 
@@ -178,6 +185,12 @@ export const stickyNoteEditClaimGrantedSchema = z.object({
 
 export const stickyNoteUpdatedSchema = z.object({
   type: z.literal("sticky_note_updated"),
+  revision: z.number().int().positive(),
+  stickyNote: stickyNoteSchema,
+})
+
+export const stickyNoteRecoloredSchema = z.object({
+  type: z.literal("sticky_note_recolored"),
   revision: z.number().int().positive(),
   stickyNote: stickyNoteSchema,
 })
@@ -217,9 +230,11 @@ export type ReleaseStickyNoteCreation = z.infer<typeof releaseStickyNoteCreation
 export type BeginStickyNoteEdit = z.infer<typeof beginStickyNoteEditSchema>
 export type PublishStickyNoteEdit = z.infer<typeof publishStickyNoteEditSchema>
 export type ReleaseStickyNoteEdit = z.infer<typeof releaseStickyNoteEditSchema>
+export type RecolorStickyNote = z.infer<typeof recolorStickyNoteSchema>
 export type BoardHeartbeat = z.infer<typeof boardHeartbeatSchema>
 export type StickyNoteCreationClaimGranted = z.infer<typeof stickyNoteCreationClaimGrantedSchema>
 export type StickyNoteCreated = z.infer<typeof stickyNoteCreatedSchema>
 export type StickyNoteEditClaimGranted = z.infer<typeof stickyNoteEditClaimGrantedSchema>
 export type StickyNoteUpdated = z.infer<typeof stickyNoteUpdatedSchema>
+export type StickyNoteRecolored = z.infer<typeof stickyNoteRecoloredSchema>
 export type BoardCommandError = z.infer<typeof boardCommandErrorSchema>

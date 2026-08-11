@@ -113,6 +113,175 @@ test("renders one durable Sticky Note and its attribution in two live terminals"
   expect(memberFrame).toContain("Board revision: 1")
 })
 
+test("recolors a selected Sticky Note from an accessible picker without taking the text Edit Claim", async () => {
+  if (!harness) {
+    throw new Error("acceptance harness did not start")
+  }
+
+  const ownerCredential = await registerUser("color19_owner")
+  const memberCredential = await registerUser("color19_member")
+  const created = await requestJson<{ board: BoardSummary; joinCode: string }>(
+    "/boards",
+    ownerCredential,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Color Picker Board" }),
+    },
+  )
+  expect(created.status).toBe(201)
+  const joined = await requestJson<{ board: BoardSummary }>(
+    "/boards/join",
+    memberCredential,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ joinCode: created.body.joinCode }),
+    },
+  )
+  expect(joined.status).toBe(201)
+
+  const owner = await harness.addShellClient(
+    "color19-owner",
+    createMemoryCredentialStore(ownerCredential, "memory://sticky/color19-owner"),
+    undefined,
+    {
+      schedule: (callback, delayMs) => harness?.clock.setTimeout(callback, delayMs),
+      cancel: (handle) => harness?.clock.clearTimeout(handle as number),
+    },
+  )
+  const member = await harness.addShellClient(
+    "color19-member",
+    createMemoryCredentialStore(memberCredential, "memory://sticky/color19-member"),
+  )
+
+  try {
+    await waitForFrame(owner, (frame) => frame.includes("Terminal Session restored"))
+    await waitForFrame(member, (frame) => frame.includes("Terminal Session restored"))
+    await openSelectedBoard(owner, created.body.board.name)
+    await openSelectedBoard(member, created.body.board.name)
+    await waitForFrame(owner, (frame) => frame.includes("color19_owner · viewing"))
+    await waitForFrame(member, (frame) => frame.includes("color19_member · viewing"))
+
+    await act(async () => {
+      owner.setup.mockInput.pressKey("n")
+      await owner.setup.renderOnce()
+    })
+    await waitForFrame(owner, (frame) => frame.includes("Provisional Sticky Note") && frame.includes("authority") && frame.includes("granted"))
+    await act(async () => {
+      await owner.setup.mockInput.typeText("colorable note")
+      harness?.clock.advance(STICKY_NOTE_TEXT_DEBOUNCE_MS)
+      await owner.setup.renderOnce()
+    })
+    await waitForFrame(owner, (frame) => frame.includes("colorable note") && frame.includes("Board revision: 1"))
+    await waitForFrame(member, (frame) => frame.includes("colorable note") && frame.includes("Board revision: 1"))
+
+    await act(async () => {
+      owner.setup.mockInput.pressEscape()
+      await owner.setup.renderOnce()
+    })
+    await waitForFrame(owner, (frame) => frame.includes("color19_owner · viewing"))
+
+    await act(async () => {
+      member.setup.mockInput.pressKey("c")
+      await member.setup.renderOnce()
+    })
+    const picker = await waitForFrame(
+      member,
+      (frame) => frame.includes("Color picker") && frame.includes("1 amber") && frame.includes("8 yellow"),
+    )
+    expect(picker).toContain("Color carries no workflow meaning")
+    expect(picker).toContain("Current: yellow")
+    expect(picker).toContain("Escape cancel")
+
+    await act(async () => {
+      member.setup.mockInput.pressEscape()
+      await member.setup.renderOnce()
+    })
+    const cancelled = await waitForFrame(
+      member,
+      (frame) => frame.includes("Board revision: 1") && frame.includes("Color yellow"),
+    )
+    expect(cancelled).not.toContain("Color picker · Sticky Note")
+
+    await act(async () => {
+      owner.setup.mockInput.pressEnter()
+      await owner.setup.renderOnce()
+    })
+    await waitForFrame(owner, (frame) => frame.includes("Established Sticky Note") && frame.includes("Claim granted"))
+
+    await act(async () => {
+      member.setup.mockInput.pressKey("c")
+      await member.setup.renderOnce()
+    })
+    await waitForFrame(member, (frame) => frame.includes("Color picker") && frame.includes("Current: yellow"))
+    await act(async () => {
+      member.setup.mockInput.pressKey("4")
+      await member.setup.renderOnce()
+    })
+
+    const memberGreen = await waitForFrame(
+      member,
+      (frame) => frame.includes("Board revision: 2") && frame.includes("Color green"),
+    )
+    expect(memberGreen).toContain("color19_owner · editing")
+    expect(memberGreen).not.toContain("Color picker · Sticky Note")
+    const ownerGreen = await waitForFrame(
+      owner,
+      (frame) => frame.includes("Board revision: 2") && frame.includes("Color green"),
+    )
+    expect(ownerGreen).toContain("Established Sticky Note")
+    expect(ownerGreen).toContain("color19_owner · editing")
+    expect(ownerGreen).toContain("colorable note")
+
+    await act(async () => {
+      owner.setup.mockInput.pressEscape()
+      await owner.setup.renderOnce()
+    })
+    await waitForFrame(owner, (frame) => frame.includes("color19_owner · viewing"))
+
+    await act(async () => {
+      owner.setup.mockInput.pressKey("c")
+      await owner.setup.renderOnce()
+    })
+    await waitForFrame(owner, (frame) => frame.includes("Color picker") && frame.includes("Current: green"))
+    await act(async () => {
+      owner.setup.mockInput.pressKey("6")
+      await owner.setup.renderOnce()
+    })
+
+    const ownerRed = await waitForFrame(
+      owner,
+      (frame) => frame.includes("Board revision: 3") && frame.includes("Color red"),
+    )
+    const memberRed = await waitForFrame(
+      member,
+      (frame) => frame.includes("Board revision: 3") && frame.includes("Color red"),
+    )
+    expect(ownerRed).toContain("colorable note")
+    expect(memberRed).toContain("colorable note")
+
+    await act(async () => {
+      await harness?.restartService()
+    })
+    await waitForFrame(owner, (frame) => frame.includes("Connection: RECONNECTING"))
+    await waitForFrame(member, (frame) => frame.includes("Connection: RECONNECTING"))
+    const ownerAfterReconnect = await waitForFrame(
+      owner,
+      (frame) => frame.includes("Board revision: 3") && frame.includes("Color red"),
+    )
+    const memberAfterReconnect = await waitForFrame(
+      member,
+      (frame) => frame.includes("Board revision: 3") && frame.includes("Color red"),
+    )
+    expect(ownerAfterReconnect).toContain("colorable note")
+    expect(memberAfterReconnect).toContain("colorable note")
+  } finally {
+    await harness.disposeClient(owner)
+    await harness.disposeClient(member)
+  }
+})
+
 test("identifies the Member holding an established Edit Claim in the blocked terminal", async () => {
   if (!harness) {
     throw new Error("acceptance harness did not start")

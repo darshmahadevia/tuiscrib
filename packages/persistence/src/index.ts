@@ -29,6 +29,8 @@ export {
   type CreateStickyNoteResult,
   type UpdateStickyNoteTextInput,
   type UpdateStickyNoteTextResult,
+  type RecolorStickyNoteInput,
+  type RecolorStickyNoteResult,
   type RotateJoinCodeInput,
   type RotateJoinCodeResult,
   type TerminalSessionAuthentication,

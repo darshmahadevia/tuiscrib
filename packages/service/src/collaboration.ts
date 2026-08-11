@@ -10,6 +10,7 @@ import {
   stickyNoteCreationClaimGrantedSchema,
   stickyNoteCreatedSchema,
   stickyNoteEditClaimGrantedSchema,
+  stickyNoteRecoloredSchema,
   stickyNoteUpdatedSchema,
   stickyNoteTextSchema,
   serviceErrorSchema,
@@ -22,6 +23,7 @@ import type {
   CreateStickyNoteResult,
   OpenBoardRecord,
   Persistence,
+  RecolorStickyNoteResult,
   StickyNoteRecord,
   TerminalSessionAuthentication,
   UpdateStickyNoteTextResult,
@@ -42,6 +44,7 @@ export type BoardCollaborationPersistence = Pick<Persistence, "openBoard"> &
     Persistence,
     | "createStickyNote"
     | "updateStickyNoteText"
+    | "recolorStickyNote"
     | "findUserByUsername"
     | "registerUser"
     | "createTerminalSession"
@@ -136,6 +139,7 @@ export function createBoardCollaboration(
   const creationClaimIdByKey = new Map<string, string>()
   const editClaimsById = new Map<string, StickyNoteEditClaim>()
   const editClaimIdByKey = new Map<string, string>()
+  const mutationTailByBoard = new Map<string, Promise<void>>()
 
   const collaboration: BoardCollaboration = {
     async openBoard(user, publicId) {
@@ -395,9 +399,20 @@ export function createBoardCollaboration(
         case "release_sticky_note_edit":
           releaseStickyNoteEdit(socket, parsed.data.claimId, parsed.data.stickyNoteId)
           return
+        case "recolor_sticky_note":
+          await runBoardMutation(
+            socket.data.boardId,
+            () => recolorStickyNote(
+              socket,
+              parsed.data as Extract<BoardCommand, { type: "recolor_sticky_note" }>,
+            ),
+          )
+          return
       }
     } catch {
-      const rejectedMessage = parsed.data.type === "begin_sticky_note_edit" ||
+      const rejectedMessage = parsed.data.type === "recolor_sticky_note"
+        ? "Sticky Note recoloring was rejected."
+        : parsed.data.type === "begin_sticky_note_edit" ||
         parsed.data.type === "publish_sticky_note_edit" ||
         parsed.data.type === "release_sticky_note_edit"
         ? "Sticky Note editing was rejected."
@@ -743,6 +758,41 @@ export function createBoardCollaboration(
     }
   }
 
+  async function recolorStickyNote(
+    socket: BoardWebSocket,
+    command: Extract<BoardCommand, { type: "recolor_sticky_note" }>,
+  ): Promise<void> {
+    const recolorStickyNote = options.persistence.recolorStickyNote
+    if (typeof recolorStickyNote !== "function") {
+      sendCommandError(socket, "sticky_note_rejected", "Sticky Note recoloring is unavailable.")
+      return
+    }
+
+    const result = await recolorStickyNote({
+      boardId: socket.data.boardId,
+      stickyNoteId: command.stickyNoteId,
+      userId: socket.data.user.id,
+      color: command.color,
+    })
+    if (result.kind !== "recolored") {
+      sendColorPersistenceError(socket, result)
+      return
+    }
+
+    const event = stickyNoteRecoloredSchema.parse({
+      type: "sticky_note_recolored",
+      revision: result.revision,
+      stickyNote: result.stickyNote,
+    })
+    const state = presenceByBoard.get(socket.data.boardId)
+    if (!state) {
+      return
+    }
+    applyUpdatedNote(state, result.stickyNote, result.revision)
+    broadcastStickyNoteRecolored(state, event)
+    broadcastSnapshot(state)
+  }
+
   function releaseStickyNoteEdit(
     socket: BoardWebSocket,
     claimId: string,
@@ -798,6 +848,29 @@ export function createBoardCollaboration(
     const key = editClaimKey(claim.boardId, claim.stickyNoteId)
     if (editClaimIdByKey.get(key) === claim.claimId) {
       editClaimIdByKey.delete(key)
+    }
+  }
+
+  async function runBoardMutation(
+    boardId: string,
+    mutation: () => Promise<void>,
+  ): Promise<void> {
+    const previous = mutationTailByBoard.get(boardId) ?? Promise.resolve()
+    let release!: () => void
+    const turn = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const tail = previous.catch(() => undefined).then(() => turn)
+    mutationTailByBoard.set(boardId, tail)
+
+    await previous.catch(() => undefined)
+    try {
+      await mutation()
+    } finally {
+      release()
+      if (mutationTailByBoard.get(boardId) === tail) {
+        mutationTailByBoard.delete(boardId)
+      }
     }
   }
 
@@ -874,6 +947,18 @@ export function createBoardCollaboration(
     }
   }
 
+  function broadcastStickyNoteRecolored(
+    state: BoardPresenceState,
+    event: ReturnType<typeof stickyNoteRecoloredSchema.parse>,
+  ): void {
+    const serialized = JSON.stringify(event)
+    for (const connection of state.connections.values()) {
+      if (connection.ready) {
+        connection.socket.send(serialized)
+      }
+    }
+  }
+
   function sendClaimAcknowledgement(
     socket: BoardWebSocket,
     claim: StickyNoteCreationClaim,
@@ -931,6 +1016,20 @@ export function createBoardCollaboration(
         return
       case "updated":
       case "text_version_conflict":
+        return
+    }
+  }
+
+  function sendColorPersistenceError(socket: BoardWebSocket, result: RecolorStickyNoteResult): void {
+    switch (result.kind) {
+      case "invalid_color":
+        sendCommandError(socket, "sticky_note_rejected", "Sticky Note Color was rejected.")
+        return
+      case "not_found":
+      case "not_member":
+        sendCommandError(socket, "sticky_note_rejected", "Sticky Note recoloring was rejected.")
+        return
+      case "recolored":
         return
     }
   }

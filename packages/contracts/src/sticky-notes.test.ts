@@ -5,9 +5,11 @@ import {
   boardCommandSchema,
   DEFAULT_STICKY_NOTE_COLOR,
   MAX_STICKY_NOTE_CHARACTERS,
+  recolorStickyNoteSchema,
   publishStickyNoteEditSchema,
   releaseStickyNoteEditSchema,
   stickyNoteSchema,
+  stickyNoteRecoloredSchema,
 } from "./sticky-notes.ts"
 import { boardSocketMessageSchema } from "./collaboration.ts"
 
@@ -147,6 +149,25 @@ test("recognizes an established Edit Claim acknowledgement and committed text up
     type: "sticky_note_updated",
     revision: 2,
     stickyNote: { text: "", textVersion: 2 },
+  })
+})
+
+test("models Color changes as independent revisioned mutations without an Edit Claim", () => {
+  const command = {
+    type: "recolor_sticky_note" as const,
+    stickyNoteId: note.id,
+    color: "magenta" as const,
+  }
+
+  expect(boardCommandSchema.parse(recolorStickyNoteSchema.parse(command))).toEqual(command)
+  expect(boardSocketMessageSchema.parse({
+    type: "sticky_note_recolored",
+    revision: 3,
+    stickyNote: { ...note, color: command.color },
+  })).toMatchObject({
+    type: "sticky_note_recolored",
+    revision: 3,
+    stickyNote: { id: note.id, color: "magenta", text: note.text, textVersion: note.textVersion },
   })
 })
 
