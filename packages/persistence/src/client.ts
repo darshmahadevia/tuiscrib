@@ -7,12 +7,14 @@ import postgres from "postgres"
 import {
   MAX_BOARD_MEMBERS,
   MAX_STICKY_NOTES,
+  compareStickyNoteStackingOrder,
   stickyNoteColorSchema,
   stickyNotePositionSchema,
   stickyNoteTextSchema,
   type StickyNote,
   type StickyNoteColor,
   type StickyNotePosition,
+  type StickyNoteStackingDirection,
 } from "@tuiscrib/contracts"
 
 import {
@@ -196,6 +198,24 @@ export type RecolorStickyNoteResult =
   | { kind: "not_found" }
   | { kind: "not_member" }
 
+export type ReorderStickyNoteInput = {
+  boardId: string
+  stickyNoteId: string
+  userId: number
+  direction: StickyNoteStackingDirection
+}
+
+export type ReorderStickyNoteResult =
+  | {
+      kind: "reordered"
+      stickyNote: StickyNoteRecord
+      affectedStickyNotes?: StickyNoteRecord[]
+      revision: number
+    }
+  | { kind: "at_boundary"; stickyNote: StickyNoteRecord; revision: number }
+  | { kind: "not_found" }
+  | { kind: "not_member" }
+
 export type RegisteredUser = {
   user: Pick<AuthUserRecord, "id" | "username">
   sessionId: number
@@ -221,6 +241,7 @@ export type Persistence = {
   createStickyNote(input: CreateStickyNoteInput): Promise<CreateStickyNoteResult>
   updateStickyNoteText(input: UpdateStickyNoteTextInput): Promise<UpdateStickyNoteTextResult>
   recolorStickyNote(input: RecolorStickyNoteInput): Promise<RecolorStickyNoteResult>
+  reorderStickyNote(input: ReorderStickyNoteInput): Promise<ReorderStickyNoteResult>
   reset(): Promise<void>
   close(): Promise<void>
 }
@@ -662,7 +683,10 @@ export function createPersistence(options: PersistenceOptions): Persistence {
         .innerJoin(stickyNoteAuthors, eq(stickyNotes.authoredByUserId, stickyNoteAuthors.id))
         .innerJoin(stickyNoteEditors, eq(stickyNotes.lastEditedByUserId, stickyNoteEditors.id))
         .where(eq(stickyNotes.boardId, board.boardId))
-        .orderBy(asc(stickyNotes.stackingOrder), asc(stickyNotes.id))
+        .orderBy(
+          asc(stickyNotes.stackingOrder),
+          asc(sql`${stickyNotes.publicId} COLLATE "C"`),
+        )
 
       return {
         board: {
@@ -1025,6 +1049,120 @@ export function createPersistence(options: PersistenceOptions): Persistence {
             authoredByUsername,
             lastEditedByUsername,
           }),
+        }
+      })
+    },
+
+    async reorderStickyNote(input) {
+      return database.transaction(async (transaction) => {
+        const boardRows = await transaction
+          .select({ id: boards.id, revision: boards.revision })
+          .from(boards)
+          .where(eq(boards.publicId, input.boardId))
+          .for("update")
+        const board = boardRows[0]
+        if (!board) {
+          return { kind: "not_found" as const }
+        }
+
+        const memberRows = await transaction
+          .select({ username: users.username })
+          .from(memberships)
+          .innerJoin(users, eq(memberships.userId, users.id))
+          .where(
+            and(
+              eq(memberships.boardId, board.id),
+              eq(memberships.userId, input.userId),
+            ),
+          )
+          .limit(1)
+        if (!memberRows[0]) {
+          return { kind: "not_member" as const }
+        }
+
+        const noteRows = await transaction
+          .select({
+            internalId: stickyNotes.id,
+            publicId: stickyNotes.publicId,
+            text: stickyNotes.text,
+            textVersion: stickyNotes.textVersion,
+            positionX: stickyNotes.positionX,
+            positionY: stickyNotes.positionY,
+            color: stickyNotes.color,
+            stackingOrder: stickyNotes.stackingOrder,
+            createdAt: stickyNotes.createdAt,
+            lastEditedAt: stickyNotes.lastEditedAt,
+            authoredByUsername: stickyNoteAuthors.username,
+            lastEditedByUsername: stickyNoteEditors.username,
+          })
+          .from(stickyNotes)
+          .innerJoin(stickyNoteAuthors, eq(stickyNotes.authoredByUserId, stickyNoteAuthors.id))
+          .innerJoin(stickyNoteEditors, eq(stickyNotes.lastEditedByUserId, stickyNoteEditors.id))
+          .where(eq(stickyNotes.boardId, board.id))
+          .orderBy(
+            asc(stickyNotes.stackingOrder),
+            asc(sql`${stickyNotes.publicId} COLLATE "C"`),
+          )
+          .for("update")
+
+        const noteIndex = noteRows.findIndex((note) => note.publicId === input.stickyNoteId)
+        if (noteIndex === -1) {
+          return { kind: "not_found" as const }
+        }
+
+        const neighborIndex = input.direction === "raise" ? noteIndex + 1 : noteIndex - 1
+        const note = noteRows[noteIndex]
+        const neighbor = noteRows[neighborIndex]
+        if (!note || !neighbor) {
+          if (!note) {
+            return { kind: "not_found" as const }
+          }
+          return {
+            kind: "at_boundary" as const,
+            revision: board.revision,
+            stickyNote: toStickyNoteRecord({ ...note, id: note.publicId }),
+          }
+        }
+
+        await transaction
+          .update(stickyNotes)
+          .set({ stackingOrder: neighbor.stackingOrder })
+          .where(eq(stickyNotes.id, note.internalId))
+        await transaction
+          .update(stickyNotes)
+          .set({ stackingOrder: note.stackingOrder })
+          .where(eq(stickyNotes.id, neighbor.internalId))
+
+        const revisionRows = await transaction
+          .update(boards)
+          .set({ revision: sql`${boards.revision} + 1` })
+          .where(eq(boards.id, board.id))
+          .returning({ revision: boards.revision })
+        const revision = revisionRows[0]?.revision
+        if (revision === undefined) {
+          throw new Error("Board revision could not be advanced")
+        }
+
+        return {
+          kind: "reordered" as const,
+          revision,
+          stickyNote: toStickyNoteRecord({
+            ...note,
+            id: note.publicId,
+            stackingOrder: neighbor.stackingOrder,
+          }),
+          affectedStickyNotes: [
+            toStickyNoteRecord({
+              ...note,
+              id: note.publicId,
+              stackingOrder: neighbor.stackingOrder,
+            }),
+            toStickyNoteRecord({
+              ...neighbor,
+              id: neighbor.publicId,
+              stackingOrder: note.stackingOrder,
+            }),
+          ].sort(compareStickyNoteStackingOrder),
         }
       })
     },

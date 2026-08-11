@@ -247,6 +247,266 @@ test("opens one Board for two real terminal clients and renders Presence lifecyc
   }
 })
 
+test("reorders overlapping Sticky Notes across two clients while editing and converges after reconnect", async () => {
+  if (!harness) {
+    throw new Error("acceptance harness did not start")
+  }
+  const activeHarness = harness
+  const ownerCredential = await registerUser("stack21_owner")
+  const memberCredential = await registerUser("stack21_member")
+  const created = await requestJson<{ board: BoardSummary; joinCode: string }>(
+    "/boards",
+    ownerCredential,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Stacking Order Board" }),
+    },
+  )
+  expect(created.status).toBe(201)
+  const joined = await requestJson<{ board: BoardSummary }>(
+    "/boards/join",
+    memberCredential,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ joinCode: created.body.joinCode }),
+    },
+  )
+  expect(joined.status).toBe(201)
+
+  const scheduler = {
+    schedule: (callback: () => void, delayMs: number) => activeHarness.clock.setTimeout(callback, delayMs),
+    cancel: (handle: unknown) => activeHarness.clock.clearTimeout(handle as number),
+  }
+  const ownerBoardClient = createBoardClient(
+    activeHarness.baseUrl,
+    fetch,
+    undefined,
+    { scheduler, reconnectPolicy: () => 0 },
+  )
+  const memberBoardClient = createBoardClient(
+    activeHarness.baseUrl,
+    fetch,
+    undefined,
+    { scheduler, reconnectPolicy: () => 0 },
+  )
+  const owner = await activeHarness.addShellClient(
+    "stack21-owner",
+    createMemoryCredentialStore(ownerCredential, "memory://stack21/owner"),
+    ownerBoardClient,
+  )
+  const member = await activeHarness.addShellClient(
+    "stack21-member",
+    createMemoryCredentialStore(memberCredential, "memory://stack21/member"),
+    memberBoardClient,
+  )
+
+  try {
+    await waitForFrame(owner, (frame) => frame.includes("Terminal Session restored"))
+    await waitForFrame(member, (frame) => frame.includes("Terminal Session restored"))
+    await openSelectedBoard(owner, created.body.board.name)
+    await openSelectedBoard(member, created.body.board.name)
+    await waitForFrame(owner, (frame) => frame.includes("Board revision: 0") && frame.includes("stack21_owner · viewing"))
+    await waitForFrame(member, (frame) => frame.includes("Board revision: 0") && frame.includes("stack21_member · viewing"))
+
+    await createNote("stack21 back note", 1)
+    await createNote("stack21 middle note", 2)
+    await createNote("stack21 front note", 3)
+
+    const initialOverlap = await waitForFrame(
+      member,
+      (frame) => frame.includes("Board revision: 3") && frame.includes("Overlap selection: 1/3"),
+    )
+    expect(initialOverlap).toContain("stack21 front note")
+    expect(initialOverlap).toContain("Stacking Order back-to-front")
+
+    await act(async () => {
+      member.setup.mockInput.pressTab()
+      await member.setup.renderOnce()
+    })
+    const selectedMiddle = await waitForFrame(
+      member,
+      (frame) => frame.includes("Selected Sticky Note: stack21 middle note") && frame.includes("Overlap selection: 2/3"),
+    )
+    expect(selectedMiddle).toContain("stack21_member · viewing")
+
+    await act(async () => {
+      owner.setup.mockInput.pressEnter()
+      await owner.setup.renderOnce()
+    })
+    const editing = await waitForFrame(
+      owner,
+      (frame) => frame.includes("Edit mode · established text editing active") && frame.includes("Claim granted"),
+    )
+    expect(editing).toContain("stack21 front note")
+
+    await act(async () => {
+      await owner.setup.mockInput.typeText(" live draft")
+      await owner.setup.renderOnce()
+    })
+    expect(owner.setup.captureCharFrame()).toContain("live draft")
+
+    await act(async () => {
+      member.setup.mockInput.pressKey("]")
+      await member.setup.renderOnce()
+    })
+    const memberReordered = await waitForFrame(
+      member,
+      (frame) => frame.includes("Board revision: 4") &&
+        frame.includes("Selected Sticky Note: stack21 middle note") &&
+        frame.includes("Stacking Order 2"),
+    )
+    expect(memberReordered).toContain("stack21_member · viewing")
+    const ownerAfterReorder = await waitForFrame(
+      owner,
+      (frame) => frame.includes("Board revision: 4") &&
+        frame.includes("live draft") &&
+        frame.includes("Edit mode · established text editing active"),
+    )
+    expect(ownerAfterReorder).toContain("stack21_owner · editing")
+
+    await act(async () => {
+      owner.setup.mockInput.pressEscape()
+      await owner.setup.renderOnce()
+    })
+    await waitForFrame(
+      owner,
+      (frame) => frame.includes("Navigate mode · Sticky Note selected") &&
+        !frame.includes("established text editing active"),
+    )
+    await waitForFrame(
+      member,
+      (frame) => frame.includes("Board revision: 5") && frame.includes("live draft"),
+    )
+
+    await act(async () => {
+      owner.setup.mockInput.pressKey("[")
+      member.setup.mockInput.pressKey("[")
+      await owner.setup.renderOnce()
+      await member.setup.renderOnce()
+    })
+    const ownerConverged = await waitForFrame(
+      owner,
+      (frame) => frame.includes("Board revision: 7") && frame.includes("Stacking Order back-to-front"),
+    )
+    const memberConverged = await waitForFrame(
+      member,
+      (frame) => frame.includes("Board revision: 7") && frame.includes("Stacking Order back-to-front"),
+    )
+    expect(stackingOrderFrame(ownerConverged)).toBe(stackingOrderFrame(memberConverged))
+
+    await act(async () => {
+      await activeHarness.restartService()
+    })
+    await waitForFrame(owner, (frame) => frame.includes("Connection: RECONNECTING"))
+    await waitForFrame(member, (frame) => frame.includes("Connection: RECONNECTING"))
+    await act(async () => {
+      activeHarness.clock.advance(0)
+      await owner.setup.renderOnce()
+      await member.setup.renderOnce()
+    })
+    const ownerAfterRestart = await waitForFrame(
+      owner,
+      (frame) => frame.includes("Connection: CONNECTED") && frame.includes("Board revision: 7"),
+    )
+    const memberAfterRestart = await waitForFrame(
+      member,
+      (frame) => frame.includes("Connection: CONNECTED") && frame.includes("Board revision: 7"),
+    )
+    expect(stackingOrderFrame(ownerAfterRestart)).toBe(stackingOrderFrame(memberAfterRestart))
+  } finally {
+    await activeHarness.disposeClient(owner)
+    await activeHarness.disposeClient(member)
+  }
+
+  async function createNote(text: string, revision: number): Promise<void> {
+    await act(async () => {
+      owner.setup.mockInput.pressKey("n")
+      await owner.setup.renderOnce()
+    })
+    await waitForFrame(owner, (frame) => frame.includes("authority") && frame.includes("granted"))
+    await act(async () => {
+      await owner.setup.mockInput.typeText(text)
+      activeHarness.clock.advance(150)
+      await owner.setup.renderOnce()
+    })
+    await waitForFrame(owner, (frame) => frame.includes(text))
+    await waitForFrame(member, (frame) => frame.includes(text) && frame.includes(`Board revision: ${revision}`))
+    await act(async () => {
+      owner.setup.mockInput.pressEscape()
+      await owner.setup.renderOnce()
+    })
+    await waitForFrame(owner, (frame) => frame.includes("Navigate mode · Sticky Note selected"))
+  }
+
+  async function registerUser(username: string): Promise<string> {
+    const response = await fetch(`${activeHarness.baseUrl}/auth/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ username, password: "correct horse", confirmation: "correct horse" }),
+    })
+    expect(response.status).toBe(201)
+    return (await response.json() as { sessionCredential: string }).sessionCredential
+  }
+
+  async function requestJson<T>(
+    path: string,
+    credential: string,
+    init: RequestInit,
+  ): Promise<{ status: number; body: T }> {
+    const response = await fetch(`${activeHarness.baseUrl}${path}`, {
+      ...init,
+      headers: { authorization: `Bearer ${credential}`, ...init.headers },
+    })
+    return { status: response.status, body: await response.json() as T }
+  }
+
+  async function openSelectedBoard(client: TerminalClient, boardName: string): Promise<void> {
+    await act(async () => {
+      client.setup.mockInput.pressKey("b")
+      await client.setup.renderOnce()
+    })
+    await waitForFrame(client, (frame) => frame.includes("Board list") && frame.includes(boardName))
+    await act(async () => {
+      client.setup.mockInput.pressKey("o")
+      await client.setup.renderOnce()
+    })
+  }
+
+  function stackingOrderFrame(frame: string): string {
+    const start = frame.indexOf("Stacking Order back-to-front:")
+    if (start < 0) {
+      return ""
+    }
+    const end = frame.indexOf("Viewing Presence", start)
+    return frame.slice(start, end < 0 ? undefined : end).replace(/\s+/g, " ").trim()
+  }
+
+  async function waitForFrame(
+    client: TerminalClient,
+    predicate: (frame: string) => boolean,
+  ): Promise<string> {
+    let lastFrame = ""
+    let matchedFrame: string | undefined
+    await act(async () => {
+      for (let attempt = 0; attempt < 500; attempt += 1) {
+        await Bun.sleep(5)
+        await client.setup.renderOnce()
+        lastFrame = client.setup.captureCharFrame()
+        if (predicate(lastFrame)) {
+          matchedFrame = lastFrame
+          return
+        }
+      }
+    })
+    if (matchedFrame !== undefined) {
+      return matchedFrame
+    }
+    throw new Error(`Timed out waiting for ${client.label} rendered frame\n${lastFrame}`)
+  }
+})
+
 test("reconnects two terminal clients from authoritative snapshots after a service restart", async () => {
   if (!harness) {
     throw new Error("acceptance harness did not start")

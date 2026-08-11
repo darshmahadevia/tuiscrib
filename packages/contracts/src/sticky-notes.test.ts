@@ -6,12 +6,14 @@ import {
   DEFAULT_STICKY_NOTE_COLOR,
   MAX_STICKY_NOTE_CHARACTERS,
   recolorStickyNoteSchema,
+  reorderStickyNoteSchema,
   publishStickyNoteEditSchema,
   releaseStickyNoteEditSchema,
   stickyNoteSchema,
   stickyNoteRecoloredSchema,
+  stickyNoteReorderedSchema,
 } from "./sticky-notes.ts"
-import { boardSocketMessageSchema } from "./collaboration.ts"
+import { boardSnapshotSchema, boardSocketMessageSchema } from "./collaboration.ts"
 
 const note = {
   id: "Qx7u3nW8kM2pR5sT9vY4aB",
@@ -169,6 +171,45 @@ test("models Color changes as independent revisioned mutations without an Edit C
     revision: 3,
     stickyNote: { id: note.id, color: "magenta", text: note.text, textVersion: note.textVersion },
   })
+})
+
+test("models Stacking Order changes as independent revisioned mutations", () => {
+  const command = {
+    type: "reorder_sticky_note" as const,
+    stickyNoteId: note.id,
+    direction: "raise" as const,
+  }
+
+  expect(boardCommandSchema.parse(reorderStickyNoteSchema.parse(command))).toEqual(command)
+  expect(stickyNoteReorderedSchema.parse({
+    type: "sticky_note_reordered",
+    revision: 4,
+    stickyNote: { ...note, stackingOrder: 1 },
+    affectedStickyNotes: [
+      { ...note, stackingOrder: 1 },
+      { ...note, id: "Lm7u3nW8kM2pR5sT9vY4aB", stackingOrder: 0 },
+    ],
+  })).toMatchObject({
+    type: "sticky_note_reordered",
+    revision: 4,
+    stickyNote: { id: note.id, stackingOrder: 1 },
+    affectedStickyNotes: [{ stackingOrder: 1 }, { stackingOrder: 0 }],
+  })
+})
+
+test("rejects authoritative snapshots whose Stacking Order is not a contiguous total order", () => {
+  const snapshot = {
+    type: "snapshot" as const,
+    board: { id: note.id, name: "Ideas", role: "member" as const },
+    revision: 4,
+    presence: [{ member: { username: "ada_lovelace" }, activity: "viewing" as const }],
+    stickyNotes: [
+      note,
+      { ...note, id: "Lm7u3nW8kM2pR5sT9vY4aB", stackingOrder: 0 },
+    ],
+  }
+
+  expect(() => boardSnapshotSchema.parse(snapshot)).toThrow("unique Stacking Order")
 })
 
 test("carries only public claim-holder identity and authoritative stale-edit state", () => {

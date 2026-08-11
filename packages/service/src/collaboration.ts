@@ -5,6 +5,7 @@ import {
   boardCommandSchema,
   boardEditClaimSchema,
   boardIdentifierSchema,
+  compareStickyNoteStackingOrder,
   boardOpenReadyResponseSchema,
   boardSnapshotSchema,
   STICKY_NOTE_TEXT_LIMIT_ERROR,
@@ -12,6 +13,7 @@ import {
   stickyNoteCreatedSchema,
   stickyNoteEditClaimGrantedSchema,
   stickyNoteRecoloredSchema,
+  stickyNoteReorderedSchema,
   stickyNoteUpdatedSchema,
   stickyNoteTextSchema,
   serviceErrorSchema,
@@ -26,6 +28,7 @@ import type {
   OpenBoardRecord,
   Persistence,
   RecolorStickyNoteResult,
+  ReorderStickyNoteResult,
   StickyNoteRecord,
   TerminalSessionAuthentication,
   UpdateStickyNoteTextResult,
@@ -53,6 +56,7 @@ export type BoardCollaborationPersistence = Pick<Persistence, "openBoard"> &
     | "createStickyNote"
     | "updateStickyNoteText"
     | "recolorStickyNote"
+    | "reorderStickyNote"
     | "findUserByUsername"
     | "registerUser"
     | "createTerminalSession"
@@ -438,10 +442,21 @@ export function createBoardCollaboration(
             ),
           )
           return
+        case "reorder_sticky_note":
+          await runBoardMutation(
+            socket.data.boardId,
+            () => reorderStickyNote(
+              socket,
+              parsed.data as Extract<BoardCommand, { type: "reorder_sticky_note" }>,
+            ),
+          )
+          return
       }
     } catch {
       const rejectedMessage = parsed.data.type === "recolor_sticky_note"
         ? "Sticky Note recoloring was rejected."
+        : parsed.data.type === "reorder_sticky_note"
+        ? "Sticky Note Stacking Order change was rejected."
         : parsed.data.type === "begin_sticky_note_edit" ||
         parsed.data.type === "publish_sticky_note_edit" ||
         parsed.data.type === "release_sticky_note_edit"
@@ -871,6 +886,58 @@ export function createBoardCollaboration(
     broadcastSnapshot(state)
   }
 
+  async function reorderStickyNote(
+    socket: BoardWebSocket,
+    command: Extract<BoardCommand, { type: "reorder_sticky_note" }>,
+  ): Promise<void> {
+    const reorderStickyNote = options.persistence.reorderStickyNote
+    if (typeof reorderStickyNote !== "function") {
+      sendCommandError(socket, "sticky_note_rejected", "Sticky Note Stacking Order is unavailable.")
+      return
+    }
+
+    const result = await reorderStickyNote({
+      boardId: socket.data.boardId,
+      stickyNoteId: command.stickyNoteId,
+      userId: socket.data.user.id,
+      direction: command.direction,
+    })
+    if (result.kind === "at_boundary") {
+      sendCommandError(
+        socket,
+        "stacking_order_boundary",
+        command.direction === "raise"
+          ? "Sticky Note is already at the front of the Stacking Order."
+          : "Sticky Note is already at the back of the Stacking Order.",
+        {
+          authoritative: {
+            revision: result.revision,
+            stickyNote: result.stickyNote,
+          },
+        },
+      )
+      return
+    }
+    if (result.kind !== "reordered") {
+      sendReorderPersistenceError(socket, result)
+      return
+    }
+
+    const event = stickyNoteReorderedSchema.parse({
+      type: "sticky_note_reordered",
+      revision: result.revision,
+      stickyNote: result.stickyNote,
+      affectedStickyNotes: result.affectedStickyNotes,
+    })
+    const state = presenceByBoard.get(socket.data.boardId)
+    if (!state) {
+      return
+    }
+    applyUpdatedNotes(state, result.affectedStickyNotes ?? [result.stickyNote], result.revision)
+    broadcastStickyNoteReordered(state, event)
+    broadcastSnapshot(state)
+  }
+
   function releaseStickyNoteEdit(
     socket: BoardWebSocket,
     claimId: string,
@@ -1077,8 +1144,7 @@ export function createBoardCollaboration(
       const stickyNotes = [...(connection.board.stickyNotes ?? [])]
         .filter((currentNote) => currentNote.id !== note.id)
       stickyNotes.push(note)
-      stickyNotes.sort((left, right) =>
-        left.stackingOrder - right.stackingOrder || left.id.localeCompare(right.id))
+      stickyNotes.sort(compareStickyNoteStackingOrder)
       connection.board = {
         ...connection.board,
         revision,
@@ -1092,16 +1158,25 @@ export function createBoardCollaboration(
     note: StickyNoteRecord,
     revision: number,
   ): void {
+    applyUpdatedNotes(state, [note], revision)
+  }
+
+  function applyUpdatedNotes(
+    state: BoardPresenceState,
+    notes: readonly StickyNoteRecord[],
+    revision: number,
+  ): void {
     for (const connection of state.connections.values()) {
       const stickyNotes = [...(connection.board.stickyNotes ?? [])]
-      const existingIndex = stickyNotes.findIndex((currentNote) => currentNote.id === note.id)
-      if (existingIndex === -1) {
-        stickyNotes.push(note)
-      } else {
-        stickyNotes[existingIndex] = note
+      for (const note of notes) {
+        const existingIndex = stickyNotes.findIndex((currentNote) => currentNote.id === note.id)
+        if (existingIndex === -1) {
+          stickyNotes.push(note)
+        } else {
+          stickyNotes[existingIndex] = note
+        }
       }
-      stickyNotes.sort((left, right) =>
-        left.stackingOrder - right.stackingOrder || left.id.localeCompare(right.id))
+      stickyNotes.sort(compareStickyNoteStackingOrder)
       connection.board = {
         ...connection.board,
         revision,
@@ -1137,6 +1212,18 @@ export function createBoardCollaboration(
   function broadcastStickyNoteRecolored(
     state: BoardPresenceState,
     event: ReturnType<typeof stickyNoteRecoloredSchema.parse>,
+  ): void {
+    const serialized = JSON.stringify(event)
+    for (const connection of state.connections.values()) {
+      if (connection.ready) {
+        connection.socket.send(serialized)
+      }
+    }
+  }
+
+  function broadcastStickyNoteReordered(
+    state: BoardPresenceState,
+    event: ReturnType<typeof stickyNoteReorderedSchema.parse>,
   ): void {
     const serialized = JSON.stringify(event)
     for (const connection of state.connections.values()) {
@@ -1221,9 +1308,24 @@ export function createBoardCollaboration(
     }
   }
 
+  function sendReorderPersistenceError(
+    socket: BoardWebSocket,
+    result: ReorderStickyNoteResult,
+  ): void {
+    switch (result.kind) {
+      case "not_found":
+      case "not_member":
+        sendCommandError(socket, "sticky_note_rejected", "Sticky Note Stacking Order change was rejected.")
+        return
+      case "at_boundary":
+      case "reordered":
+        return
+    }
+  }
+
   function sendCommandError(
     socket: BoardWebSocket,
-    code: "invalid_command" | "creation_claim_unavailable" | "invalid_creation_claim" | "edit_claim_unavailable" | "invalid_edit_claim" | "empty_sticky_note" | "sticky_note_text_limit" | "sticky_note_capacity" | "sticky_note_rejected" | "text_version_conflict" | "revision_conflict",
+    code: "invalid_command" | "creation_claim_unavailable" | "invalid_creation_claim" | "edit_claim_unavailable" | "invalid_edit_claim" | "empty_sticky_note" | "sticky_note_text_limit" | "sticky_note_capacity" | "sticky_note_rejected" | "text_version_conflict" | "stacking_order_boundary" | "revision_conflict",
     error: string,
     details?: {
       claimHolder?: { username: string }

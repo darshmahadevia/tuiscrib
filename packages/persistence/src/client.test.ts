@@ -119,6 +119,87 @@ integrationTest("creates a durable Sticky Note with attribution and one later Bo
   expect(opened?.stickyNotes).toHaveLength(1)
 })
 
+integrationTest("serializes concurrent Stacking Order changes in PostgreSQL commit order", async () => {
+  if (!persistence || !concurrentPersistence) {
+    throw new Error("persistence was not initialized")
+  }
+
+  const now = new Date("2026-08-10T00:00:00.000Z")
+  const registered = await persistence.registerUser({
+    username: "order_writer",
+    passwordHash: "$argon2id$v=19$m=65536,t=3,p=1$test$hash",
+    credentialHash: "o".repeat(64),
+    now,
+    expiresAt: new Date(now.getTime() + 30 * 24 * 60 * 60 * 1_000),
+  })
+  if (!registered) {
+    throw new Error("user was not registered")
+  }
+
+  const boardId = "OdeFgHiJkLmNoPqRsTuVwX"
+  await persistence.createBoard({
+    publicId: boardId,
+    name: "Stacking Order",
+    ownerUserId: registered.user.id,
+    joinCodeHash: "f".repeat(64),
+    now,
+  })
+  const noteIds = [
+    "PdeFgHiJkLmNoPqRsTuVwX",
+    "QdeFgHiJkLmNoPqRsTuVwX",
+    "RdeFgHiJkLmNoPqRsTuVwX",
+  ]
+  for (const [index, noteId] of noteIds.entries()) {
+    await persistence.createStickyNote({
+      publicId: noteId,
+      boardId,
+      userId: registered.user.id,
+      text: `overlap ${index}`,
+      position: { x: 0, y: 0 },
+      color: index === 0 ? "yellow" : index === 1 ? "blue" : "green",
+      now,
+    })
+  }
+
+  const first = await persistence.reorderStickyNote({
+    boardId,
+    stickyNoteId: noteIds[0]!,
+    userId: registered.user.id,
+    direction: "raise",
+  })
+  expect(first).toMatchObject({
+    kind: "reordered",
+    revision: 4,
+    stickyNote: { stackingOrder: 1 },
+    affectedStickyNotes: [
+      { id: noteIds[1], stackingOrder: 0 },
+      { id: noteIds[0], stackingOrder: 1 },
+    ],
+  })
+
+  const concurrent = await Promise.all([
+    persistence.reorderStickyNote({
+      boardId,
+      stickyNoteId: noteIds[0]!,
+      userId: registered.user.id,
+      direction: "raise",
+    }),
+    concurrentPersistence.reorderStickyNote({
+      boardId,
+      stickyNoteId: noteIds[2]!,
+      userId: registered.user.id,
+      direction: "lower",
+    }),
+  ])
+  expect(concurrent.map((result) => result.kind)).toEqual(["reordered", "reordered"])
+  expect(concurrent.map((result) => result.kind === "reordered" ? result.revision : 0).sort()).toEqual([5, 6])
+
+  const opened = await persistence.openBoard({ userId: registered.user.id, publicId: boardId })
+  expect(opened?.revision).toBe(6)
+  expect(opened?.stickyNotes?.map((note) => note.stackingOrder)).toEqual([0, 1, 2])
+  expect(new Set(opened?.stickyNotes?.map((note) => note.id))).toEqual(new Set(noteIds))
+})
+
 integrationTest("fails clearly when another session holds the migration lock", async () => {
   if (!migrationDatabaseUrl) {
     throw new Error("migration database URL was not configured")
@@ -535,8 +616,8 @@ integrationTest("serializes concurrent Color changes by Board revision and prese
     throw new Error("user was not registered")
   }
 
-  const boardId = "OdeFgHiJkLmNoPqRsTuVwX"
-  const noteId = "PdeFgHiJkLmNoPqRsTuVwX"
+  const boardId = "UdeFgHiJkLmNoPqRsTuVwX"
+  const noteId = "VdeFgHiJkLmNoPqRsTuVwX"
   await persistence.createBoard({
     publicId: boardId,
     name: "Color Race",

@@ -31,6 +31,8 @@ export {
   type UpdateStickyNoteTextResult,
   type RecolorStickyNoteInput,
   type RecolorStickyNoteResult,
+  type ReorderStickyNoteInput,
+  type ReorderStickyNoteResult,
   type RotateJoinCodeInput,
   type RotateJoinCodeResult,
   type TerminalSessionAuthentication,

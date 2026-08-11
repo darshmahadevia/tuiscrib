@@ -157,9 +157,89 @@ test("keeps below-minimum terminals on the deterministic resize-required screen"
   expect(fixture.sent).toEqual([])
 })
 
+test("cycles every overlapping Sticky Note in visible order and shows the active overlap selection", async () => {
+  const fixture = createOverlappingBoardFixture()
+  activeSetup = await renderCanvas({ width: 80, height: 24 }, fixture.boardClient, "Overlap Board")
+
+  let frame = activeSetup.captureCharFrame()
+  expect(frame).toContain("Selected Sticky Note: front note")
+  expect(frame).toContain("Overlap selection: 1/3")
+  expect(frame).toContain("Tab cycles front-to-back")
+
+  await act(async () => {
+    activeSetup?.mockInput.pressTab()
+    await activeSetup?.renderOnce()
+  })
+  frame = activeSetup.captureCharFrame()
+  expect(frame).toContain("Selected Sticky Note: middle note")
+  expect(frame).toContain("Overlap selection: 2/3")
+
+  await act(async () => {
+    activeSetup?.mockInput.pressTab()
+    await activeSetup?.renderOnce()
+  })
+  frame = activeSetup.captureCharFrame()
+  expect(frame).toContain("Selected Sticky Note: back note")
+  expect(frame).toContain("Overlap selection: 3/3")
+
+  await act(async () => {
+    activeSetup?.mockInput.pressTab()
+    await activeSetup?.renderOnce()
+  })
+  frame = activeSetup.captureCharFrame()
+  expect(frame).toContain("Selected Sticky Note: front note")
+
+  await act(async () => {
+    activeSetup?.mockInput.pressKey("[")
+    await activeSetup?.renderOnce()
+  })
+  expect(JSON.parse(fixture.sent.at(-1) ?? "{}")).toEqual({
+    type: "reorder_sticky_note",
+    stickyNoteId: "Ta0x6qZ1pN5sU8vW2yB7fF",
+    direction: "lower",
+  })
+  frame = activeSetup.captureCharFrame()
+  expect(frame).toContain("Stacking Order 2")
+  expect(frame).toContain("Waiting for durable Stacking Order lower acknowledgement")
+
+  const front = fixture.snapshot.stickyNotes?.find((note) => note.text === "front note")
+  const middle = fixture.snapshot.stickyNotes?.find((note) => note.text === "middle note")
+  if (!front || !middle) {
+    throw new Error("overlap fixture did not contain its front and middle notes")
+  }
+  await act(async () => {
+    fixture.handlers?.onStickyNoteReordered?.({
+      type: "sticky_note_reordered",
+      revision: 4,
+      stickyNote: { ...front, stackingOrder: 1 },
+      affectedStickyNotes: [
+        { ...front, stackingOrder: 1 },
+        { ...middle, stackingOrder: 2 },
+      ],
+    })
+    await activeSetup?.renderOnce()
+  })
+  frame = activeSetup.captureCharFrame()
+  expect(frame).toContain("Board revision: 4")
+  expect(frame).toContain("Selected Sticky Note: front note")
+  expect(frame).toContain("Overlap selection: 2/3")
+  expect(frame).toContain("Stacking Order 1")
+
+  await act(async () => {
+    activeSetup?.mockInput.pressKey("]")
+    await activeSetup?.renderOnce()
+  })
+  expect(JSON.parse(fixture.sent.at(-1) ?? "{}")).toEqual({
+    type: "reorder_sticky_note",
+    stickyNoteId: "Ta0x6qZ1pN5sU8vW2yB7fF",
+    direction: "raise",
+  })
+})
+
 async function renderCanvas(
   dimensions: { width: number; height: number },
   boardClient: BoardClient,
+  boardName = "Canvas Board",
 ) {
   const credential = "a".repeat(43)
   const authClient: AuthClient = {
@@ -195,7 +275,7 @@ async function renderCanvas(
     setup.mockInput.pressKey("b")
     await setup.renderOnce()
   })
-  await setup.waitForFrame((frame) => frame.includes("Canvas Board"))
+  await setup.waitForFrame((frame) => frame.includes(boardName))
   await act(async () => {
     setup.mockInput.pressKey("o")
     await setup.renderOnce()
@@ -239,6 +319,91 @@ function createBoardFixture(): {
     sent,
     get handlers() {
       return handlers
+    },
+  }
+}
+
+function createOverlappingBoardFixture(): {
+  boardClient: BoardClient
+  sent: string[]
+  snapshot: BoardSnapshot
+  handlers?: BoardConnectionHandlers
+} {
+  const board = {
+    id: "Qx7u3nW8kM2pR5sT9vY4aB",
+    name: "Overlap Board",
+    role: "member" as const,
+  }
+  const timestamp = "2026-08-10T00:00:00.000Z"
+  const notes = [
+    {
+      id: "Rz8v4oX9nL3qS6tU0wZ5cD",
+      text: "back note",
+      textVersion: 1,
+      position: { x: 0, y: 0 },
+      color: "yellow" as const,
+      stackingOrder: 0,
+      authorship: { member: { username: "ada_lovelace" } },
+      createdAt: timestamp,
+      lastEdit: { member: { username: "ada_lovelace" }, at: timestamp },
+    },
+    {
+      id: "Sz9w5pY0oM4rT7uV1xA6eE",
+      text: "middle note",
+      textVersion: 1,
+      position: { x: 0, y: 0 },
+      color: "blue" as const,
+      stackingOrder: 1,
+      authorship: { member: { username: "ada_lovelace" } },
+      createdAt: timestamp,
+      lastEdit: { member: { username: "ada_lovelace" }, at: timestamp },
+    },
+    {
+      id: "Ta0x6qZ1pN5sU8vW2yB7fF",
+      text: "front note",
+      textVersion: 1,
+      position: { x: 0, y: 0 },
+      color: "green" as const,
+      stackingOrder: 2,
+      authorship: { member: { username: "ada_lovelace" } },
+      createdAt: timestamp,
+      lastEdit: { member: { username: "ada_lovelace" }, at: timestamp },
+    },
+  ]
+  const sent: string[] = []
+  let fixtureHandlers: BoardConnectionHandlers | undefined
+  const snapshot: BoardSnapshot = {
+    type: "snapshot",
+    board,
+    revision: 3,
+    presence: [{ member: { username: "ada_lovelace" }, activity: "viewing" }],
+    stickyNotes: notes,
+  }
+  const boardClient: BoardClient = {
+    createBoard: async () => { throw new Error("create Board was not expected") },
+    joinBoard: async () => { throw new Error("join Board was not expected") },
+    leaveBoard: async () => ({ status: "left" }),
+    renameBoard: async () => { throw new Error("rename Board was not expected") },
+    rotateJoinCode: async () => { throw new Error("rotate Join Code was not expected") },
+    listBoards: async () => ({ boards: [board] }),
+    openBoard: async (_credential, _boardId, handlers) => {
+      // Keep the public callback seam available to the rendered acceptance test.
+      fixtureHandlers = handlers
+      handlers.onSnapshot(snapshot)
+      return {
+        send(command) {
+          sent.push(JSON.stringify(command))
+        },
+        close: () => undefined,
+      }
+    },
+  }
+  return {
+    boardClient,
+    sent,
+    snapshot,
+    get handlers() {
+      return fixtureHandlers
     },
   }
 }

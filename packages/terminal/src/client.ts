@@ -21,6 +21,7 @@ import {
   type StickyNoteCreationClaimGranted,
   type StickyNoteEditClaimGranted,
   type StickyNoteRecolored,
+  type StickyNoteReordered,
   type StickyNoteUpdated,
   type BoardListResponse,
   type CreateBoardRequest,
@@ -112,6 +113,7 @@ export type BoardConnectionHandlers = {
   onStickyNoteEditClaimGranted?(claim: StickyNoteEditClaimGranted): void
   onStickyNoteUpdated?(event: StickyNoteUpdated): void
   onStickyNoteRecolored?(event: StickyNoteRecolored): void
+  onStickyNoteReordered?(event: StickyNoteReordered): void
   onCommandError?(error: BoardCommandError): void
 }
 
@@ -126,7 +128,7 @@ type BoardSocketGeneration = {
   awaitingSnapshot: boolean
   lastRevision: number | null
   lastSnapshotFingerprint: string | null
-  pendingEvents: Map<number, StickyNoteCreated | StickyNoteUpdated | StickyNoteRecolored>
+  pendingEvents: Map<number, StickyNoteCreated | StickyNoteUpdated | StickyNoteRecolored | StickyNoteReordered>
   ending: boolean
   heartbeatHandle: unknown | null
 }
@@ -546,7 +548,7 @@ export function createBoardClient(
 
       function applyDurableEvent(
         generation: BoardSocketGeneration,
-        event: StickyNoteCreated | StickyNoteUpdated | StickyNoteRecolored,
+        event: StickyNoteCreated | StickyNoteUpdated | StickyNoteRecolored | StickyNoteReordered,
       ): void {
         if (!isCurrent(generation) || generation.lastRevision === null) {
           return
@@ -563,6 +565,8 @@ export function createBoardClient(
           handlers.onStickyNoteCreated?.(event)
         } else if (event.type === "sticky_note_recolored") {
           handlers.onStickyNoteRecolored?.(event)
+        } else if (event.type === "sticky_note_reordered") {
+          handlers.onStickyNoteReordered?.(event)
         } else {
           handlers.onStickyNoteUpdated?.(event)
         }

@@ -98,6 +98,16 @@ export const stickyNoteSchema = z.object({
   lastEdit: stickyNoteLastEditSchema,
 })
 
+export function compareStickyNoteStackingOrder(
+  left: Pick<z.infer<typeof stickyNoteSchema>, "id" | "stackingOrder">,
+  right: Pick<z.infer<typeof stickyNoteSchema>, "id" | "stackingOrder">,
+): number {
+  if (left.stackingOrder !== right.stackingOrder) {
+    return left.stackingOrder - right.stackingOrder
+  }
+  return left.id < right.id ? -1 : left.id > right.id ? 1 : 0
+}
+
 export const provisionalStickyNoteIdSchema = z.string().uuid()
 export const stickyNoteClaimIdSchema = z.string().uuid()
 
@@ -146,6 +156,14 @@ export const recolorStickyNoteSchema = z.object({
   color: stickyNoteColorSchema,
 })
 
+export const stickyNoteStackingDirectionSchema = z.enum(["lower", "raise"])
+
+export const reorderStickyNoteSchema = z.object({
+  type: z.literal("reorder_sticky_note"),
+  stickyNoteId: boardIdentifierSchema,
+  direction: stickyNoteStackingDirectionSchema,
+})
+
 export const boardHeartbeatSchema = z.object({
   type: z.literal("heartbeat"),
 })
@@ -158,6 +176,7 @@ export const boardCommandSchema = z.discriminatedUnion("type", [
   publishStickyNoteEditSchema,
   releaseStickyNoteEditSchema,
   recolorStickyNoteSchema,
+  reorderStickyNoteSchema,
   boardHeartbeatSchema,
 ])
 
@@ -195,6 +214,13 @@ export const stickyNoteRecoloredSchema = z.object({
   stickyNote: stickyNoteSchema,
 })
 
+export const stickyNoteReorderedSchema = z.object({
+  type: z.literal("sticky_note_reordered"),
+  revision: z.number().int().positive(),
+  stickyNote: stickyNoteSchema,
+  affectedStickyNotes: z.array(stickyNoteSchema).min(1).optional(),
+})
+
 export const editClaimConnectionSchema = z.enum(["connected", "disconnected"])
 
 export const boardEditClaimSchema = z.object({
@@ -215,6 +241,7 @@ export const boardCommandErrorCodeSchema = z.enum([
   "sticky_note_capacity",
   "sticky_note_rejected",
   "text_version_conflict",
+  "stacking_order_boundary",
   "revision_conflict",
 ])
 
@@ -242,11 +269,14 @@ export type BeginStickyNoteEdit = z.infer<typeof beginStickyNoteEditSchema>
 export type PublishStickyNoteEdit = z.infer<typeof publishStickyNoteEditSchema>
 export type ReleaseStickyNoteEdit = z.infer<typeof releaseStickyNoteEditSchema>
 export type RecolorStickyNote = z.infer<typeof recolorStickyNoteSchema>
+export type StickyNoteStackingDirection = z.infer<typeof stickyNoteStackingDirectionSchema>
+export type ReorderStickyNote = z.infer<typeof reorderStickyNoteSchema>
 export type BoardHeartbeat = z.infer<typeof boardHeartbeatSchema>
 export type StickyNoteCreationClaimGranted = z.infer<typeof stickyNoteCreationClaimGrantedSchema>
 export type StickyNoteCreated = z.infer<typeof stickyNoteCreatedSchema>
 export type StickyNoteEditClaimGranted = z.infer<typeof stickyNoteEditClaimGrantedSchema>
 export type StickyNoteUpdated = z.infer<typeof stickyNoteUpdatedSchema>
 export type StickyNoteRecolored = z.infer<typeof stickyNoteRecoloredSchema>
+export type StickyNoteReordered = z.infer<typeof stickyNoteReorderedSchema>
 export type BoardEditClaim = z.infer<typeof boardEditClaimSchema>
 export type BoardCommandError = z.infer<typeof boardCommandErrorSchema>

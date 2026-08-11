@@ -860,6 +860,85 @@ test("Board client sends independent recolor commands and delivers revisioned Co
   connection.close()
 })
 
+test("Board client sends independent Stacking Order commands and delivers revisioned reorder events", async () => {
+  const credential = "s".repeat(43)
+  const boardId = "Qx7u3nW8kM2pR5sT9vY4aB"
+  const sent: string[] = []
+  let socket: BoardSocket | undefined
+  const reordered: unknown[] = []
+  const client = createBoardClient(
+    "http://tuiscrib.test",
+    async () => new Response(JSON.stringify({ status: "ready" }), { status: 200 }),
+    () => {
+      socket = {
+        onmessage: null,
+        onerror: null,
+        onclose: null,
+        send: (data) => sent.push(data),
+        close: () => undefined,
+      }
+      return socket
+    },
+  )
+  const openBoard = client.openBoard
+  if (!openBoard) {
+    throw new Error("Board client does not support Board collaboration")
+  }
+
+  const connection = await openBoard(credential, boardId, {
+    onSnapshot: () => undefined,
+    onError: (error) => {
+      throw error
+    },
+    onClose: () => undefined,
+    onStickyNoteReordered: (event) => reordered.push(event),
+  })
+  const note = {
+    id: "Lm7u3nW8kM2pR5sT9vY4aB",
+    text: "front-to-back order",
+    textVersion: 1,
+    position: { x: 0, y: 0 },
+    color: "yellow" as const,
+    stackingOrder: 0,
+    authorship: { member: { username: "ada_lovelace" } },
+    createdAt: "2026-08-10T00:00:00.000Z",
+    lastEdit: {
+      member: { username: "ada_lovelace" },
+      at: "2026-08-10T00:00:00.000Z",
+    },
+  }
+  socket?.onmessage?.({
+    data: JSON.stringify({
+      type: "snapshot",
+      board: { id: boardId, name: "Ideas", role: "member" },
+      revision: 1,
+      presence: [{ member: { username: "ada_lovelace" }, activity: "viewing" }],
+      stickyNotes: [note],
+    }),
+  })
+  connection.send({ type: "reorder_sticky_note", stickyNoteId: note.id, direction: "raise" })
+  expect(JSON.parse(sent[0] ?? "{}")).toEqual({
+    type: "reorder_sticky_note",
+    stickyNoteId: note.id,
+    direction: "raise",
+  })
+
+  socket?.onmessage?.({
+    data: JSON.stringify({
+      type: "sticky_note_reordered",
+      revision: 2,
+      stickyNote: { ...note, stackingOrder: 1 },
+    }),
+  })
+  expect(reordered).toHaveLength(1)
+  expect(reordered[0]).toMatchObject({
+    type: "sticky_note_reordered",
+    revision: 2,
+    stickyNote: { id: note.id, stackingOrder: 1 },
+  })
+  connection.close()
+})
+
 test("Board client reconnects after a dropped socket and replaces state from the next authoritative snapshot", async () => {
   const credential = "e".repeat(43)
   const boardId = "Qx7u3nW8kM2pR5sT9vY4aB"

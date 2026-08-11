@@ -1,3 +1,5 @@
+import { compareStickyNoteStackingOrder } from "@tuiscrib/contracts"
+
 export const CANVAS_MIN_COORDINATE = -1_000_000
 export const CANVAS_MAX_COORDINATE = 1_000_000
 export const CANVAS_PANEL_WIDTH = 72
@@ -26,6 +28,49 @@ export type CanvasRect = {
   top: number
   width: number
   height: number
+}
+
+export type CanvasStackingOrderItem = {
+  id: string
+  stackingOrder: number
+}
+
+/**
+ * Compare the persisted order from back to front. Valid Board state has one
+ * order value per Sticky Note; the public id tie-break keeps malformed or
+ * legacy snapshots deterministic without inventing client-local order.
+ */
+export function compareCanvasStackingOrder(
+  left: CanvasStackingOrderItem,
+  right: CanvasStackingOrderItem,
+): number {
+  return compareStickyNoteStackingOrder(left, right)
+}
+
+export function sortCanvasStackingOrder<T extends CanvasStackingOrderItem>(
+  items: readonly T[],
+  direction: "back-to-front" | "front-to-back" = "back-to-front",
+): T[] {
+  return [...items].sort((left, right) => {
+    if (left.stackingOrder !== right.stackingOrder) {
+      return direction === "back-to-front"
+        ? left.stackingOrder - right.stackingOrder
+        : right.stackingOrder - left.stackingOrder
+    }
+    return left.id < right.id ? -1 : left.id > right.id ? 1 : 0
+  })
+}
+
+export function canvasPointIsInsideRect(
+  point: CanvasCoordinate,
+  rect: CanvasRect,
+): boolean {
+  return (
+    point.x >= rect.left &&
+    point.x < rect.left + rect.width &&
+    point.y >= rect.top &&
+    point.y < rect.top + rect.height
+  )
 }
 
 export function createCanvasNavigationState(): CanvasNavigationState {

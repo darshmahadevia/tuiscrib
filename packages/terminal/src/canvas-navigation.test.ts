@@ -3,10 +3,13 @@ import { expect, test } from "bun:test"
 import {
   applyCanvasNavigation,
   canvasCoordinateToScreen,
+  canvasPointIsInsideRect,
   canvasRectIntersectsViewport,
+  compareCanvasStackingOrder,
   createCanvasNavigationState,
   getCanvasStickyNoteCardHeight,
   getCanvasViewportSize,
+  sortCanvasStackingOrder,
   type CanvasViewportSize,
 } from "./canvas-navigation.ts"
 
@@ -98,6 +101,37 @@ test("uses the rendered Sticky Note card dimensions for viewport culling", () =>
   expect(() => getCanvasStickyNoteCardHeight(0)).toThrow(
     "Sticky Note line count must be a positive integer",
   )
+})
+
+test("uses a deterministic front-to-back Stacking Order for hit testing and cycling", () => {
+  const notes = [
+    { id: "middle", stackingOrder: 1 },
+    { id: "front", stackingOrder: 2 },
+    { id: "back", stackingOrder: 0 },
+  ]
+
+  expect(sortCanvasStackingOrder(notes, "front-to-back").map((note) => note.id)).toEqual([
+    "front",
+    "middle",
+    "back",
+  ])
+  expect(sortCanvasStackingOrder(notes, "back-to-front").map((note) => note.id)).toEqual([
+    "back",
+    "middle",
+    "front",
+  ])
+  expect(compareCanvasStackingOrder(
+    { id: "a", stackingOrder: 4 },
+    { id: "b", stackingOrder: 4 },
+  )).toBeLessThan(0)
+  expect(canvasPointIsInsideRect(
+    { x: 2, y: 3 },
+    { left: 0, top: 0, width: 4, height: 5 },
+  )).toBe(true)
+  expect(canvasPointIsInsideRect(
+    { x: 4, y: 3 },
+    { left: 0, top: 0, width: 4, height: 5 },
+  )).toBe(false)
 })
 
 test("derives deterministic viewport sizes for supported and below-minimum terminals", () => {

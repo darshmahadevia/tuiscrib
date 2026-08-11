@@ -11,6 +11,7 @@ import {
   type StickyNote,
   type StickyNoteColor,
   type StickyNotePosition,
+  type StickyNoteStackingDirection,
   type BoardSnapshot,
   type BoardSummary,
 } from "@tuiscrib/contracts"
@@ -37,12 +38,14 @@ import { wrapStickyNoteText } from "./sticky-notes.ts"
 import {
   applyCanvasNavigation,
   canvasCoordinateToScreen,
+  canvasPointIsInsideRect,
   canvasRectIntersectsViewport,
   createCanvasNavigationState,
   getCanvasPanelWidth,
   getCanvasStickyNoteCardHeight,
   getCanvasViewportSize,
   CANVAS_STICKY_NOTE_CARD_WIDTH,
+  sortCanvasStackingOrder,
   type CanvasDirection,
   type CanvasViewportSize,
 } from "./canvas-navigation.ts"
@@ -245,6 +248,26 @@ const stickyNoteColorChoices: StickyNoteColorChoice[] = [
   { key: "7", color: "violet" },
   { key: "8", color: "yellow" },
 ]
+
+function stickyNoteCanvasFootprint(note: StickyNote) {
+  return {
+    left: note.position.x,
+    top: note.position.y,
+    width: CANVAS_STICKY_NOTE_CARD_WIDTH,
+    height: getCanvasStickyNoteCardHeight(wrapStickyNoteText(note.text).length),
+  }
+}
+
+function stickyNotesAtCanvasCursor(
+  notes: readonly StickyNote[],
+  cursor: StickyNotePosition,
+  direction: "back-to-front" | "front-to-back" = "front-to-back",
+): StickyNote[] {
+  return sortCanvasStackingOrder(
+    notes.filter((note) => canvasPointIsInsideRect(cursor, stickyNoteCanvasFootprint(note))),
+    direction,
+  )
+}
 
 export type TerminalColorMode = "ansi256" | "truecolor" | "unknown"
 
@@ -630,9 +653,7 @@ export function TerminalShell({
     const selectedStillExists = selectedStickyNoteIdRef.current !== null && notes.some(
       (note) => note.id === selectedStickyNoteIdRef.current,
     )
-    const noteAtNextCursor = notes.find(
-      (note) => note.position.x === next.cursor.x && note.position.y === next.cursor.y,
-    )
+    const noteAtNextCursor = stickyNotesAtCanvasCursor(notes, next.cursor)[0]
     const nextSelectedStickyNoteId = selectedStillExists
       ? selectedStickyNoteIdRef.current
       : noteAtNextCursor?.id ?? null
@@ -648,16 +669,13 @@ export function TerminalShell({
     const notes = boardSnapshotRef.current?.stickyNotes ?? []
     const selectedId = selectedStickyNoteIdRef.current
     const selected = selectedId ? notes.find((note) => note.id === selectedId) : undefined
-    return selected ?? notes.find((note) =>
-      note.position.x === canvasCursorRef.current.x &&
-      note.position.y === canvasCursorRef.current.y,
-    )
+    return selected ?? stickyNotesAtCanvasCursor(notes, canvasCursorRef.current)[0]
   }
 
   const cycleSelectedStickyNote = () => {
-    const notes = (boardSnapshotRef.current?.stickyNotes ?? []).filter((note) =>
-      note.position.x === canvasCursorRef.current.x &&
-      note.position.y === canvasCursorRef.current.y,
+    const notes = stickyNotesAtCanvasCursor(
+      boardSnapshotRef.current?.stickyNotes ?? [],
+      canvasCursorRef.current,
     )
     if (notes.length === 0) {
       return
@@ -716,6 +734,46 @@ export function TerminalShell({
       closeStickyNoteColorPicker()
       flushSync(() => {
         setNotice({ kind: "status", message: `Waiting for durable Color ${color} acknowledgement…` })
+      })
+    } catch (error) {
+      flushSync(() => setNotice({ kind: "error", message: formatBoardError(error) }))
+    }
+  }
+
+  const reorderSelectedStickyNote = (direction: StickyNoteStackingDirection) => {
+    if (!sharedBoardMutationsEnabled()) {
+      flushSync(() => {
+        setNotice({ kind: "error", message: "Shared mutations are disabled while the Board reconnects." })
+      })
+      return
+    }
+    const note = selectedStickyNote()
+    const connection = boardConnectionRef.current
+    if (!note) {
+      flushSync(() => {
+        setNotice({ kind: "error", message: "Select a Sticky Note before changing its Stacking Order." })
+      })
+      return
+    }
+    if (!connection) {
+      flushSync(() => {
+        setNotice({ kind: "error", message: "Open a live Board before changing Stacking Order." })
+      })
+      return
+    }
+    selectedStickyNoteIdRef.current = note.id
+    flushSync(() => setSelectedStickyNoteId(note.id))
+    try {
+      connection.send({
+        type: "reorder_sticky_note",
+        stickyNoteId: note.id,
+        direction,
+      })
+      flushSync(() => {
+        setNotice({
+          kind: "status",
+          message: `Waiting for durable Stacking Order ${direction} acknowledgement…`,
+        })
       })
     } catch (error) {
       flushSync(() => setNotice({ kind: "error", message: formatBoardError(error) }))
@@ -1073,10 +1131,8 @@ export function TerminalShell({
     } else {
       nextNotes[existingIndex] = note
     }
-    nextNotes.sort((left, right) =>
-      left.stackingOrder - right.stackingOrder || left.id.localeCompare(right.id),
-    )
-    const nextSnapshot = { ...current, revision, stickyNotes: nextNotes }
+    const sortedNotes = sortCanvasStackingOrder(nextNotes)
+    const nextSnapshot = { ...current, revision, stickyNotes: sortedNotes }
     boardSnapshotRef.current = nextSnapshot
     flushSync(() => setBoardSnapshot(nextSnapshot))
   }
@@ -1291,6 +1347,22 @@ export function TerminalShell({
     })
   }
 
+  const handleStickyNoteReordered = (event: {
+    revision: number
+    stickyNote: StickyNote
+    affectedStickyNotes?: StickyNote[]
+  }) => {
+    for (const note of event.affectedStickyNotes ?? [event.stickyNote]) {
+      mergeStickyNoteIntoSnapshot(note, event.revision)
+    }
+    flushSync(() => {
+      setNotice({
+        kind: "status",
+        message: `Sticky Note Stacking Order committed at Board revision ${event.revision}.`,
+      })
+    })
+  }
+
   const handleStickyNoteCommandError = (commandError: {
     code: string
     error: string
@@ -1321,6 +1393,16 @@ export function TerminalShell({
             : commandError.error,
         })
       })
+      return
+    }
+    if (commandError.code === "stacking_order_boundary") {
+      if (commandError.authoritative) {
+        mergeStickyNoteIntoSnapshot(
+          commandError.authoritative.stickyNote,
+          commandError.authoritative.revision,
+        )
+      }
+      flushSync(() => setNotice({ kind: "error", message: commandError.error }))
       return
     }
     if (commandError.code === "sticky_note_rejected" && establishedStickyNoteEditRef.current) {
@@ -1679,10 +1761,10 @@ export function TerminalShell({
           const selectedStillExists = selectedStickyNoteIdRef.current && snapshot.stickyNotes?.some(
             (note) => note.id === selectedStickyNoteIdRef.current,
           )
-          const noteAtCursor = snapshot.stickyNotes?.find(
-            (note) => note.position.x === canvasCursorRef.current.x &&
-              note.position.y === canvasCursorRef.current.y,
-          )
+          const noteAtCursor = stickyNotesAtCanvasCursor(
+            snapshot.stickyNotes ?? [],
+            canvasCursorRef.current,
+          )[0]
           const nextSelectedStickyNoteId = selectedStillExists
             ? selectedStickyNoteIdRef.current
             : noteAtCursor?.id ?? null
@@ -1723,6 +1805,11 @@ export function TerminalShell({
         onStickyNoteRecolored: (event) => {
           if (isCurrentBoardConnection()) {
             handleStickyNoteRecolored(event)
+          }
+        },
+        onStickyNoteReordered: (event) => {
+          if (isCurrentBoardConnection()) {
+            handleStickyNoteReordered(event)
           }
         },
         onCommandError: (commandError) => {
@@ -2333,6 +2420,11 @@ export function TerminalShell({
           openStickyNoteColorPicker()
           return
         }
+        if (key.name === "[" || key.name === "]") {
+          key.preventDefault()
+          reorderSelectedStickyNote(key.name === "[" ? "lower" : "raise")
+          return
+        }
         const direction = canvasDirectionForKey(key.name)
         if (
           direction &&
@@ -2531,9 +2623,10 @@ export function TerminalShell({
       viewport={canvasViewport}
       viewportSize={canvasViewportSize}
       panelWidth={getCanvasPanelWidth(width)}
-      selectedStickyNoteId={selectedStickyNoteId ?? boardSnapshot?.stickyNotes?.find(
-        (note) => note.position.x === canvasCursor.x && note.position.y === canvasCursor.y,
-      )?.id ?? null}
+      selectedStickyNoteId={selectedStickyNoteId ?? stickyNotesAtCanvasCursor(
+        boardSnapshot?.stickyNotes ?? [],
+        canvasCursor,
+      )[0]?.id ?? null}
       colorPickerNote={colorPickerStickyNoteId
         ? boardSnapshot?.stickyNotes?.find((note) => note.id === colorPickerStickyNoteId) ?? null
         : null}
@@ -2864,20 +2957,22 @@ function CanvasSurface({
   const selectedNote = selectedStickyNoteId
     ? notes.find((note) => note.id === selectedStickyNoteId)
     : undefined
+  const overlappingNotes = stickyNotesAtCanvasCursor(notes, cursor)
+  const overlapSelectionIndex = selectedNote
+    ? overlappingNotes.findIndex((note) => note.id === selectedNote.id)
+    : -1
   const selectedNoteText = establishedStickyNoteEdit && selectedNote &&
     establishedStickyNoteEdit.stickyNoteId === selectedNote.id
     ? establishedStickyNoteEdit.text
     : selectedNote?.text
-  const visibleNotes = notes.filter((note) => canvasRectIntersectsViewport(
-    {
-      left: note.position.x,
-      top: note.position.y,
-      width: CANVAS_STICKY_NOTE_CARD_WIDTH,
-      height: getCanvasStickyNoteCardHeight(wrapStickyNoteText(note.text).length),
-    },
-    viewport,
-    viewportSize,
-  ))
+  const statusBeforeCanvas = status?.includes("Stacking Order") ?? false
+  const visibleNotes = sortCanvasStackingOrder(
+    notes.filter((note) => canvasRectIntersectsViewport(
+      stickyNoteCanvasFootprint(note),
+      viewport,
+      viewportSize,
+    )),
+  )
 
   return (
     <box
@@ -2950,7 +3045,21 @@ function CanvasSurface({
             <text fg={colors.muted}>
               Canvas cursor: ({cursor.x}, {cursor.y}) · Viewport origin: ({viewport.x}, {viewport.y}) · visible {viewportSize.width}×{viewportSize.height}
             </text>
-            <text fg={colors.text}>Selected Sticky Note: {selectedNoteText ?? "none"}</text>
+            <text fg={colors.text}>
+              Selected Sticky Note: {selectedNoteText ?? "none"}{selectedNote ? ` · Stacking Order ${selectedNote.stackingOrder}` : ""}
+            </text>
+            {overlappingNotes.length > 1 ? (
+              <>
+                <text fg={colors.accent}>
+                  Overlap selection: {overlapSelectionIndex >= 0 ? overlapSelectionIndex + 1 : "—"}/{overlappingNotes.length} · Tab cycles front-to-back
+                </text>
+                <text fg={colors.muted}>
+                  Stacking Order back-to-front: {sortCanvasStackingOrder(overlappingNotes, "back-to-front")
+                    .map((note) => `${note.text} (${note.stackingOrder})`)
+                    .join(" · ")}
+                </text>
+              </>
+            ) : null}
             <text fg={colors.text}>Viewing Presence</text>
             {snapshot.presence.map((presence) => (
               <text key={presence.member.username} fg={colors.muted}>
@@ -2988,6 +3097,7 @@ function CanvasSurface({
             ) : null}
             {error && snapshot ? <text fg={colors.error}>Error: {error}</text> : null}
             {colorPickerNote ? <StickyNoteColorPicker note={colorPickerNote} /> : null}
+            {statusBeforeCanvas ? <text fg={colors.success}>Status: {status}</text> : null}
             <box
               style={{
                 width: viewportSize.width,
@@ -3032,7 +3142,7 @@ function CanvasSurface({
                         position: "absolute",
                         left: screen.x,
                         top: screen.y,
-                        zIndex: 100,
+                        zIndex: 1_000,
                       }}
                       fg={colors.accent}
                     >
@@ -3077,7 +3187,7 @@ function CanvasSurface({
                 />
               </box>
             ) : null}
-            {status ? <text fg={colors.success}>Status: {status}</text> : null}
+            {!statusBeforeCanvas && status ? <text fg={colors.success}>Status: {status}</text> : null}
           </>
         ) : mode === "navigate" ? (
           <>
@@ -3086,7 +3196,7 @@ function CanvasSurface({
                 ? "Navigate mode · cursor at the stable origin"
                 : `Navigate mode · cursor at (${cursor.x}, ${cursor.y})`}
             </text>
-            <text fg={colors.muted}>Enter edit · c Color picker · arrows / hjkl move the canvas cursor</text>
+            <text fg={colors.muted}>Enter edit · Tab cycle overlap · [ lower · ] raise · c Color · arrows / hjkl move cursor</text>
           </>
         ) : (
           <>
@@ -3144,7 +3254,7 @@ function EstablishedStickyNoteEditorCard({
     <box
       style={{
         width: CANVAS_STICKY_NOTE_CARD_WIDTH,
-        ...(positioned ? { position: "absolute" as const, left, top, zIndex: 2 } : {}),
+        ...(positioned ? { position: "absolute" as const, left, top, zIndex: note.stackingOrder + 1 } : {}),
         border: true,
         borderStyle: "rounded",
         borderColor: colors.warning,
@@ -3300,7 +3410,7 @@ function StickyNoteCard({
     <box
       style={{
         width: CANVAS_STICKY_NOTE_CARD_WIDTH,
-        ...(positioned ? { position: "absolute" as const, left, top, zIndex: selected ? 2 : 1 } : {}),
+        ...(positioned ? { position: "absolute" as const, left, top, zIndex: note.stackingOrder + 1 } : {}),
         border: true,
         borderStyle: "rounded",
         borderColor: selected ? colors.accent : stickyNoteColor(note.color),
@@ -3703,7 +3813,7 @@ function HelpOverlay() {
         <text fg={colors.muted}>Forms: Tab next field · Enter submit · Escape cancel</text>
         <text fg={colors.muted}>Confirmations: y confirm · n cancel</text>
         <text fg={colors.muted}>↑↓ / jk move · Enter choose · Escape back</text>
-        <text fg={colors.muted}>Canvas: c Color picker · 1-8 choose · Escape cancel</text>
+        <text fg={colors.muted}>Canvas: Tab cycle overlap · [ lower · ] raise · c Color picker · 1-8 choose</text>
         <text fg={colors.muted}>x sign out · q quit · ? toggle help</text>
         <text fg={colors.success}>Escape close</text>
       </box>

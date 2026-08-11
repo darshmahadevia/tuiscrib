@@ -1847,6 +1847,130 @@ test("retains a disconnected Edit Claim for grace, reclaims it by Terminal Sessi
   }
 })
 
+test("persists Stacking Order before acknowledging a reorder and broadcasts its Board revision", async () => {
+  const note = {
+    id: "Lm7u3nW8kM2pR5sT9vY4aB",
+    text: "overlapping note",
+    textVersion: 1,
+    position: { x: 0, y: 0 },
+    color: "yellow" as const,
+    stackingOrder: 0,
+    authorship: { member: { username: "ada_lovelace" } },
+    createdAt: "2026-08-10T00:00:00.000Z",
+    lastEdit: {
+      member: { username: "ada_lovelace" },
+      at: "2026-08-10T00:00:00.000Z",
+    },
+  }
+  let allowCommit!: () => void
+  const commit = new Promise<void>((resolve) => {
+    allowCommit = resolve
+  })
+  const reorderInputs: Array<Record<string, unknown>> = []
+  const reorderedNote = { ...note, stackingOrder: 1 }
+  const neighbor = {
+    ...note,
+    id: "Nm8x5qY2pR6sT9uV3wA7eF",
+    text: "neighbor note",
+    stackingOrder: 1,
+  }
+  const reorderedNeighbor = { ...neighbor, stackingOrder: 0 }
+  const collaboration = createBoardCollaboration({
+    clock: () => new Date("2026-08-10T00:00:00.000Z"),
+    persistence: {
+      openBoard: async ({ userId, publicId }) => ({
+        board: {
+          id: publicId,
+          name: "Order Ideas",
+          role: userId === 7 ? "owner" : "member",
+        },
+        revision: 1,
+        stickyNotes: [note, neighbor],
+      }),
+      reorderStickyNote: async (input: Record<string, unknown>) => {
+        reorderInputs.push(input)
+        await commit
+        return {
+          kind: "reordered" as const,
+          revision: 2,
+          stickyNote: reorderedNote,
+          affectedStickyNotes: [reorderedNote, reorderedNeighbor],
+        }
+      },
+    },
+    sessionAuthenticator: async (value) => {
+      if (value === credential) {
+        return { user: { id: 7, username: "ada_lovelace" } }
+      }
+      if (value === "b".repeat(43)) {
+        return { user: { id: 8, username: "grace_hopper" } }
+      }
+      return null
+    },
+  })
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request, bunServer) {
+      const result = await collaboration.handleUpgrade(request, bunServer)
+      return result === null ? new Response("not found", { status: 404 }) : result
+    },
+    websocket: collaboration.websocket,
+  })
+  const url = `ws://127.0.0.1:${server.port}/boards/${boardId}/collaboration`
+  const owner = createSocketClient(url, credential)
+  const member = createSocketClient(url, "b".repeat(43))
+
+  try {
+    await Promise.all([waitForSocketOpen(owner.socket), waitForSocketOpen(member.socket)])
+    await owner.nextMessage()
+    await member.nextMessage()
+    await nextMessageMatching(owner, (message) => (message.presence as unknown[]).length === 2)
+
+    owner.socket.send(JSON.stringify({
+      type: "reorder_sticky_note",
+      stickyNoteId: note.id,
+      direction: "raise",
+    }))
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(reorderInputs).toHaveLength(1)
+    expect(owner.socket.readyState).toBe(WebSocket.OPEN)
+    allowCommit()
+
+    const [ownerEvent, memberEvent] = await Promise.all([
+      nextMessageMatching(owner, (message) => message.type === "sticky_note_reordered"),
+      nextMessageMatching(member, (message) => message.type === "sticky_note_reordered"),
+    ])
+    expect(ownerEvent).toEqual({
+      type: "sticky_note_reordered",
+      revision: 2,
+      stickyNote: reorderedNote,
+      affectedStickyNotes: [reorderedNote, reorderedNeighbor],
+    })
+    expect(memberEvent).toEqual(ownerEvent)
+    const ownerSnapshot = await nextMessageMatching(
+      owner,
+      (message) => message.type === "snapshot" && message.revision === 2,
+    )
+    expect((ownerSnapshot.stickyNotes as Array<{ id: string; stackingOrder: number }>).map(
+      (currentNote) => [currentNote.id, currentNote.stackingOrder],
+    )).toEqual([
+      [reorderedNeighbor.id, 0],
+      [reorderedNote.id, 1],
+    ])
+    expect(reorderInputs[0]).toMatchObject({
+      boardId,
+      stickyNoteId: note.id,
+      userId: 7,
+      direction: "raise",
+    })
+  } finally {
+    allowCommit()
+    await Promise.all([closeSocket(owner.socket), closeSocket(member.socket)])
+    await server.stop(true)
+  }
+})
+
 function presenceFor(message: Record<string, unknown>, username: string): string | undefined {
   const presence = message.presence as Array<{ member: { username: string }; activity: string }> | undefined
   return presence?.find((entry) => entry.member.username === username)?.activity

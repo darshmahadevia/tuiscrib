@@ -10,6 +10,7 @@ import {
   stickyNoteCreationClaimGrantedSchema,
   stickyNoteEditClaimGrantedSchema,
   stickyNoteRecoloredSchema,
+  stickyNoteReorderedSchema,
   stickyNoteUpdatedSchema,
   type StickyNote,
 } from "./sticky-notes.ts"
@@ -48,6 +49,10 @@ export const boardSnapshotSchema = z.object({
     seenMembers.add(username)
   }
   const seenNotes = new Set<string>()
+  const seenStackingOrders = new Set<number>()
+  const stackingOrders = (snapshot.stickyNotes ?? [])
+    .map((note) => note.stackingOrder)
+    .sort((left, right) => left - right)
   for (const [index, note] of (snapshot.stickyNotes ?? []).entries()) {
     if (seenNotes.has(note.id)) {
       context.addIssue({
@@ -58,6 +63,24 @@ export const boardSnapshotSchema = z.object({
       continue
     }
     seenNotes.add(note.id)
+    if (seenStackingOrders.has(note.stackingOrder)) {
+      context.addIssue({
+        code: "custom",
+        path: ["stickyNotes", index, "stackingOrder"],
+        message: "Each Sticky Note must have a unique Stacking Order within its Board.",
+      })
+    }
+    seenStackingOrders.add(note.stackingOrder)
+  }
+  for (const [index, stackingOrder] of stackingOrders.entries()) {
+    if (stackingOrder !== index) {
+      context.addIssue({
+        code: "custom",
+        path: ["stickyNotes"],
+        message: "Board Stacking Order must be the contiguous back-to-front sequence starting at zero.",
+      })
+      break
+    }
   }
   const seenClaims = new Set<string>()
   for (const [index, claim] of (snapshot.editClaims ?? []).entries()) {
@@ -79,6 +102,7 @@ export const boardSocketMessageSchema = z.discriminatedUnion("type", [
   stickyNoteCreatedSchema,
   stickyNoteEditClaimGrantedSchema,
   stickyNoteRecoloredSchema,
+  stickyNoteReorderedSchema,
   stickyNoteUpdatedSchema,
   boardCommandErrorSchema,
 ])
