@@ -1356,8 +1356,19 @@ test("replaces an optimistic Sticky Note edit with the authoritative conflict re
     await setup.renderOnce()
   })
   await waitForFrame((frame) => frame.includes("durable text") && frame.includes("Conflict Ideas · Connected"))
+  await act(async () => {
+    setup.mockInput.pressTab()
+    await setup.renderOnce()
+  })
+  expect(setup.captureCharFrame()).toContain("NAVIGATE")
+  const restingNoteSpan = setup.captureSpans().lines
+    .flatMap((line) => line.spans)
+    .find((span) => span.text.includes("durable text"))
+  expect(restingNoteSpan?.bg.toInts()).toEqual([80, 103, 121, 255])
 
   await act(async () => {
+    setup.mockInput.pressTab()
+    await setup.renderOnce()
     setup.mockInput.pressEnter()
     await setup.renderOnce()
   })

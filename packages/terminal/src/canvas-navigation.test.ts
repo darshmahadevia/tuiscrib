@@ -100,7 +100,7 @@ test("maps world coordinates to viewport cells and includes only visible edges",
 })
 
 test("uses the rendered Sticky Note card dimensions for viewport culling", () => {
-  expect(CANVAS_STICKY_NOTE_CARD_WIDTH).toBe(CANVAS_STICKY_NOTE_CARD_HEIGHT)
+  expect(CANVAS_STICKY_NOTE_CARD_WIDTH / CANVAS_STICKY_NOTE_CARD_HEIGHT).toBe(2.25)
   expect(getCanvasStickyNoteCardHeight(1)).toBe(3)
   expect(getCanvasStickyNoteCardHeight(3)).toBe(5)
   expect(() => getCanvasStickyNoteCardHeight(0)).toThrow(

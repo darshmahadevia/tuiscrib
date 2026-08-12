@@ -267,6 +267,7 @@ const colors = {
   panel: "#121a23",
   panelStrong: "#18232e",
   panelActive: "#25394d",
+  stickyNote: "#506779",
   input: "#0d151d",
   border: "#304252",
   borderStrong: "#526a7f",
@@ -4538,7 +4539,6 @@ function StickyNoteCard({
   top?: number
 }) {
   const positioned = left !== undefined && top !== undefined
-  const noteBackground = stickyNoteBackground(note.color)
   return (
     <box
       style={{
@@ -4547,16 +4547,16 @@ function StickyNoteCard({
         ...(positioned
           ? { position: "absolute" as const, left, top, zIndex: selected ? CANVAS_MAX_COORDINATE + 1 : note.stackingOrder + 1 }
           : {}),
-        backgroundColor: selected ? colors.accent : noteBackground,
+        backgroundColor: selected ? colors.accent : colors.stickyNote,
         flexDirection: "column",
         padding: 1,
       }}
     >
-      <text fg={colors.accentInk}>
+      <text fg={selected ? colors.accentInk : colors.text}>
         {selected ? "› Sticky Note" : claimed ? "✎ Sticky Note" : "Sticky Note"}
       </text>
       <text
-        fg={colors.accentInk}
+        fg={selected ? colors.accentInk : colors.text}
         wrapMode="word"
         overflow="hidden"
         width={CANVAS_STICKY_NOTE_CARD_WIDTH - 2}
@@ -4566,19 +4566,6 @@ function StickyNoteCard({
       </text>
     </box>
   )
-}
-
-function stickyNoteBackground(color: StickyNoteColor): string {
-  switch (color) {
-    case "amber": return "#dca54a"
-    case "blue": return "#82b8e8"
-    case "cyan": return "#78ccd1"
-    case "green": return "#8acb91"
-    case "magenta": return "#d58ac4"
-    case "red": return "#e58c8c"
-    case "violet": return "#ad9cde"
-    case "yellow": return "#e6cf68"
-  }
 }
 
 function ShellForm({
