@@ -1,5 +1,10 @@
-import { decodePasteBytes, type InputRenderable, type TerminalCapabilities, type TextareaRenderable } from "@opentui/core"
-import { flushSync, useKeyboard, usePaste, useRenderer, useTerminalDimensions } from "@opentui/react"
+import {
+  createTextAttributes,
+  type InputRenderable,
+  type TerminalCapabilities,
+  type TextareaRenderable,
+} from "@opentui/core"
+import { flushSync, useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react"
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react"
 
 import {
@@ -11,7 +16,6 @@ import {
   type StickyNote,
   type StickyNoteColor,
   type StickyNotePosition,
-  type StickyNoteStackingDirection,
   type BoardSnapshot,
   type BoardSummary,
 } from "@tuiscrib/contracts"
@@ -37,14 +41,18 @@ import {
 import { wrapStickyNoteText } from "./sticky-notes.ts"
 import {
   applyCanvasNavigation,
+  CANVAS_MAX_COORDINATE,
+  CANVAS_MIN_COORDINATE,
   canvasCoordinateToScreen,
   canvasPointIsInsideRect,
   canvasRectIntersectsViewport,
   createCanvasNavigationState,
-  getCanvasPanelWidth,
-  getCanvasStickyNoteCardHeight,
+  getCanvasStickyNoteCardRect,
   getCanvasViewportSize,
   CANVAS_STICKY_NOTE_CARD_WIDTH,
+  CANVAS_STICKY_NOTE_CARD_HEIGHT,
+  nearestCanvasNote,
+  selectCanvasNoteInDirection,
   sortCanvasStackingOrder,
   type CanvasDirection,
   type CanvasViewportSize,
@@ -53,7 +61,7 @@ import {
 export const MIN_TERMINAL_WIDTH = 80
 export const MIN_TERMINAL_HEIGHT = 24
 
-export type ShellMode = "navigate" | "edit"
+export type ShellMode = "navigate" | "select" | "edit"
 
 export type TerminalShellProps = {
   label?: string
@@ -64,7 +72,7 @@ export type TerminalShellProps = {
   stickyNoteTimer?: StickyNoteTimer
 }
 
-type ShellOverlay = "none" | "help"
+type ShellOverlay = "none" | "help" | "actions" | "info" | "move"
 type ShellView =
   | "home"
   | "boards"
@@ -73,7 +81,10 @@ type ShellView =
   | "canvas"
   | "form"
   | "confirmation"
-type ConfirmationAction = "placeholder" | "leave" | "delete-sticky-note"
+type ConfirmationAction =
+  | "placeholder"
+  | "leave"
+  | "delete-sticky-note"
 
 type FormKind =
   | "sign-in"
@@ -111,7 +122,7 @@ type BoardCodeNotice = {
 type SessionState = "checking" | "signed-out" | "signed-in"
 
 type ShellMenuItem = {
-  key: string
+  id: string
   label: string
   description: string
 }
@@ -125,6 +136,7 @@ type ProvisionalStickyNote = {
   claimId?: string
   durableNoteId?: string
   publicationRequested: boolean
+  saveRequested: boolean
 }
 
 type EstablishedStickyNoteEdit = {
@@ -135,6 +147,7 @@ type EstablishedStickyNoteEdit = {
   claimId?: string
   dirty: boolean
   publicationRequested: boolean
+  saveRequested: boolean
   publishedText?: string
   releaseRequested: boolean
   releaseSent: boolean
@@ -149,36 +162,39 @@ type StickyNoteDeletion = {
   claimId?: string
 }
 
-type StickyNoteColorChoice = {
-  key: string
-  color: StickyNoteColor
-}
-
 type StickyNoteEditorDraft = {
   editorId: string
   text: string
   status: string
 }
 
+type CanvasAction = "add" | "info" | "edit" | "move" | "delete" | "navigate" | "select" | "help"
+
+type MovingStickyNote = {
+  stickyNoteId: string
+  original: StickyNotePosition
+  position: StickyNotePosition
+}
+
 const homeMenu: ShellMenuItem[] = [
-  { key: "b", label: "boards", description: "Open the Board list" },
-  { key: "s", label: "sign in", description: "Sign in as a User" },
-  { key: "r", label: "register", description: "Register a new User" },
-  { key: "x", label: "sign out", description: "Revoke the current Terminal Session" },
+  { id: "boards", label: "boards", description: "Open the Board list" },
+  { id: "sign-in", label: "sign in", description: "Sign in as a User" },
+  { id: "register", label: "register", description: "Register a new User" },
+  { id: "sign-out", label: "sign out", description: "Revoke the current Terminal Session" },
 ]
 
 const boardMenu: ShellMenuItem[] = [
-  { key: "o", label: "open Board", description: "Open the collaboration canvas" },
-  { key: "c", label: "create Board", description: "Start a new Board" },
-  { key: "j", label: "join Board", description: "Redeem a Join Code" },
-  { key: "a", label: "Board actions", description: "Manage the selected Board" },
+  { id: "open", label: "open Board", description: "Open the collaboration canvas" },
+  { id: "create", label: "create Board", description: "Start a new Board" },
+  { id: "join", label: "join Board", description: "Redeem a Join Code" },
+  { id: "actions", label: "Board actions", description: "Manage the selected Board" },
 ]
 
 const boardActionsMenu: ShellMenuItem[] = [
-  { key: "d", label: "delete Board", description: "Permanently remove this Board" },
-  { key: "l", label: "leave Board", description: "Leave this Board as a Member" },
-  { key: "r", label: "rename Board", description: "Rename this Board as the Owner" },
-  { key: "t", label: "rotate Join Code", description: "Replace this Board's Join Code as the Owner" },
+  { id: "delete", label: "delete Board", description: "Permanently remove this Board" },
+  { id: "leave", label: "leave Board", description: "Leave this Board as a Member" },
+  { id: "rename", label: "rename Board", description: "Rename this Board as the Owner" },
+  { id: "rotate-code", label: "rotate Join Code", description: "Replace this Board's Join Code as the Owner" },
 ]
 
 const formDefinitions: Record<FormKind, FormDefinition> = {
@@ -240,36 +256,48 @@ const formDefinitions: Record<FormKind, FormDefinition> = {
 }
 
 const colors = {
-  background: "#0d1117",
-  panel: "#161b22",
-  panelStrong: "#21262d",
-  border: "#30363d",
-  text: "#e6edf3",
-  muted: "#8b949e",
-  accent: "#58a6ff",
-  success: "#3fb950",
-  warning: "#d29922",
-  error: "#f85149",
+  // A blue-black world keeps the canvas quiet while giving every elevation
+  // a reliable surface. Accent color is reserved for focus and wayfinding.
+  background: "#000000",
+  canvas: "#0b1016",
+  panel: "#121a23",
+  panelStrong: "#18232e",
+  panelActive: "#25394d",
+  input: "#0d151d",
+  border: "#304252",
+  borderStrong: "#526a7f",
+  text: "#edf3f7",
+  muted: "#9aabb8",
+  subtle: "#788b99",
+  accent: "#91cdf7",
+  accentStrong: "#b9e4ff",
+  accentInk: "#071018",
+  dangerSurface: "#39262b",
+  success: "#8fd7b0",
+  warning: "#edc17b",
+  error: "#f08f99",
+  overlay: "#020406",
 }
 
-const stickyNoteColorChoices: StickyNoteColorChoice[] = [
-  { key: "1", color: "amber" },
-  { key: "2", color: "blue" },
-  { key: "3", color: "cyan" },
-  { key: "4", color: "green" },
-  { key: "5", color: "magenta" },
-  { key: "6", color: "red" },
-  { key: "7", color: "violet" },
-  { key: "8", color: "yellow" },
-]
+// Keep the shell's resting surfaces predictable. The canvas can use the full
+// terminal, while every menu/form/confirmation uses the same width and a
+// deliberate fixed height for its content density.
+const SHELL_PANEL_WIDTH = 72
+const SHELL_MENU_PANEL_HEIGHT = 20
+const SHELL_BOARD_PANEL_HEIGHT = 20
+const SHELL_FORM_PANEL_HEIGHT = 22
+const SHELL_CONFIRMATION_PANEL_HEIGHT = 12
+const SHELL_HELP_PANEL_HEIGHT = 16
+const CANVAS_ACTION_PANEL_WIDTH = 64
+const CANVAS_ACTION_PANEL_HEIGHT = 18
+const CANVAS_MOVE_PANEL_WIDTH = 72
+const CANVAS_MOVE_PANEL_HEIGHT = 3
+const CANVAS_OVERLAY_WIDTH = 64
+const CANVAS_OVERLAY_HEIGHT = 20
+const menuTitleAttributes = createTextAttributes({ bold: true })
 
 function stickyNoteCanvasFootprint(note: StickyNote) {
-  return {
-    left: note.position.x,
-    top: note.position.y,
-    width: CANVAS_STICKY_NOTE_CARD_WIDTH,
-    height: getCanvasStickyNoteCardHeight(wrapStickyNoteText(note.text).length),
-  }
+  return getCanvasStickyNoteCardRect(note.position)
 }
 
 function stickyNotesAtCanvasCursor(
@@ -281,6 +309,24 @@ function stickyNotesAtCanvasCursor(
     notes.filter((note) => canvasPointIsInsideRect(cursor, stickyNoteCanvasFootprint(note))),
     direction,
   )
+}
+
+function canvasViewportForStickyNote(
+  position: StickyNotePosition,
+  viewportSize: CanvasViewportSize,
+): StickyNotePosition {
+  const x = position.x - Math.floor((viewportSize.width - CANVAS_STICKY_NOTE_CARD_WIDTH) / 2)
+  const y = position.y - Math.floor((viewportSize.height - CANVAS_STICKY_NOTE_CARD_HEIGHT) / 2)
+  return {
+    x: Math.max(
+      CANVAS_MIN_COORDINATE,
+      Math.min(CANVAS_MAX_COORDINATE - viewportSize.width + 1, x),
+    ),
+    y: Math.max(
+      CANVAS_MIN_COORDINATE,
+      Math.min(CANVAS_MAX_COORDINATE - viewportSize.height + 1, y),
+    ),
+  }
 }
 
 export type TerminalColorMode = "ansi256" | "truecolor" | "unknown"
@@ -312,6 +358,7 @@ export function TerminalShell({
   const [overlay, setOverlay] = useState<ShellOverlay>("none")
   const [view, setView] = useState<ShellView>("home")
   const [mode, setMode] = useState<ShellMode>("navigate")
+  const [stableMode, setStableMode] = useState<Exclude<ShellMode, "edit">>("navigate")
   const [selectedIndex, setSelectedIndex] = useState(0)
   const [selectedBoardIndex, setSelectedBoardIndex] = useState(0)
   const [formKind, setFormKind] = useState<FormKind | null>(null)
@@ -334,12 +381,14 @@ export function TerminalShell({
     () => createCanvasNavigationState().viewport,
   )
   const [selectedStickyNoteId, setSelectedStickyNoteId] = useState<string | null>(null)
-  const [colorPickerStickyNoteId, setColorPickerStickyNoteId] = useState<string | null>(null)
   const [provisionalStickyNote, setProvisionalStickyNote] =
     useState<ProvisionalStickyNote | null>(null)
   const [establishedStickyNoteEdit, setEstablishedStickyNoteEdit] =
     useState<EstablishedStickyNoteEdit | null>(null)
   const [stickyNoteDeletion, setStickyNoteDeletion] = useState<StickyNoteDeletion | null>(null)
+  const [actionMenuIndex, setActionMenuIndex] = useState(0)
+  const [infoStickyNoteId, setInfoStickyNoteId] = useState<string | null>(null)
+  const [movingStickyNote, setMovingStickyNote] = useState<MovingStickyNote | null>(null)
   const [boardOpenPending, setBoardOpenPending] = useState(false)
   const [formPending, setFormPending] = useState(false)
   const [sessionState, setSessionState] = useState<SessionState>(
@@ -351,6 +400,7 @@ export function TerminalShell({
   const overlayRef = useRef(overlay)
   const viewRef = useRef(view)
   const modeRef = useRef(mode)
+  const stableModeRef = useRef<Exclude<ShellMode, "edit">>(stableMode)
   const selectedIndexRef = useRef(selectedIndex)
   const selectedBoardIndexRef = useRef(selectedBoardIndex)
   const sessionStateRef = useRef(sessionState)
@@ -359,6 +409,7 @@ export function TerminalShell({
   const signOutPendingRef = useRef(signOutPending)
   const confirmationActionRef = useRef(confirmationAction)
   const boardActionPendingRef = useRef(boardActionPending)
+  const boardCodeNoticeRef = useRef<BoardCodeNotice | null>(boardCodeNotice)
   const boardConnectionRef = useRef<BoardConnection | null>(null)
   const activeBoardIdRef = useRef<string | null>(null)
   const boardConnectionGenerationRef = useRef(0)
@@ -367,12 +418,14 @@ export function TerminalShell({
   const canvasCursorRef = useRef(canvasCursor)
   const canvasViewportRef = useRef(canvasViewport)
   const selectedStickyNoteIdRef = useRef<string | null>(selectedStickyNoteId)
-  const colorPickerStickyNoteIdRef = useRef<string | null>(colorPickerStickyNoteId)
   const provisionalStickyNoteRef = useRef<ProvisionalStickyNote | null>(null)
   const establishedStickyNoteEditRef = useRef<EstablishedStickyNoteEdit | null>(
     establishedStickyNoteEdit,
   )
   const stickyNoteDeletionRef = useRef<StickyNoteDeletion | null>(stickyNoteDeletion)
+  const actionMenuIndexRef = useRef(actionMenuIndex)
+  const infoStickyNoteIdRef = useRef<string | null>(infoStickyNoteId)
+  const movingStickyNoteRef = useRef<MovingStickyNote | null>(movingStickyNote)
   const cancelledProvisionalIdsRef = useRef(new Set<string>())
   const cancelledStickyNoteEditIdsRef = useRef(new Set<string>())
   const cancelledStickyNoteEditRequestsRef = useRef(new Set<string>())
@@ -382,6 +435,7 @@ export function TerminalShell({
   overlayRef.current = overlay
   viewRef.current = view
   modeRef.current = mode
+  stableModeRef.current = stableMode
   selectedIndexRef.current = selectedIndex
   selectedBoardIndexRef.current = selectedBoardIndex
   sessionStateRef.current = sessionState
@@ -390,15 +444,18 @@ export function TerminalShell({
   signOutPendingRef.current = signOutPending
   confirmationActionRef.current = confirmationAction
   boardActionPendingRef.current = boardActionPending
+  boardCodeNoticeRef.current = boardCodeNotice
   boardConnectionStateRef.current = boardConnectionState
   boardSnapshotRef.current = boardSnapshot
   canvasCursorRef.current = canvasCursor
   canvasViewportRef.current = canvasViewport
   selectedStickyNoteIdRef.current = selectedStickyNoteId
-  colorPickerStickyNoteIdRef.current = colorPickerStickyNoteId
   provisionalStickyNoteRef.current = provisionalStickyNote
   establishedStickyNoteEditRef.current = establishedStickyNoteEdit
   stickyNoteDeletionRef.current = stickyNoteDeletion
+  actionMenuIndexRef.current = actionMenuIndex
+  infoStickyNoteIdRef.current = infoStickyNoteId
+  movingStickyNoteRef.current = movingStickyNote
 
   function resetCanvasNavigation(options: { render?: boolean } = {}) {
     const initial = createCanvasNavigationState()
@@ -412,6 +469,28 @@ export function TerminalShell({
     }
     return initial
   }
+
+  function setStableCanvasMode(next: Exclude<ShellMode, "edit">): void {
+    const nextCursor = next === "navigate"
+      ? {
+          x: canvasViewportRef.current.x + Math.floor(canvasViewportSize.width / 2),
+          y: canvasViewportRef.current.y + Math.floor(canvasViewportSize.height / 2),
+        }
+      : canvasCursorRef.current
+    canvasCursorRef.current = nextCursor
+    stableModeRef.current = next
+    flushSync(() => {
+      setStableMode(next)
+      setMode(next)
+      if (next === "navigate") {
+        setCanvasCursor(nextCursor)
+      }
+    })
+  }
+
+  useEffect(() => {
+    renderer.setBackgroundColor(colors.background)
+  }, [renderer])
 
   useEffect(() => {
     if (capabilitiesOverride) {
@@ -460,11 +539,14 @@ export function TerminalShell({
         flushSync(() => {
           setAuthenticatedUsername(response.user.username)
           setSessionState("signed-in")
+          setView("boards")
+          setSelectedIndex(0)
           setNotice({
             kind: "status",
             message: `Terminal Session restored for ${response.user.username}.`,
           })
         })
+        void loadBoards("")
       } catch (error) {
         if (shouldDiscardCredential(error)) {
           await credentialStore.remove().catch(() => undefined)
@@ -523,14 +605,11 @@ export function TerminalShell({
       cancelledStickyNoteDeletionIdsRef.current.add(deletion.stickyNoteId)
     }
     stickyNoteDeletionRef.current = null
-    colorPickerStickyNoteIdRef.current = null
     cancelledProvisionalIdsRef.current.clear()
     if (!preserveEstablishedEdit) {
       cancelledStickyNoteEditIdsRef.current.clear()
       cancelledStickyNoteEditRequestsRef.current.clear()
     }
-    boardSnapshotRef.current = null
-
     const currentEdit = establishedStickyNoteEditRef.current
     const preservedEdit = preserveEstablishedEdit && currentEdit
       ? {
@@ -544,13 +623,13 @@ export function TerminalShell({
         }
       : null
     establishedStickyNoteEditRef.current = preservedEdit
+    const nextMode: ShellMode = preservedEdit ? "edit" : stableModeRef.current
+    modeRef.current = nextMode
     flushSync(() => {
       setProvisionalStickyNote(null)
       setEstablishedStickyNoteEdit(preservedEdit)
       setStickyNoteDeletion(null)
-      setColorPickerStickyNoteId(null)
-      setBoardSnapshot(null)
-      setMode("navigate")
+      setMode(nextMode)
     })
   }
 
@@ -591,11 +670,12 @@ export function TerminalShell({
     ) {
       return
     }
+
     if (draft.status === "requesting") {
       return
     }
 
-    const next = { ...draft, publicationRequested: true }
+    const next = { ...draft, publicationRequested: true, saveRequested: false }
     provisionalStickyNoteRef.current = next
     flushSync(() => setProvisionalStickyNote(next))
     try {
@@ -634,7 +714,7 @@ export function TerminalShell({
 
     updateEstablishedStickyNoteEdit((current) =>
       current && current.stickyNoteId === edit.stickyNoteId
-        ? { ...current, publicationRequested: true, publishedText: text }
+        ? { ...current, publicationRequested: true, saveRequested: false, publishedText: text }
         : current,
     )
     try {
@@ -672,30 +752,49 @@ export function TerminalShell({
   }
 
   const updateCanvasNavigation = (direction: CanvasDirection, pan = false) => {
-    const next = applyCanvasNavigation(
-      {
-        cursor: canvasCursorRef.current,
-        viewport: canvasViewportRef.current,
-      },
-      direction,
-      canvasViewportSize,
-      { pan },
-    )
-    canvasCursorRef.current = next.cursor
-    canvasViewportRef.current = next.viewport
     const notes = boardSnapshotRef.current?.stickyNotes ?? []
-    const selectedStillExists = selectedStickyNoteIdRef.current !== null && notes.some(
-      (note) => note.id === selectedStickyNoteIdRef.current,
-    )
-    const noteAtNextCursor = stickyNotesAtCanvasCursor(notes, next.cursor)[0]
-    const nextSelectedStickyNoteId = selectedStillExists
-      ? selectedStickyNoteIdRef.current
-      : noteAtNextCursor?.id ?? null
-    selectedStickyNoteIdRef.current = nextSelectedStickyNoteId
+    if (modeRef.current === "select" && !pan) {
+      const next = selectCanvasNoteInDirection(
+        notes,
+        selectedStickyNoteIdRef.current,
+        direction,
+      )
+      if (!next || next.id === selectedStickyNoteIdRef.current) {
+        flushSync(() => setNotice({ kind: "status", message: "No Sticky Note in that direction." }))
+        return
+      }
+      const nextViewport = canvasViewportForStickyNote(next.position, canvasViewportSize)
+      const nextCursor = { ...next.position }
+      selectedStickyNoteIdRef.current = next.id
+      canvasCursorRef.current = nextCursor
+      canvasViewportRef.current = nextViewport
+      flushSync(() => {
+        setSelectedStickyNoteId(next.id)
+        setCanvasCursor(nextCursor)
+        setCanvasViewport(nextViewport)
+        setNotice(null)
+      })
+      return
+    }
+
+    let next = {
+      cursor: canvasCursorRef.current,
+      viewport: canvasViewportRef.current,
+    }
+    const steps = 1
+    for (let index = 0; index < steps; index += 1) {
+      next = applyCanvasNavigation(next, direction, canvasViewportSize, { pan: true })
+    }
+    const center = {
+      x: next.viewport.x + Math.floor(canvasViewportSize.width / 2),
+      y: next.viewport.y + Math.floor(canvasViewportSize.height / 2),
+    }
+    canvasCursorRef.current = center
+    canvasViewportRef.current = next.viewport
     flushSync(() => {
-      setCanvasCursor(next.cursor)
+      setCanvasCursor(center)
       setCanvasViewport(next.viewport)
-      setSelectedStickyNoteId(nextSelectedStickyNoteId)
+      setNotice(null)
     })
   }
 
@@ -703,154 +802,157 @@ export function TerminalShell({
     const notes = boardSnapshotRef.current?.stickyNotes ?? []
     const selectedId = selectedStickyNoteIdRef.current
     const selected = selectedId ? notes.find((note) => note.id === selectedId) : undefined
-    return selected ?? stickyNotesAtCanvasCursor(notes, canvasCursorRef.current)[0]
-  }
-
-  const cycleSelectedStickyNote = () => {
-    const notes = stickyNotesAtCanvasCursor(
-      boardSnapshotRef.current?.stickyNotes ?? [],
-      canvasCursorRef.current,
-    )
-    if (notes.length === 0) {
-      return
-    }
-    const currentIndex = notes.findIndex((note) => note.id === selectedStickyNoteIdRef.current)
-    const next = notes[(currentIndex + 1) % notes.length] ?? notes[0]
-    selectedStickyNoteIdRef.current = next.id
-    flushSync(() => setSelectedStickyNoteId(next.id))
-  }
-
-  const closeStickyNoteColorPicker = () => {
-    colorPickerStickyNoteIdRef.current = null
-    flushSync(() => setColorPickerStickyNoteId(null))
-  }
-
-  const openStickyNoteColorPicker = () => {
-    if (modeRef.current !== "navigate") {
-      return
-    }
-    const note = selectedStickyNote()
-    if (!note) {
-      flushSync(() => {
-        setNotice({ kind: "error", message: "Select a Sticky Note before opening the Color picker." })
-      })
-      return
-    }
-    selectedStickyNoteIdRef.current = note.id
-    colorPickerStickyNoteIdRef.current = note.id
-    flushSync(() => {
-      setSelectedStickyNoteId(note.id)
-      setColorPickerStickyNoteId(note.id)
-      setNotice({ kind: "status", message: "Choose a decorative Color; Color has no workflow meaning." })
+    return selected ?? nearestCanvasNote(notes, {
+      x: canvasViewportRef.current.x + Math.floor(canvasViewportSize.width / 2),
+      y: canvasViewportRef.current.y + Math.floor(canvasViewportSize.height / 2),
     })
   }
 
-  const recolorSelectedStickyNote = (color: StickyNoteColor) => {
-    if (!sharedBoardMutationsEnabled()) {
-      closeStickyNoteColorPicker()
-      flushSync(() => {
-        setNotice({ kind: "error", message: "Shared mutations are disabled while the Board reconnects." })
-      })
+  const canvasActions = (): CanvasAction[] => {
+    const actions: CanvasAction[] = stableModeRef.current === "navigate"
+      ? ["add", "select"]
+      : selectedStickyNote()
+        ? ["info", "edit", "move", "delete", "navigate"]
+        : ["navigate"]
+    return [...actions, "help"]
+  }
+
+  const canvasActionLabel = (action: CanvasAction): string => {
+    switch (action) {
+      case "add": return "Add Sticky Note"
+      case "info": return "Info"
+      case "edit": return "Edit"
+      case "move": return "Move"
+      case "delete": return "Delete"
+      case "navigate": return "Switch to Navigate"
+      case "select": return "Switch to Select"
+      case "help": return "Help"
+    }
+  }
+
+  const canvasActionDescription = (action: CanvasAction): string => {
+    switch (action) {
+      case "add": return "Place a new Sticky Note at the center of this view."
+      case "info": return "Read the selected Sticky Note and its edit history."
+      case "edit": return "Edit the selected Sticky Note body."
+      case "move": return "Preview a new position, then commit it."
+      case "delete": return "Remove the selected Sticky Note after confirmation."
+      case "navigate": return "Pan freely across the canvas with the arrow keys."
+      case "select": return "Jump between Sticky Notes with the arrow keys."
+      case "help": return "Review the small set of controls available here."
+    }
+  }
+
+  const openCanvasActions = () => {
+    const actions = canvasActions()
+    actionMenuIndexRef.current = 0
+    flushSync(() => {
+      setActionMenuIndex(0)
+      setOverlay("actions")
+    })
+    if (actions.length === 0) {
+      flushSync(() => setOverlay("none"))
+    }
+  }
+
+  const closeCanvasOverlay = () => {
+    movingStickyNoteRef.current = null
+    infoStickyNoteIdRef.current = null
+    flushSync(() => {
+      setOverlay("none")
+      setInfoStickyNoteId(null)
+      setMovingStickyNote(null)
+    })
+  }
+
+  const openStickyNoteInfo = () => {
+    const note = selectedStickyNote()
+    if (!note) {
+      flushSync(() => setNotice({ kind: "status", message: "No Sticky Note selected." }))
       return
     }
-    const stickyNoteId = colorPickerStickyNoteIdRef.current
-    const connection = boardConnectionRef.current
-    if (!stickyNoteId || !connection) {
-      closeStickyNoteColorPicker()
+    infoStickyNoteIdRef.current = note.id
+    flushSync(() => {
+      setInfoStickyNoteId(note.id)
+      setOverlay("info")
+    })
+  }
+
+  const openStickyNoteMove = () => {
+    const note = selectedStickyNote()
+    if (!note) {
+      flushSync(() => setNotice({ kind: "status", message: "No Sticky Note selected." }))
       return
+    }
+    const moving = { stickyNoteId: note.id, original: { ...note.position }, position: { ...note.position } }
+    movingStickyNoteRef.current = moving
+    flushSync(() => {
+      setMovingStickyNote(moving)
+      setOverlay("move")
+    })
+  }
+
+  const movePreview = (direction: CanvasDirection) => {
+    const current = movingStickyNoteRef.current
+    if (!current) return
+    const delta = direction === "left"
+      ? { x: -1, y: 0 }
+      : direction === "right"
+        ? { x: 1, y: 0 }
+        : direction === "up"
+          ? { x: 0, y: -1 }
+          : { x: 0, y: 1 }
+    const next = {
+      ...current,
+      position: {
+        x: Math.max(CANVAS_MIN_COORDINATE, Math.min(CANVAS_MAX_COORDINATE, current.position.x + delta.x)),
+        y: Math.max(CANVAS_MIN_COORDINATE, Math.min(CANVAS_MAX_COORDINATE, current.position.y + delta.y)),
+      },
+    }
+    movingStickyNoteRef.current = next
+    flushSync(() => setMovingStickyNote(next))
+  }
+
+  const commitMovePreview = () => {
+    const moving = movingStickyNoteRef.current
+    const connection = boardConnectionRef.current
+    if (!moving || !connection || !sharedBoardMutationsEnabled()) {
+      closeCanvasOverlay()
+      return
+    }
+    const dx = moving.position.x - moving.original.x
+    const dy = moving.position.y - moving.original.y
+    const sendMoves = (direction: CanvasDirection, count: number) => {
+      for (let index = 0; index < Math.abs(count); index += 1) {
+        connection.send({
+          type: "move_sticky_note",
+          stickyNoteId: moving.stickyNoteId,
+          direction,
+        })
+      }
     }
     try {
-      connection.send({
-        type: "recolor_sticky_note",
-        stickyNoteId,
-        color,
-      })
-      closeStickyNoteColorPicker()
-      flushSync(() => {
-        setNotice({ kind: "status", message: `Waiting for durable Color ${color} acknowledgement…` })
-      })
+      sendMoves(dx < 0 ? "left" : "right", dx)
+      sendMoves(dy < 0 ? "up" : "down", dy)
+      selectedStickyNoteIdRef.current = moving.stickyNoteId
+      closeCanvasOverlay()
+      flushSync(() => setNotice({ kind: "status", message: "Saving Position…" }))
     } catch (error) {
       flushSync(() => setNotice({ kind: "error", message: formatBoardError(error) }))
     }
   }
 
-  const reorderSelectedStickyNote = (direction: StickyNoteStackingDirection) => {
-    if (!sharedBoardMutationsEnabled()) {
-      flushSync(() => {
-        setNotice({ kind: "error", message: "Shared mutations are disabled while the Board reconnects." })
-      })
-      return
-    }
-    const note = selectedStickyNote()
-    const connection = boardConnectionRef.current
-    if (!note) {
-      flushSync(() => {
-        setNotice({ kind: "error", message: "Select a Sticky Note before changing its Stacking Order." })
-      })
-      return
-    }
-    if (!connection) {
-      flushSync(() => {
-        setNotice({ kind: "error", message: "Open a live Board before changing Stacking Order." })
-      })
-      return
-    }
-    selectedStickyNoteIdRef.current = note.id
-    flushSync(() => setSelectedStickyNoteId(note.id))
-    try {
-      connection.send({
-        type: "reorder_sticky_note",
-        stickyNoteId: note.id,
-        direction,
-      })
-      flushSync(() => {
-        setNotice({
-          kind: "status",
-          message: `Waiting for durable Stacking Order ${direction} acknowledgement…`,
-        })
-      })
-    } catch (error) {
-      flushSync(() => setNotice({ kind: "error", message: formatBoardError(error) }))
-    }
-  }
-
-  const moveSelectedStickyNote = (direction: CanvasDirection) => {
-    if (!sharedBoardMutationsEnabled()) {
-      flushSync(() => {
-        setNotice({ kind: "error", message: "Shared mutations are disabled while the Board reconnects." })
-      })
-      return
-    }
-    const note = selectedStickyNote()
-    const connection = boardConnectionRef.current
-    if (!note) {
-      flushSync(() => {
-        setNotice({ kind: "error", message: "Select a Sticky Note before moving it." })
-      })
-      return
-    }
-    if (!connection) {
-      flushSync(() => {
-        setNotice({ kind: "error", message: "Open a live Board before moving a Sticky Note." })
-      })
-      return
-    }
-    selectedStickyNoteIdRef.current = note.id
-    flushSync(() => setSelectedStickyNoteId(note.id))
-    try {
-      connection.send({
-        type: "move_sticky_note",
-        stickyNoteId: note.id,
-        direction,
-      })
-      flushSync(() => {
-        setNotice({
-          kind: "status",
-          message: `Waiting for durable Position ${direction} acknowledgement…`,
-        })
-      })
-    } catch (error) {
-      flushSync(() => setNotice({ kind: "error", message: formatBoardError(error) }))
+  const executeCanvasAction = (action: CanvasAction) => {
+    closeCanvasOverlay()
+    switch (action) {
+      case "add": startProvisionalStickyNote(); return
+      case "info": openStickyNoteInfo(); return
+      case "edit": startEstablishedStickyNoteEdit(); return
+      case "move": openStickyNoteMove(); return
+      case "delete": startStickyNoteDeletion(); return
+      case "navigate": setStableCanvasMode("navigate"); return
+      case "select": setStableCanvasMode("select"); return
+      case "help": flushSync(() => setOverlay("help")); return
     }
   }
 
@@ -874,15 +976,20 @@ export function TerminalShell({
 
     const draft: ProvisionalStickyNote = {
       provisionalId: crypto.randomUUID(),
-      position: { ...canvasCursorRef.current },
+      position: {
+        x: canvasViewportRef.current.x + Math.max(0, Math.floor(canvasViewportSize.width / 2) - Math.floor(CANVAS_STICKY_NOTE_CARD_WIDTH / 2)),
+        y: canvasViewportRef.current.y + Math.max(0, Math.floor(canvasViewportSize.height / 2) - Math.floor(CANVAS_STICKY_NOTE_CARD_HEIGHT / 2)),
+      },
       color: DEFAULT_STICKY_NOTE_COLOR,
       text: "",
       status: "requesting",
       publicationRequested: false,
+      saveRequested: false,
     }
     provisionalStickyNoteRef.current = draft
     flushSync(() => {
       setProvisionalStickyNote(draft)
+      setStableMode("navigate")
       setMode("edit")
       setNotice({ kind: "status", message: "Requesting Sticky Note creation authority…" })
     })
@@ -939,6 +1046,7 @@ export function TerminalShell({
       status: "requesting",
       dirty: false,
       publicationRequested: false,
+      saveRequested: false,
       releaseRequested: false,
       releaseSent: false,
       claimRequestSent: false,
@@ -948,6 +1056,7 @@ export function TerminalShell({
     establishedStickyNoteEditRef.current = edit
     flushSync(() => {
       setSelectedStickyNoteId(note.id)
+      setStableMode("select")
       setEstablishedStickyNoteEdit(edit)
       setMode("edit")
       setNotice({ kind: "status", message: "Requesting Sticky Note Edit Claim…" })
@@ -961,7 +1070,7 @@ export function TerminalShell({
       establishedStickyNoteEditRef.current = null
       flushSync(() => {
         setEstablishedStickyNoteEdit(null)
-        setMode("navigate")
+        setMode(stableModeRef.current)
         setNotice({ kind: "error", message: formatBoardError(error) })
       })
     }
@@ -1006,7 +1115,8 @@ export function TerminalShell({
     flushSync(() => {
       setSelectedStickyNoteId(note.id)
       setStickyNoteDeletion(deletion)
-      setMode("navigate")
+      setMode(stableModeRef.current)
+      setSelectedIndex(0)
       setNotice({ kind: "status", message: "Requesting Sticky Note Edit Claim before deletion…" })
     })
     try {
@@ -1042,9 +1152,21 @@ export function TerminalShell({
       }
     }
     provisionalStickyNoteRef.current = null
+    stableModeRef.current = "navigate"
+    modeRef.current = "navigate"
     flushSync(() => {
       setProvisionalStickyNote(null)
+      setStableMode("navigate")
       setMode("navigate")
+    })
+  }
+
+  const discardProvisionalStickyNoteDraft = () => {
+    releaseProvisionalStickyNote()
+    flushSync(() => {
+      setView("canvas")
+      setConfirmationAction("placeholder")
+      setNotice({ kind: "status", message: "Draft discarded." })
     })
   }
 
@@ -1109,10 +1231,17 @@ export function TerminalShell({
     }
     stickyNoteDeletionRef.current = null
     selectedStickyNoteIdRef.current = deletion.stickyNoteId
+    const remainingNotes = boardSnapshotRef.current?.stickyNotes ?? []
+    const nextStableMode: Exclude<ShellMode, "edit"> = remainingNotes.length > 0
+      ? "select"
+      : "navigate"
+    stableModeRef.current = nextStableMode
+    modeRef.current = nextStableMode
     flushSync(() => {
       setStickyNoteDeletion(null)
       setView("canvas")
-      setMode("navigate")
+      setStableMode(nextStableMode)
+      setMode(nextStableMode)
       setConfirmationAction("placeholder")
       setSelectedStickyNoteId(deletion.stickyNoteId)
       setNotice({ kind: "status", message: "Sticky Note deletion cancelled; Edit Claim released." })
@@ -1150,38 +1279,45 @@ export function TerminalShell({
   const releaseEstablishedStickyNoteEdit = () => {
     const edit = establishedStickyNoteEditRef.current
     if (!edit) {
-      flushSync(() => setMode("navigate"))
+      flushSync(() => setMode(stableModeRef.current))
       return
     }
-
-    stickyNoteDebouncerRef.current?.flush()
-    const afterFlush = establishedStickyNoteEditRef.current
-    flushSync(() => setMode("navigate"))
-    if (!afterFlush) {
+    if (edit.publicationRequested) {
+      flushSync(() => setNotice({ kind: "status", message: "Sticky Note is being saved…" }))
       return
     }
-    if (!afterFlush.claimId || afterFlush.status === "requesting" || afterFlush.reconnecting) {
-      cancelledStickyNoteEditIdsRef.current.add(afterFlush.stickyNoteId)
-      clearEstablishedStickyNoteEdit()
+    if (edit.dirty) {
+      discardEstablishedStickyNoteEdit()
       return
     }
-
-    if (
-      afterFlush.publicationRequested &&
-      afterFlush.text !== afterFlush.publishedText
-    ) {
-      updateEstablishedStickyNoteEdit((current) =>
-        current && current.stickyNoteId === afterFlush.stickyNoteId
-          ? { ...current, releaseRequested: true }
-          : current,
-      )
-      return
-    }
-
-    if (!sendEstablishedStickyNoteRelease()) {
-      cancelledStickyNoteEditIdsRef.current.add(afterFlush.stickyNoteId)
+    if (!edit.claimId || edit.status === "requesting" || edit.reconnecting) {
+      cancelledStickyNoteEditIdsRef.current.add(edit.stickyNoteId)
+    } else if (!sendEstablishedStickyNoteRelease()) {
+      cancelledStickyNoteEditIdsRef.current.add(edit.stickyNoteId)
     }
     clearEstablishedStickyNoteEdit()
+    flushSync(() => {
+      setMode(stableModeRef.current)
+      setConfirmationAction("placeholder")
+    })
+  }
+
+  const discardEstablishedStickyNoteEdit = () => {
+    const edit = establishedStickyNoteEditRef.current
+    if (edit?.claimId) {
+      if (!sendEstablishedStickyNoteRelease()) {
+        cancelledStickyNoteEditIdsRef.current.add(edit.stickyNoteId)
+      }
+    } else if (edit) {
+      cancelledStickyNoteEditIdsRef.current.add(edit.stickyNoteId)
+    }
+    clearEstablishedStickyNoteEdit()
+    flushSync(() => {
+      setView("canvas")
+      setMode(stableModeRef.current)
+      setConfirmationAction("placeholder")
+      setNotice({ kind: "status", message: "Draft discarded." })
+    })
   }
 
   const handleStickyNoteCreationClaimGranted = (claim: {
@@ -1217,8 +1353,11 @@ export function TerminalShell({
           }
         : current,
     )
-    if (draft.text.length > 0) {
-      stickyNoteDebouncerRef.current?.schedule(draft.text)
+    const grantedDraft = provisionalStickyNoteRef.current
+    if (grantedDraft?.provisionalId === claim.provisionalId && grantedDraft.saveRequested) {
+      publishFirstStickyNoteSnapshot(grantedDraft.text)
+      flushSync(() => setNotice({ kind: "status", message: "Saving Sticky Note…" }))
+      return
     }
     flushSync(() => setNotice({ kind: "status", message: "Sticky Note creation authority granted." }))
   }
@@ -1272,7 +1411,7 @@ export function TerminalShell({
         setView("confirmation")
         setConfirmationReturnView("canvas")
         setConfirmationAction("delete-sticky-note")
-        setMode("navigate")
+        setMode(stableModeRef.current)
         setNotice({ kind: "status", message: "Edit Claim granted. Confirm permanent Sticky Note deletion." })
       })
       return
@@ -1308,7 +1447,7 @@ export function TerminalShell({
       establishedStickyNoteEditRef.current = null
       flushSync(() => {
         setEstablishedStickyNoteEdit(null)
-        setMode("navigate")
+        setMode(stableModeRef.current)
         setNotice({
           kind: "error",
           message: "Edit Claim was lost; authoritative Sticky Note text was reloaded.",
@@ -1317,7 +1456,7 @@ export function TerminalShell({
       return
     }
 
-    const text = wasReconnecting && edit.dirty && edit.text !== claim.stickyNote.text
+    const text = edit.dirty && edit.text !== claim.stickyNote.text
       ? edit.text
       : claim.stickyNote.text
     const next: EstablishedStickyNoteEdit = {
@@ -1328,6 +1467,7 @@ export function TerminalShell({
       status: "granted",
       dirty: text !== claim.stickyNote.text,
       publicationRequested: false,
+      saveRequested: edit.saveRequested,
       publishedText: undefined,
       claimRequestSent: false,
       reconnecting: false,
@@ -1339,9 +1479,16 @@ export function TerminalShell({
         setMode("edit")
       }
     })
-    if (text !== claim.stickyNote.text) {
-      stickyNoteDebouncerRef.current?.schedule(text)
+    if (next.saveRequested) {
+      if (next.dirty) {
+        publishEstablishedStickyNoteSnapshot(next.text)
+        flushSync(() => setNotice({ kind: "status", message: "Saving Sticky Note…" }))
+      } else {
+        releaseEstablishedStickyNoteEdit()
+      }
+      return
     }
+    // Reconnected drafts remain local until the user explicitly saves them.
     flushSync(() => setNotice({
       kind: "status",
       message: wasReconnecting
@@ -1390,7 +1537,7 @@ export function TerminalShell({
       establishedStickyNoteEditRef.current = null
       flushSync(() => {
         setEstablishedStickyNoteEdit(null)
-        setMode("navigate")
+        setMode(stableModeRef.current)
       })
       return
     }
@@ -1400,7 +1547,7 @@ export function TerminalShell({
       establishedStickyNoteEditRef.current = null
       flushSync(() => {
         setEstablishedStickyNoteEdit(null)
-        setMode("navigate")
+        setMode(stableModeRef.current)
         setNotice({
           kind: "error",
           message: "Edit Claim was lost; authoritative Sticky Note text was reloaded.",
@@ -1417,6 +1564,7 @@ export function TerminalShell({
       status: "requesting",
       dirty: text !== note.text,
       publicationRequested: false,
+      saveRequested: edit.saveRequested,
       publishedText: undefined,
       claimRequestSent: edit.claimRequestSent,
       reconnecting: true,
@@ -1424,7 +1572,7 @@ export function TerminalShell({
     establishedStickyNoteEditRef.current = next
     flushSync(() => {
       setEstablishedStickyNoteEdit(next)
-      setMode("navigate")
+      setMode("edit")
       setNotice({ kind: "status", message: "Reconnected; restoring the Sticky Note Edit Claim…" })
     })
   }
@@ -1560,7 +1708,22 @@ export function TerminalShell({
             }
           : current,
       )
+      if (draft.claimId) {
+        try {
+          boardConnectionRef.current?.send({
+            type: "release_sticky_note_creation",
+            claimId: draft.claimId,
+            provisionalId: draft.provisionalId,
+          })
+        } catch {
+          // The durable creation has already been acknowledged.
+        }
+      }
+      provisionalStickyNoteRef.current = null
       flushSync(() => {
+        setProvisionalStickyNote(null)
+        setStableMode("select")
+        setMode("select")
         setNotice({
           kind: "status",
           message: `Sticky Note created by ${event.stickyNote.authorship.member.username}.`,
@@ -1590,13 +1753,20 @@ export function TerminalShell({
     establishedStickyNoteEditRef.current = next
     flushSync(() => setEstablishedStickyNoteEdit(next))
     if (!matchesPublishedText) {
-      stickyNoteDebouncerRef.current?.schedule(localText)
+      updateEstablishedStickyNoteEdit((current) =>
+        current && current.stickyNoteId === edit.stickyNoteId
+          ? { ...current, publicationRequested: true, publishedText: localText }
+          : current,
+      )
       return
     }
-    if (edit.releaseRequested) {
-      sendEstablishedStickyNoteRelease()
-      clearEstablishedStickyNoteEdit()
-    }
+    sendEstablishedStickyNoteRelease()
+    clearEstablishedStickyNoteEdit()
+    flushSync(() => {
+      setStableMode("select")
+      setMode("select")
+      setNotice({ kind: "status", message: "Sticky Note saved." })
+    })
   }
 
   const handleStickyNoteDeleted = (event: {
@@ -1618,7 +1788,7 @@ export function TerminalShell({
     )
     const selectedWasDeleted = selectedStickyNoteIdRef.current === event.stickyNoteId
     const nextSelectedStickyNoteId = selectedWasDeleted
-      ? stickyNotesAtCanvasCursor(nextNotes, canvasCursorRef.current)[0]?.id ?? null
+      ? nearestCanvasNote(nextNotes, canvasCursorRef.current)?.id ?? null
       : selectedStickyNoteIdRef.current
     const nextSnapshot = {
       ...current,
@@ -1627,6 +1797,13 @@ export function TerminalShell({
     }
     boardSnapshotRef.current = nextSnapshot
     selectedStickyNoteIdRef.current = nextSelectedStickyNoteId
+    const nextSelectedNote = nextSelectedStickyNoteId
+      ? nextNotes.find((note) => note.id === nextSelectedStickyNoteId)
+      : undefined
+    const nextViewport = nextSelectedNote
+      ? canvasViewportForStickyNote(nextSelectedNote.position, canvasViewportSize)
+      : canvasViewportRef.current
+    canvasViewportRef.current = nextViewport
     const deletion = stickyNoteDeletionRef.current
     if (deletion?.stickyNoteId === event.stickyNoteId) {
       stickyNoteDeletionRef.current = null
@@ -1634,10 +1811,12 @@ export function TerminalShell({
     flushSync(() => {
       setBoardSnapshot(nextSnapshot)
       setSelectedStickyNoteId(nextSelectedStickyNoteId)
+      setCanvasViewport(nextViewport)
       if (deletion?.stickyNoteId === event.stickyNoteId) {
         setStickyNoteDeletion(null)
         setView("canvas")
-        setMode("navigate")
+        setStableMode(nextNotes.length > 0 ? "select" : "navigate")
+        setMode(nextNotes.length > 0 ? "select" : "navigate")
         setConfirmationAction("placeholder")
       }
       setNotice({
@@ -1705,7 +1884,7 @@ export function TerminalShell({
       provisionalStickyNoteRef.current = null
       flushSync(() => {
         setProvisionalStickyNote(null)
-        setMode("navigate")
+        setMode(stableModeRef.current)
         setNotice({ kind: "error", message: "Another Member already owns that Sticky Note creation." })
       })
       return
@@ -1718,7 +1897,7 @@ export function TerminalShell({
         flushSync(() => {
           setStickyNoteDeletion(null)
           setView("canvas")
-          setMode("navigate")
+          setMode(stableModeRef.current)
           setConfirmationAction("placeholder")
           setNotice({
             kind: "error",
@@ -1732,7 +1911,7 @@ export function TerminalShell({
       establishedStickyNoteEditRef.current = null
       flushSync(() => {
         setEstablishedStickyNoteEdit(null)
-        setMode("navigate")
+        setMode(stableModeRef.current)
         setNotice({
           kind: "error",
           message: commandError.claimHolder
@@ -1768,7 +1947,7 @@ export function TerminalShell({
       flushSync(() => {
         setStickyNoteDeletion(null)
         setView("canvas")
-        setMode("navigate")
+        setMode(stableModeRef.current)
         setConfirmationAction("placeholder")
         setSelectedStickyNoteId(deletion.stickyNoteId)
         setNotice({ kind: "error", message: commandError.error })
@@ -1782,7 +1961,7 @@ export function TerminalShell({
         establishedStickyNoteEditRef.current = null
         flushSync(() => {
           setEstablishedStickyNoteEdit(null)
-          setMode("navigate")
+          setMode(stableModeRef.current)
         })
       } else if (edit.publicationRequested) {
         updateEstablishedStickyNoteEdit((current) =>
@@ -1793,7 +1972,7 @@ export function TerminalShell({
         if (edit.releaseRequested) {
           sendEstablishedStickyNoteRelease()
           clearEstablishedStickyNoteEdit()
-          flushSync(() => setMode("navigate"))
+          flushSync(() => setMode(stableModeRef.current))
         }
       }
       flushSync(() => setNotice({ kind: "error", message: commandError.error }))
@@ -1806,7 +1985,7 @@ export function TerminalShell({
         flushSync(() => {
           setStickyNoteDeletion(null)
           setView("canvas")
-          setMode("navigate")
+          setMode(stableModeRef.current)
           setConfirmationAction("placeholder")
           setSelectedStickyNoteId(deletion.stickyNoteId)
           setNotice({ kind: "error", message: commandError.error })
@@ -1818,7 +1997,7 @@ export function TerminalShell({
         establishedStickyNoteEditRef.current = null
         flushSync(() => {
           setEstablishedStickyNoteEdit(null)
-          setMode("navigate")
+          setMode(stableModeRef.current)
         })
       }
       flushSync(() => setNotice({ kind: "error", message: commandError.error }))
@@ -1848,7 +2027,7 @@ export function TerminalShell({
         flushSync(() => setEstablishedStickyNoteEdit(releaseAfterConflict ? null : next))
         if (releaseAfterConflict) {
           establishedStickyNoteEditRef.current = null
-          flushSync(() => setMode("navigate"))
+          flushSync(() => setMode(stableModeRef.current))
         }
       }
       flushSync(() => setNotice({ kind: "error", message: commandError.error }))
@@ -1879,11 +2058,7 @@ export function TerminalShell({
       return false
     }
     updateProvisionalStickyNote((current) => current ? { ...current, text } : current)
-    if (text.length === 0) {
-      stickyNoteDebouncerRef.current?.cancel()
-    } else {
-      stickyNoteDebouncerRef.current?.schedule(text)
-    }
+    stickyNoteDebouncerRef.current?.cancel()
     return true
   }
 
@@ -1908,52 +2083,76 @@ export function TerminalShell({
         ? { ...current, text, dirty: true }
         : current,
     )
-    stickyNoteDebouncerRef.current?.schedule(text)
+    stickyNoteDebouncerRef.current?.cancel()
     return true
   }
 
-  const handleActiveStickyNoteTextChange = (text: string): boolean => {
-    if (provisionalStickyNoteRef.current) {
-      return handleProvisionalStickyNoteTextChange(text)
-    }
-    if (establishedStickyNoteEditRef.current) {
-      return handleEstablishedStickyNoteTextChange(text)
-    }
-    return false
-  }
-
-  const appendProvisionalStickyNoteText = (addition: string) => {
-    const draft = provisionalStickyNoteRef.current
-    if (!draft || addition.length === 0) {
-      return
-    }
-    handleProvisionalStickyNoteTextChange(`${draft.text}${addition}`)
-  }
-
-  const appendActiveStickyNoteText = (addition: string) => {
+  const saveActiveStickyNoteDraft = () => {
     const provisional = provisionalStickyNoteRef.current
-    if (provisional) {
-      appendProvisionalStickyNoteText(addition)
+    const established = establishedStickyNoteEditRef.current
+    const text = provisional?.text ?? established?.text ?? ""
+    if (provisional && text.trim().length === 0) {
+      flushSync(() => setNotice({ kind: "error", message: "Type a visible character before saving." }))
       return
     }
-    const edit = establishedStickyNoteEditRef.current
-    if (edit) {
-      handleEstablishedStickyNoteTextChange(`${edit.text}${addition}`)
+    if (provisional) {
+      if (provisional.status === "requesting" || !provisional.claimId) {
+        updateProvisionalStickyNote((current) =>
+          current && current.provisionalId === provisional.provisionalId
+            ? { ...current, saveRequested: true }
+            : current,
+        )
+        flushSync(() => setNotice({ kind: "status", message: "Waiting for creation authority…" }))
+        return
+      }
+      if (provisional.publicationRequested) {
+        flushSync(() => setNotice({ kind: "status", message: "Sticky Note is already being saved…" }))
+        return
+      }
+      publishFirstStickyNoteSnapshot(text)
+      flushSync(() => setNotice({ kind: "status", message: "Saving Sticky Note…" }))
+      return
     }
+    if (established && established.status !== "granted") {
+      updateEstablishedStickyNoteEdit((current) =>
+        current && current.stickyNoteId === established.stickyNoteId
+          ? { ...current, saveRequested: true }
+          : current,
+      )
+      flushSync(() => setNotice({ kind: "status", message: "Waiting for Edit Claim…" }))
+      return
+    }
+    if (established?.publicationRequested) {
+      flushSync(() => setNotice({ kind: "status", message: "Sticky Note is already being saved…" }))
+      return
+    }
+    if (established && established.dirty) {
+      publishEstablishedStickyNoteSnapshot(text)
+      flushSync(() => setNotice({ kind: "status", message: "Saving Sticky Note…" }))
+      return
+    }
+    releaseEstablishedStickyNoteEdit()
   }
 
   const moveSelection = (direction: -1 | 1) => {
-    const items =
-      viewRef.current === "home"
-        ? homeMenu
-        : viewRef.current === "boards"
-          ? boardMenu
-          : boardActionsMenu
-    const nextIndex = Math.max(
-      0,
-      Math.min(items.length - 1, selectedIndexRef.current + direction),
-    )
-    flushSync(() => setSelectedIndex(nextIndex))
+    const availableBoardActions = boards.length > 0 ? boardMenu.slice(1) : boardMenu
+    const items = viewRef.current === "home"
+      ? homeMenu
+      : viewRef.current === "boards"
+        ? availableBoardActions
+        : boardActionsMenu
+    const itemCount = viewRef.current === "boards" && boards.length > 0
+      ? boards.length + items.length
+      : items.length
+    const nextIndex = itemCount === 0
+      ? 0
+      : (selectedIndexRef.current + direction + itemCount) % itemCount
+    flushSync(() => {
+      setSelectedIndex(nextIndex)
+      if (viewRef.current === "boards" && nextIndex < boards.length) {
+        setSelectedBoardIndex(nextIndex)
+      }
+    })
   }
 
   const loadBoards = async (filter: string, clearNotice = true) => {
@@ -1996,7 +2195,6 @@ export function TerminalShell({
   const closeBoardConnection = () => {
     boardConnectionGenerationRef.current += 1
     stickyNoteDebouncerRef.current?.cancel()
-    colorPickerStickyNoteIdRef.current = null
     releaseProvisionalStickyNote()
     const deletion = stickyNoteDeletionRef.current
     if (deletion?.claimId && boardConnectionStateRef.current === "connected") {
@@ -2033,7 +2231,6 @@ export function TerminalShell({
     flushSync(() => {
       setEstablishedStickyNoteEdit(null)
       setStickyNoteDeletion(null)
-      setColorPickerStickyNoteId(null)
     })
     activeBoardIdRef.current = null
     const connection = boardConnectionRef.current
@@ -2130,7 +2327,6 @@ export function TerminalShell({
       setMode("navigate")
       setBoardOpenPending(false)
       setSelectedStickyNoteId(null)
-      setColorPickerStickyNoteId(null)
       setView("boards")
       setSelectedIndex(0)
       setNotice({
@@ -2174,6 +2370,7 @@ export function TerminalShell({
       boardConnectionGenerationRef.current === connectionGeneration
     flushSync(() => {
       setView("canvas")
+      setStableMode("navigate")
       setMode("navigate")
       boardSnapshotRef.current = null
       setBoardSnapshot(null)
@@ -2183,8 +2380,6 @@ export function TerminalShell({
       setSelectedStickyNoteId(null)
       establishedStickyNoteEditRef.current = null
       setEstablishedStickyNoteEdit(null)
-      colorPickerStickyNoteIdRef.current = null
-      setColorPickerStickyNoteId(null)
       setBoardOpenPending(true)
       setNotice(null)
     })
@@ -2195,29 +2390,61 @@ export function TerminalShell({
           if (!isCurrentBoardConnection()) {
             return
           }
-          const initialNavigation = resetCanvasNavigation({ render: false })
+          const firstSnapshot = boardSnapshotRef.current === null
+          const initialNavigation = firstSnapshot
+            ? resetCanvasNavigation({ render: false })
+            : {
+                cursor: canvasCursorRef.current,
+                viewport: canvasViewportRef.current,
+              }
           boardConnectionStateRef.current = "connected"
           boardSnapshotRef.current = snapshot
           const selectedStillExists = selectedStickyNoteIdRef.current && snapshot.stickyNotes?.some(
             (note) => note.id === selectedStickyNoteIdRef.current,
           )
-          const noteAtCursor = stickyNotesAtCanvasCursor(
-            snapshot.stickyNotes ?? [],
-            canvasCursorRef.current,
-          )[0]
+          const noteAtCursor = firstSnapshot
+            ? nearestCanvasNote(snapshot.stickyNotes ?? [], { x: 0, y: 0 })
+            : stickyNotesAtCanvasCursor(
+                snapshot.stickyNotes ?? [],
+                canvasCursorRef.current,
+              )[0]
           const nextSelectedStickyNoteId = selectedStillExists
             ? selectedStickyNoteIdRef.current
             : noteAtCursor?.id ?? null
+          const nextSelectedNote = nextSelectedStickyNoteId
+            ? snapshot.stickyNotes?.find((note) => note.id === nextSelectedStickyNoteId)
+            : undefined
+          const nextViewport = firstSnapshot && nextSelectedNote
+            ? canvasViewportForStickyNote(nextSelectedNote.position, canvasViewportSize)
+            : initialNavigation.viewport
+          const nextCursor = firstSnapshot && nextSelectedNote
+            ? { ...nextSelectedNote.position }
+            : firstSnapshot
+              ? {
+                  x: initialNavigation.viewport.x + Math.floor(canvasViewportSize.width / 2),
+                  y: initialNavigation.viewport.y + Math.floor(canvasViewportSize.height / 2),
+                }
+              : initialNavigation.cursor
+          const nextStableMode: Exclude<ShellMode, "edit"> = (snapshot.stickyNotes?.length ?? 0) > 0
+            ? "select"
+            : "navigate"
+          const nextMode: ShellMode = provisionalStickyNoteRef.current || establishedStickyNoteEditRef.current
+            ? "edit"
+            : nextStableMode
           selectedStickyNoteIdRef.current = nextSelectedStickyNoteId
           flushSync(() => {
-            setCanvasCursor(initialNavigation.cursor)
-            setCanvasViewport(initialNavigation.viewport)
+            setCanvasCursor(nextCursor)
+            setCanvasViewport(nextViewport)
             setBoardSnapshot(snapshot)
             setBoardConnectionState("connected")
             setSelectedStickyNoteId(nextSelectedStickyNoteId)
+            setStableMode(nextStableMode)
+            setMode(nextMode)
             setBoardOpenPending(false)
             setNotice((current) => current?.kind === "error" ? current : null)
           })
+          stableModeRef.current = nextStableMode
+          modeRef.current = nextMode
           reconcileEstablishedStickyNoteEditFromSnapshot(snapshot)
           releaseCancelledEditClaimsAfterReconnect(snapshot)
           releaseCancelledStickyNoteDeletionClaimsAfterReconnect(snapshot)
@@ -2618,7 +2845,7 @@ export function TerminalShell({
         }
         const completedLabel = formKind === "register" ? "Registration" : "Sign-in"
         flushSync(() => {
-          setView(formReturnView)
+          setView("boards")
           setFormKind(null)
           setFormInitialKey(null)
           setSelectedIndex(0)
@@ -2630,6 +2857,7 @@ export function TerminalShell({
             message: `${completedLabel} complete for ${response.user.username}. Terminal Session ready.`,
           })
         })
+        void loadBoards("")
       } catch (error) {
         flushSync(() => {
           setNotice({ kind: "error", message: formatAuthError(error) })
@@ -2816,7 +3044,28 @@ export function TerminalShell({
     }
   }
 
+  const copyVisibleJoinCode = () => {
+    const visibleJoinCode = boardCodeNoticeRef.current
+    if (!visibleJoinCode) {
+      return
+    }
+
+    const copied = renderer.copyToClipboardOSC52(visibleJoinCode.code)
+    flushSync(() => {
+      setNotice(copied
+        ? { kind: "status", message: "Join Code copied to the clipboard." }
+        : {
+            kind: "error",
+            message: "Clipboard access is unavailable. Select and copy the Join Code manually.",
+          })
+    })
+  }
+
   useKeyboard((key) => {
+    if (key.ctrl && key.name === "c") {
+      renderer.destroy()
+      return
+    }
     if (
       sessionStateRef.current === "checking" ||
       signOutPendingRef.current ||
@@ -2833,28 +3082,12 @@ export function TerminalShell({
     }
 
     if (viewRef.current === "home") {
-      if (key.name === "up" || key.name === "k") {
+      if (key.name === "up") {
         moveSelection(-1)
         return
       }
-      if (key.name === "down" || key.name === "j") {
+      if (key.name === "down") {
         moveSelection(1)
-        return
-      }
-      if (key.name === "b") {
-        openView("boards")
-        return
-      }
-      if (key.name === "s") {
-        openForm("sign-in", "home", key.name)
-        return
-      }
-      if (key.name === "r") {
-        openForm("register", "home", key.name)
-        return
-      }
-      if (key.name === "x") {
-        void signOut()
         return
       }
       if (key.name === "return" && selectedIndexRef.current === 0) {
@@ -2880,7 +3113,7 @@ export function TerminalShell({
         openView("home")
         return
       }
-      if (key.name === "up" || key.name === "k") {
+      if (key.name === "up") {
         moveSelection(-1)
         return
       }
@@ -2888,61 +3121,141 @@ export function TerminalShell({
         moveSelection(1)
         return
       }
-      if (key.name === "[" || key.name === "]") {
-        moveBoardSelection(key.name === "[" ? -1 : 1)
+      if (key.name === "c" && boardCodeNoticeRef.current) {
+        copyVisibleJoinCode()
         return
       }
-      if (key.name === "c") {
-        openForm("create-board", "boards", key.name)
-        return
-      }
-      if (key.name === "j") {
-        openForm("join-board", "boards", key.name)
-        return
-      }
-      if (key.name === "f") {
-        openForm("filter-boards", "boards", key.name)
-        return
-      }
-      if (key.name === "a") {
-        openView("board-actions")
-        return
-      }
-      if (key.name === "o") {
-        void openSelectedBoard()
-        return
-      }
-      if (key.name === "return" && selectedIndexRef.current === 1) {
-        openForm("create-board", "boards")
-        return
-      }
-      if (key.name === "return" && selectedIndexRef.current === 2) {
-        openForm("join-board", "boards")
-        return
-      }
-      if (key.name === "return" && selectedIndexRef.current === 3) {
-        openView("board-actions")
-        return
-      }
-      if (key.name === "return" && selectedIndexRef.current === 0) {
-        void openSelectedBoard()
-        return
+      if (key.name === "return") {
+        if (boards.length > 0 && selectedIndexRef.current < boards.length) {
+          void openSelectedBoard()
+          return
+        }
+        const actionIndex = selectedIndexRef.current - boards.length
+        if (boards.length === 0) {
+          switch (actionIndex) {
+            case 0:
+              void openSelectedBoard()
+              return
+            case 1:
+              openForm("create-board", "boards")
+              return
+            case 2:
+              openForm("join-board", "boards")
+              return
+            case 3:
+              openView("board-actions")
+              return
+          }
+        } else {
+          switch (actionIndex) {
+            case 0:
+              openForm("create-board", "boards")
+              return
+            case 1:
+              openForm("join-board", "boards")
+              return
+            case 2:
+              openView("board-actions")
+              return
+          }
+        }
       }
     }
 
     if (viewRef.current === "canvas") {
-      if (colorPickerStickyNoteIdRef.current) {
+      if (overlayRef.current === "actions") {
+        const actions = canvasActions()
         if (key.name === "escape") {
-          closeStickyNoteColorPicker()
-          flushSync(() => setNotice({ kind: "status", message: "Color selection cancelled." }))
+          closeCanvasOverlay()
           return
         }
-        const choice = stickyNoteColorChoices.find((entry) => entry.key === key.name)
-        if (choice) {
-          recolorSelectedStickyNote(choice.color)
+        if (key.name === "up") {
+          const next = Math.max(0, actionMenuIndexRef.current - 1)
+          actionMenuIndexRef.current = next
+          flushSync(() => setActionMenuIndex(next))
+          return
+        }
+        if (key.name === "down") {
+          const next = Math.min(actions.length - 1, actionMenuIndexRef.current + 1)
+          actionMenuIndexRef.current = next
+          flushSync(() => setActionMenuIndex(next))
+          return
+        }
+        if (key.name === "return") {
+          key.preventDefault()
+          executeCanvasAction(actions[actionMenuIndexRef.current] ?? "help")
+          return
         }
         return
       }
+      if (overlayRef.current === "info") {
+        if (key.name === "escape" || key.name === "space") {
+          closeCanvasOverlay()
+          return
+        }
+        if (key.name === "return") {
+          key.preventDefault()
+          closeCanvasOverlay()
+          startEstablishedStickyNoteEdit()
+          return
+        }
+        return
+      }
+      if (overlayRef.current === "move") {
+        if (key.name === "escape") {
+          closeCanvasOverlay()
+          return
+        }
+        if (key.name === "return") {
+          commitMovePreview()
+          return
+        }
+        const direction = canvasDirectionForKey(key.name)
+        if (direction) {
+          movePreview(direction)
+        }
+        return
+      }
+
+      if (provisionalStickyNoteRef.current || establishedStickyNoteEditRef.current) {
+        if (
+          isStickyNoteSaveKey(
+            key.name,
+            key.ctrl,
+            (capabilitiesOverride ?? detectedCapabilities)?.kitty_keyboard ?? false,
+          )
+        ) {
+          key.preventDefault()
+          key.stopPropagation()
+          saveActiveStickyNoteDraft()
+          return
+        }
+        if (key.name === "escape") {
+          key.preventDefault()
+          key.stopPropagation()
+          if (provisionalStickyNoteRef.current) {
+            if (provisionalStickyNoteRef.current.publicationRequested) {
+              flushSync(() => setNotice({ kind: "status", message: "Sticky Note is being saved…" }))
+            } else {
+              discardProvisionalStickyNoteDraft()
+            }
+          } else if (establishedStickyNoteEditRef.current) {
+            releaseEstablishedStickyNoteEdit()
+          }
+          return
+        }
+        if (
+          (provisionalStickyNoteRef.current?.publicationRequested ||
+            establishedStickyNoteEditRef.current?.publicationRequested) &&
+          key.name !== "escape"
+        ) {
+          key.preventDefault()
+          key.stopPropagation()
+          return
+        }
+        return
+      }
+
       if (!sharedBoardMutationsEnabled()) {
         if (key.name === "escape") {
           openView("boards")
@@ -2952,130 +3265,38 @@ export function TerminalShell({
           flushSync(() => setOverlay("help"))
           return
         }
-        if (key.name === "q") {
-          renderer.destroy()
-        }
         return
       }
-      if (modeRef.current === "navigate") {
-        if (key.name === "n") {
-          startProvisionalStickyNote()
-          return
-        }
-        if (key.name === "d") {
-          key.preventDefault()
-          key.stopPropagation()
-          startStickyNoteDeletion()
-          return
-        }
-        if (key.name === "tab") {
-          key.preventDefault()
-          cycleSelectedStickyNote()
-          return
-        }
-        if (key.name === "c") {
-          openStickyNoteColorPicker()
-          return
-        }
-        if (key.name === "[" || key.name === "]") {
-          key.preventDefault()
-          reorderSelectedStickyNote(key.name === "[" ? "lower" : "raise")
-          return
-        }
-        const direction = canvasDirectionForKey(key.name)
-        if (
-          direction &&
-          key.shift &&
-          !key.ctrl &&
-          !key.meta &&
-          !key.option &&
-          !key.super &&
-          !key.hyper
-        ) {
-          key.preventDefault()
-          moveSelectedStickyNote(direction)
-          return
-        }
-        if (
-          direction &&
-          !key.shift &&
-          !key.meta &&
-          !key.option &&
-          !key.super &&
-          !key.hyper
-        ) {
-          key.preventDefault()
-          updateCanvasNavigation(direction, key.ctrl)
-          return
-        }
-        if (key.name === "return") {
-          startEstablishedStickyNoteEdit()
-          return
-        }
-        if (key.name === "escape") {
-          openView("boards")
-          return
-        }
+      if (key.name === "space") {
+        openCanvasActions()
+        return
       }
-      if (modeRef.current === "edit" && key.name === "escape") {
+      if (key.name === "tab") {
         key.preventDefault()
-        key.stopPropagation()
-        if (provisionalStickyNoteRef.current) {
-          releaseProvisionalStickyNote()
-        } else if (establishedStickyNoteEditRef.current) {
-          releaseEstablishedStickyNoteEdit()
+        setStableCanvasMode(stableModeRef.current === "navigate" ? "select" : "navigate")
+        return
+      }
+      if (key.name === "return") {
+        key.preventDefault()
+        if (stableModeRef.current === "navigate") {
+          startProvisionalStickyNote()
         } else {
-          flushSync(() => setMode("navigate"))
+          startEstablishedStickyNoteEdit()
         }
         return
       }
-      if (
-        modeRef.current === "edit" &&
-        (provisionalStickyNoteRef.current || establishedStickyNoteEditRef.current)
-      ) {
-        if (key.name === "backspace") {
-          key.preventDefault()
-          const activeText = provisionalStickyNoteRef.current?.text ??
-            establishedStickyNoteEditRef.current?.text ?? ""
-          let graphemes: string[]
-          try {
-            graphemes = splitUserPerceivedCharacters(activeText)
-          } catch {
-            flushSync(() => setNotice({
-              kind: "error",
-              message: USER_PERCEIVED_CHARACTER_SEGMENTATION_UNAVAILABLE,
-            }))
-            return
-          }
-          handleActiveStickyNoteTextChange(graphemes.slice(0, -1).join(""))
-          return
-        }
-        if (key.name === "return" || key.name === "kpenter" || key.name === "linefeed") {
-          if (!key.meta && !key.ctrl && !key.super) {
-            key.preventDefault()
-            appendActiveStickyNoteText("\n")
-            return
-          }
-        }
-        if (
-          !key.ctrl &&
-          !key.meta &&
-          !key.super &&
-          !key.hyper &&
-          key.sequence.length > 0 &&
-          [...key.sequence].every((character) => character >= " " && character !== "\u007f")
-        ) {
-          key.preventDefault()
-          appendActiveStickyNoteText(key.sequence)
-          return
-        }
+      const direction = canvasDirectionForKey(key.name)
+      if (direction && !key.ctrl && !key.meta && !key.option && !key.super && !key.hyper) {
+        key.preventDefault()
+        updateCanvasNavigation(direction)
+        return
+      }
+      if (key.name === "escape") {
+        openView("boards")
+        return
       }
       if (key.name === "?") {
         flushSync(() => setOverlay("help"))
-        return
-      }
-      if (key.name === "q") {
-        renderer.destroy()
         return
       }
       return
@@ -3086,29 +3307,21 @@ export function TerminalShell({
         openView("boards")
         return
       }
-      if (key.name === "up" || key.name === "k") {
+      if (key.name === "up") {
         moveSelection(-1)
         return
       }
-      if (key.name === "down" || key.name === "j") {
+      if (key.name === "down") {
         moveSelection(1)
         return
       }
-      if (key.name === "r" || (key.name === "return" && selectedIndexRef.current === 2)) {
-        openForm("rename-board", "board-actions", key.name)
-        return
-      }
-      if (key.name === "t" || (key.name === "return" && selectedIndexRef.current === 3)) {
-        void rotateSelectedJoinCode()
-        return
-      }
-      if (key.name === "d" || (key.name === "return" && selectedIndexRef.current === 0)) {
-        openBoardDeleteConfirmation(key.name === "d" ? key.name : null)
-        return
-      }
-      if (key.name === "l" || (key.name === "return" && selectedIndexRef.current === 1)) {
-        openLeaveConfirmation()
-        return
+      if (key.name === "return") {
+        switch (selectedIndexRef.current) {
+          case 0: openBoardDeleteConfirmation(); return
+          case 1: openLeaveConfirmation(); return
+          case 2: openForm("rename-board", "board-actions"); return
+          case 3: void rotateSelectedJoinCode(); return
+        }
       }
     }
 
@@ -3120,15 +3333,21 @@ export function TerminalShell({
     }
 
     if (viewRef.current === "confirmation") {
-      if (key.name === "y") {
-        if (confirmationActionRef.current === "leave") {
+      if (key.name === "left" || key.name === "right") {
+        const next = selectedIndexRef.current === 0 ? 1 : 0
+        flushSync(() => setSelectedIndex(next))
+        return
+      }
+      if (key.name === "return") {
+        const confirmed = selectedIndexRef.current === 1
+        if (confirmed && confirmationActionRef.current === "leave") {
           void leaveSelectedBoard()
         } else {
-          resolveConfirmation(true)
+          resolveConfirmation(confirmed)
         }
         return
       }
-      if (key.name === "n" || key.name === "escape") {
+      if (key.name === "escape") {
         resolveConfirmation(false)
         return
       }
@@ -3144,33 +3363,14 @@ export function TerminalShell({
       return
     }
 
-    if (key.name === "q") {
-      renderer.destroy()
-    }
-  })
-
-  usePaste((event) => {
-    if (
-      sessionStateRef.current === "checking" ||
-      signOutPendingRef.current ||
-      boardActionPendingRef.current ||
-      viewRef.current !== "canvas" ||
-      modeRef.current !== "edit" ||
-      !sharedBoardMutationsEnabled() ||
-      (!provisionalStickyNoteRef.current && !establishedStickyNoteEditRef.current)
-    ) {
-      return
-    }
-
-    event.preventDefault()
-    event.stopPropagation()
-    appendActiveStickyNoteText(decodePasteBytes(event.bytes))
+    return
   })
 
   if (width < MIN_TERMINAL_WIDTH || height < MIN_TERMINAL_HEIGHT) {
     return <ResizeRequiredScreen width={width} height={height} />
   }
 
+  const activeCanvasActions = view === "canvas" ? canvasActions() : []
   const content = overlay === "help" ? (
     <HelpOverlay />
   ) : view === "home" ? (
@@ -3196,10 +3396,16 @@ export function TerminalShell({
       onSubmit={deleteSelectedBoard}
     />
   ) : view === "confirmation" ? (
-    <ShellConfirmation action={confirmationAction} deletion={stickyNoteDeletion} />
+    <ShellConfirmation
+      action={confirmationAction}
+      deletion={stickyNoteDeletion}
+      selectedIndex={selectedIndex}
+    />
   ) : view === "canvas" ? (
     <CanvasSurface
       mode={mode}
+      stableMode={stableMode}
+      overlay={overlay}
       snapshot={boardSnapshot}
       connectionState={boardConnectionState}
       pending={boardOpenPending}
@@ -3208,16 +3414,20 @@ export function TerminalShell({
       cursor={canvasCursor}
       viewport={canvasViewport}
       viewportSize={canvasViewportSize}
-      panelWidth={getCanvasPanelWidth(width)}
       selectedStickyNoteId={selectedStickyNoteId ?? stickyNotesAtCanvasCursor(
         boardSnapshot?.stickyNotes ?? [],
         canvasCursor,
       )[0]?.id ?? null}
-      colorPickerNote={colorPickerStickyNoteId
-        ? boardSnapshot?.stickyNotes?.find((note) => note.id === colorPickerStickyNoteId) ?? null
-        : null}
+      authenticatedUsername={authenticatedUsername}
       provisionalStickyNote={provisionalStickyNote}
       establishedStickyNoteEdit={establishedStickyNoteEdit}
+      infoNote={infoStickyNoteId
+        ? boardSnapshot?.stickyNotes?.find((note) => note.id === infoStickyNoteId) ?? null
+        : null}
+      movingStickyNote={movingStickyNote}
+      actionItems={activeCanvasActions.map((action) => canvasActionLabel(action))}
+      actionDescriptions={activeCanvasActions.map((action) => canvasActionDescription(action))}
+      actionMenuIndex={actionMenuIndex}
       onProvisionalTextChange={handleProvisionalStickyNoteTextChange}
       onEstablishedTextChange={handleEstablishedStickyNoteTextChange}
     />
@@ -3240,6 +3450,7 @@ export function TerminalShell({
       pending={boardsPending}
       notice={notice}
       joinCode={boardCodeNotice}
+      onCopyJoinCode={copyVisibleJoinCode}
       hasBoardClient={Boolean(boardClient)}
       sessionState={sessionState}
     />
@@ -3248,24 +3459,26 @@ export function TerminalShell({
     overlay === "help"
       ? "Escape close"
       : view === "form"
-      ? "Tab fields · Enter submit · Escape cancel"
+      ? "↑↓ fields · Enter submit · Escape cancel"
         : view === "board-delete-confirmation"
           ? "Type exact Board name · Enter delete permanently · Escape cancel"
         : view === "confirmation"
-          ? "y confirm · n cancel · Escape cancel"
+          ? confirmationAction === "delete-sticky-note"
+            ? "←→ choose · Enter delete · Escape cancel"
+            : "←→ choose · Enter confirm · Escape cancel"
           : view === "canvas"
-            ? colorPickerStickyNoteId
-              ? "1-8 choose Color · Escape cancel"
-              : mode === "edit"
-                ? "? help · q quit · Escape leave Edit mode"
-                : "? help · q quit · c Color picker · Escape back"
+            ? mode === "edit"
+              ? "Ctrl+Enter save · Escape cancel"
+              : `${boardSnapshot?.board.name ?? "Board"} · ${boardConnectionState === "connected" ? "Connected" : boardConnectionState ?? "Connecting"} · ${boardSnapshot?.presence.length ?? 0} online · Space actions`
           : view === "boards"
-            ? "f filter · c create · Escape back"
-          : "? help · x sign out · q quit"
+            ? boardCodeNotice
+              ? "c copy code · ? help · Ctrl+C quit"
+              : "? help · Ctrl+C quit"
+          : "? help · Ctrl+C quit"
 
   return (
     <ShellFrame
-      label={authenticatedUsername ?? label}
+      label={view === "canvas" ? "" : authenticatedUsername ?? label}
       mode={mode}
       capabilities={capabilitiesOverride ?? detectedCapabilities}
       footerHint={footerHint}
@@ -3288,14 +3501,12 @@ function ShellFrame({
   footerHint: string
   children: ReactNode
 }) {
-  const modeLabel = mode === "navigate" ? "NAVIGATE" : "EDIT"
-  const modeColor = mode === "navigate" ? colors.accent : colors.warning
-  const colorMode = getTerminalColorMode(capabilities)
-  const capabilityLabel = colorMode === "truecolor"
-    ? "Unicode · 256-color baseline active · truecolor detected"
-    : colorMode === "ansi256"
-      ? "Unicode · 256-color baseline active"
-      : "Unicode · color capability pending"
+  const modeLabel = mode === "edit" ? "EDIT" : mode.toUpperCase()
+  const modeColor = mode === "edit"
+    ? colors.warning
+    : mode === "select"
+      ? colors.accentStrong
+      : colors.accent
 
   return (
     <box
@@ -3304,41 +3515,60 @@ function ShellFrame({
         height: "100%",
         backgroundColor: colors.background,
         flexDirection: "column",
-        padding: 1,
       }}
     >
+      <box style={{ flexGrow: 1, width: "100%", minHeight: 0 }}>{children}</box>
       <box
         style={{
           width: "100%",
-          height: 3,
-          border: true,
-          borderStyle: "rounded",
-          borderColor: colors.border,
-          paddingX: 1,
+          height: 1,
+          paddingX: 2,
           flexDirection: "row",
           gap: 2,
+          flexShrink: 0,
         }}
       >
-        <text fg={colors.accent}>TUISCRIB · SHELL</text>
-        <text fg={modeColor}>MODE  {modeLabel}</text>
+        <text fg={modeColor} style={{ flexShrink: 0 }}>{modeLabel}</text>
+        <text fg={colors.muted} style={{ flexShrink: 1 }}>{footerHint}</text>
+        <box style={{ flexGrow: 1 }} />
+        <text fg={colors.subtle} style={{ flexShrink: 0 }}>{label}</text>
       </box>
+    </box>
+  )
+}
 
-      <box style={{ flexGrow: 1, width: "100%", paddingY: 1 }}>{children}</box>
-
-      <box
-        style={{
-          width: "100%",
-          height: 4,
-          border: true,
-          borderStyle: "rounded",
-          borderColor: colors.border,
-          paddingX: 1,
-          flexDirection: "column",
-        }}
-      >
-        <text fg={colors.muted}>{capabilityLabel}</text>
-        <text fg={colors.muted}>User: {label} · {footerHint}</text>
-      </box>
+function MenuRow({
+  label,
+  selected,
+  detail,
+  tone = "default",
+}: {
+  label: string
+  selected: boolean
+  detail?: string
+  tone?: "default" | "danger"
+}) {
+  const markerColor = tone === "danger" ? colors.error : colors.accent
+  return (
+    <box
+      style={{
+        height: 1,
+        width: "100%",
+        backgroundColor: selected ? colors.panelActive : undefined,
+        paddingLeft: 1,
+        paddingRight: 1,
+        flexDirection: "row",
+      }}
+    >
+      <text fg={selected ? markerColor : colors.subtle} style={{ width: 2 }}>
+        {selected ? "›" : " "}
+      </text>
+      <text fg={selected ? colors.text : tone === "danger" ? colors.error : colors.text}>
+        {label}
+        {detail ? <span style={{ fg: selected ? colors.muted : colors.subtle }}> · {detail}</span> : null}
+      </text>
+      <box style={{ flexGrow: 1 }} />
+      {selected ? <text fg={markerColor}>Enter</text> : null}
     </box>
   )
 }
@@ -3354,6 +3584,7 @@ function ShellHome({
 }) {
   return (
     <ShellMenu
+      heroTitle="TUISCRIB"
       title="Welcome to Tuiscrib"
       description="Choose a workflow. Every action remains keyboard reachable."
       items={homeMenu}
@@ -3379,6 +3610,7 @@ function BoardList({
   pending,
   notice,
   joinCode,
+  onCopyJoinCode,
   hasBoardClient,
   sessionState,
 }: {
@@ -3389,9 +3621,14 @@ function BoardList({
   pending: boolean
   notice: ShellNotice | null
   joinCode: BoardCodeNotice | null
+  onCopyJoinCode: () => void
   hasBoardClient: boolean
   sessionState: SessionState
 }) {
+  const availableActions = boards.length > 0 ? boardMenu.slice(1) : boardMenu
+  const selectedAction = selectedIndex >= boards.length
+    ? availableActions[selectedIndex - boards.length]
+    : undefined
   return (
     <box
       style={{
@@ -3403,48 +3640,107 @@ function BoardList({
     >
       <box
         style={{
-          width: 72,
-          border: true,
-          borderStyle: "rounded",
-          borderColor: colors.border,
+          width: SHELL_PANEL_WIDTH,
+          height: SHELL_BOARD_PANEL_HEIGHT,
           backgroundColor: colors.panel,
+          border: true,
+          borderStyle: "single",
+          borderColor: colors.border,
           padding: 2,
           flexDirection: "column",
         }}
       >
-        <text fg={colors.text}>Board list</text>
-        <text fg={colors.muted}>
-          {hasBoardClient
-            ? "Every Membership appears here; Owner marks the governing Member."
-            : "Memberships will appear here when the Board workflow is connected."}
-        </text>
-        <text fg={colors.accent}>Filter: {filter || "all Boards"}</text>
-        {pending ? <text fg={colors.muted}>Loading Memberships…</text> : null}
-        {!pending && hasBoardClient && sessionState !== "signed-in" ? (
-          <text fg={colors.warning}>Sign in to load Memberships.</text>
-        ) : null}
-        {!pending && hasBoardClient && sessionState === "signed-in" && boards.length === 0 ? (
-          <text fg={colors.muted}>No Memberships match this filter.</text>
-        ) : null}
-        {boards.map((board, index) => (
-          <text key={board.id} fg={colors.text}>
-            {index === selectedBoardIndex ? "›" : " "} {board.name} · {board.role === "owner" ? "Owner" : "Member"}
+        <box style={{ flexDirection: "column", flexGrow: 1, minHeight: 0 }}>
+          <box style={{ width: "100%", alignItems: "center" }}>
+            <text fg={colors.accentStrong}>Boards</text>
+          </box>
+          <text fg={colors.muted}>{filter ? `Search: ${filter}` : "Your shared Boards"}</text>
+          {pending ? <text fg={colors.muted}>Loading…</text> : null}
+          {!pending && hasBoardClient && sessionState !== "signed-in" ? (
+            <text fg={colors.warning}>Sign in to load Memberships.</text>
+          ) : null}
+          {!pending && hasBoardClient && sessionState === "signed-in" && boards.length === 0 ? (
+            <text fg={colors.muted}>No Memberships match this filter.</text>
+          ) : null}
+          {boards.map((board, index) => (
+            <MenuRow
+              key={board.id}
+              label={board.name}
+              detail={board.role === "owner" ? "Owner" : "Member"}
+              selected={index === selectedIndex}
+            />
+          ))}
+          {joinCode ? (
+            <JoinCodeCallout joinCode={joinCode} onCopy={onCopyJoinCode} />
+          ) : null}
+          {availableActions.map((item, index) => (
+            <MenuRow
+              key={item.id}
+              label={item.label}
+              selected={index + boards.length === selectedIndex}
+            />
+          ))}
+          {selectedAction ? <text fg={colors.subtle}>{selectedAction.description}</text> : null}
+        </box>
+        <box style={{ flexDirection: "column", flexShrink: 0 }}>
+          {notice?.kind === "error" ? <text fg={colors.error}>Error: {notice.message}</text> : null}
+          {notice?.kind === "status" ? <text fg={colors.success}>Status: {notice.message}</text> : null}
+          <text fg={colors.muted}>
+            {joinCode
+              ? "↑↓ choose · Enter select · c copy code · Esc back"
+              : "↑↓ choose · Enter select · Esc back"}
           </text>
-        ))}
-        {joinCode ? (
-          <text fg={colors.success}>
-            {joinCode.kind === "initial" ? "Initial" : "Rotated"} Join Code (shown once): {joinCode.code}
-          </text>
-        ) : null}
-        {boardMenu.map((item, index) => (
-          <text key={item.key} fg={index === selectedIndex ? colors.accent : colors.text}>
-            {index === selectedIndex ? "›" : " "} {item.key} {item.label}
-          </text>
-        ))}
-        <text fg={colors.muted}>[/] select Board · f filter Board name · ↑↓ / jk move · Enter choose · Escape back</text>
-        {notice?.kind === "error" ? <text fg={colors.error}>Error: {notice.message}</text> : null}
-        {notice?.kind === "status" ? <text fg={colors.success}>Status: {notice.message}</text> : null}
+        </box>
       </box>
+    </box>
+  )
+}
+
+function JoinCodeCallout({
+  joinCode,
+  onCopy,
+}: {
+  joinCode: BoardCodeNotice
+  onCopy: () => void
+}) {
+  const renderer = useRenderer()
+  const [copyHovered, setCopyHovered] = useState(false)
+
+  return (
+    <box
+      style={{
+        width: "100%",
+        height: 2,
+        backgroundColor: colors.panelStrong,
+        paddingX: 1,
+        flexDirection: "column",
+      }}
+    >
+      <box style={{ width: "100%", height: 1, flexDirection: "row" }}>
+        <text fg={colors.muted}>
+          {joinCode.kind === "initial" ? "Initial" : "Rotated"} Join Code · shown once
+        </text>
+        <box style={{ flexGrow: 1 }} />
+        <box
+          onMouseDown={onCopy}
+          onMouseOver={() => {
+            setCopyHovered(true)
+            renderer.setMousePointer("pointer")
+          }}
+          onMouseOut={() => {
+            setCopyHovered(false)
+            renderer.setMousePointer("default")
+          }}
+          style={{
+            height: 1,
+            backgroundColor: copyHovered ? colors.accentStrong : colors.accent,
+            paddingX: 1,
+          }}
+        >
+          <text fg={colors.accentInk}>[ c ] Copy</text>
+        </box>
+      </box>
+      <text selectable fg={colors.success} attributes={menuTitleAttributes}>{joinCode.code}</text>
     </box>
   )
 }
@@ -3519,11 +3815,12 @@ function BoardDeleteConfirmation({
     >
       <box
         style={{
-          width: 72,
-          border: true,
-          borderStyle: "rounded",
-          borderColor: colors.error,
+          width: SHELL_PANEL_WIDTH,
+          height: SHELL_BOARD_PANEL_HEIGHT,
           backgroundColor: colors.panel,
+          border: true,
+          borderStyle: "single",
+          borderColor: colors.border,
           padding: 2,
           flexDirection: "column",
         }}
@@ -3546,8 +3843,8 @@ function BoardDeleteConfirmation({
                 width={38}
                 maxLength={80}
                 placeholder={board.name}
-                backgroundColor={colors.panelStrong}
-                focusedBackgroundColor="#3b2020"
+                backgroundColor={colors.input}
+                focusedBackgroundColor={colors.dangerSurface}
                 textColor={colors.text}
                 focusedTextColor={colors.text}
                 cursorColor={colors.error}
@@ -3579,11 +3876,18 @@ function BoardDeleteConfirmation({
 function ShellConfirmation({
   action,
   deletion,
+  selectedIndex,
 }: {
   action: ConfirmationAction
   deletion: StickyNoteDeletion | null
+  selectedIndex: number
 }) {
   const deletingStickyNote = action === "delete-sticky-note" && deletion
+  const confirmLabel = deletingStickyNote
+    ? "Delete permanently"
+    : action === "leave"
+      ? "Leave Board"
+      : "Confirm"
   return (
     <box
       style={{
@@ -3595,11 +3899,12 @@ function ShellConfirmation({
     >
       <box
         style={{
-          width: 64,
-          border: true,
-          borderStyle: "rounded",
-          borderColor: colors.warning,
+          width: SHELL_PANEL_WIDTH,
+          height: SHELL_CONFIRMATION_PANEL_HEIGHT,
           backgroundColor: colors.panel,
+          border: true,
+          borderStyle: "single",
+          borderColor: colors.border,
           padding: 2,
           flexDirection: "column",
         }}
@@ -3620,16 +3925,58 @@ function ShellConfirmation({
                 ? "Deletion is being committed before acknowledgement…"
                 : "The Edit Claim is held for this confirmation."}
             </text>
-            <text fg={colors.warning}>y permanently delete · n cancel + release Edit Claim · Escape cancel</text>
           </>
         ) : (
           <>
             <text fg={colors.text}>This action changes shared Board state.</text>
             <text fg={colors.muted}>Review the action before continuing.</text>
-            <text fg={colors.warning}>y confirm · n cancel · Escape cancel</text>
           </>
         )}
+        <box style={{ width: "100%", height: 1, flexDirection: "row", gap: 2 }}>
+          <ConfirmationChoice label="Cancel" selected={selectedIndex === 0} />
+          <ConfirmationChoice
+            label={confirmLabel}
+            selected={selectedIndex === 1}
+            tone={deletingStickyNote ? "danger" : "default"}
+          />
+        </box>
+        <text fg={colors.warning}>
+          ←→ choose · Enter {deletingStickyNote ? "delete" : "confirm"} · Escape cancel
+        </text>
       </box>
+    </box>
+  )
+}
+
+function ConfirmationChoice({
+  label,
+  selected,
+  tone = "default",
+}: {
+  label: string
+  selected: boolean
+  tone?: "default" | "danger"
+}) {
+  const selectedColor = tone === "danger" ? colors.error : colors.accent
+  return (
+    <box
+      style={{
+        width: 32,
+        height: 1,
+        paddingX: 1,
+        backgroundColor: selected
+          ? tone === "danger"
+            ? colors.dangerSurface
+            : colors.panelActive
+          : colors.panelStrong,
+        flexDirection: "row",
+      }}
+    >
+      <text fg={selected ? selectedColor : colors.muted}>
+        {selected ? "› " : "  "}{label}
+      </text>
+      <box style={{ flexGrow: 1 }} />
+      {selected ? <text fg={selectedColor}>Enter</text> : null}
     </box>
   )
 }
@@ -3641,6 +3988,8 @@ function previewStickyNoteText(text: string): string {
 
 function CanvasSurface({
   mode,
+  stableMode,
+  overlay,
   snapshot,
   connectionState,
   pending,
@@ -3649,15 +3998,21 @@ function CanvasSurface({
   cursor,
   viewport,
   viewportSize,
-  panelWidth,
   selectedStickyNoteId,
-  colorPickerNote,
+  authenticatedUsername,
   provisionalStickyNote,
   establishedStickyNoteEdit,
+  infoNote,
+  movingStickyNote,
+  actionItems,
+  actionDescriptions,
+  actionMenuIndex,
   onProvisionalTextChange,
   onEstablishedTextChange,
 }: {
   mode: ShellMode
+  stableMode: Exclude<ShellMode, "edit">
+  overlay: ShellOverlay
   snapshot: BoardSnapshot | null
   connectionState: BoardConnectionState | null
   pending: boolean
@@ -3666,27 +4021,19 @@ function CanvasSurface({
   cursor: StickyNotePosition
   viewport: StickyNotePosition
   viewportSize: CanvasViewportSize
-  panelWidth: number
   selectedStickyNoteId: string | null
-  colorPickerNote: StickyNote | null
+  authenticatedUsername: string | null
   provisionalStickyNote: ProvisionalStickyNote | null
   establishedStickyNoteEdit: EstablishedStickyNoteEdit | null
+  infoNote: StickyNote | null
+  movingStickyNote: MovingStickyNote | null
+  actionItems: string[]
+  actionDescriptions: string[]
+  actionMenuIndex: number
   onProvisionalTextChange(text: string): boolean
   onEstablishedTextChange(text: string): boolean
 }) {
   const notes = snapshot?.stickyNotes ?? []
-  const selectedNote = selectedStickyNoteId
-    ? notes.find((note) => note.id === selectedStickyNoteId)
-    : undefined
-  const overlappingNotes = stickyNotesAtCanvasCursor(notes, cursor)
-  const overlapSelectionIndex = selectedNote
-    ? overlappingNotes.findIndex((note) => note.id === selectedNote.id)
-    : -1
-  const selectedNoteText = establishedStickyNoteEdit && selectedNote &&
-    establishedStickyNoteEdit.stickyNoteId === selectedNote.id
-    ? establishedStickyNoteEdit.text
-    : selectedNote?.text
-  const statusBeforeCanvas = status?.includes("Stacking Order") || status?.includes("Position") || false
   const visibleNotes = sortCanvasStackingOrder(
     notes.filter((note) => canvasRectIntersectsViewport(
       stickyNoteCanvasFootprint(note),
@@ -3694,238 +4041,207 @@ function CanvasSurface({
       viewportSize,
     )),
   )
+  const editorOpen = Boolean(provisionalStickyNote || establishedStickyNoteEdit)
+  const overlayPanelInset = 6
+  const overlayPanelWidth = CANVAS_OVERLAY_WIDTH
+  const overlayPanelHeight = CANVAS_OVERLAY_HEIGHT
+  const overlayPanelTop = Math.max(0, Math.floor((viewportSize.height - overlayPanelHeight) / 2))
+  const editorHeight = Math.max(3, overlayPanelHeight - 10)
+  const cursorScreen = canvasCoordinateToScreen(cursor, viewport)
+  const connectionMessage = connectionState === "connecting" || pending
+    ? "Opening Board…"
+    : connectionState === "reconnecting"
+      ? "Reconnecting…"
+      : connectionState === "waking"
+        ? "Waking the Tuiscrib Service…"
+        : connectionState === "unavailable"
+          ? "Service unavailable"
+          : connectionState === "unauthorized"
+            ? "Session unauthorized"
+            : connectionState === "closed"
+              ? "Board connection closed"
+              : null
 
   return (
     <box
-      style={{
-        width: "100%",
-        height: "100%",
-        alignItems: "center",
-        justifyContent: "center",
+        style={{
+          width: "100%",
+          height: "100%",
+          backgroundColor: colors.canvas,
+          position: "relative",
+          overflow: "hidden",
       }}
     >
       <box
         style={{
-          width: panelWidth,
-          border: true,
-          borderStyle: "rounded",
-          borderColor: mode === "navigate" ? colors.accent : colors.warning,
-          backgroundColor: colors.panel,
-          padding: 1,
-          flexDirection: "column",
+          width: viewportSize.width,
+          height: viewportSize.height,
+          backgroundColor: colors.canvas,
+          position: "absolute",
+          left: 0,
+          top: 0,
+          overflow: "hidden",
         }}
       >
-        <text fg={colors.text}>Board canvas</text>
-        {connectionState === "waking" ? (
-          <>
-            <text fg={colors.warning}>Connection: WAKING</text>
-            <text fg={colors.muted}>Render or hosted PostgreSQL is waking up.</text>
-            <text fg={colors.warning}>Retrying with bounded backoff; shared mutations disabled.</text>
-            {error ? <text fg={colors.error}>Error: {error}</text> : null}
-          </>
-        ) : connectionState === "reconnecting" ? (
-          <>
-            <text fg={colors.warning}>Connection: RECONNECTING</text>
-            <text fg={colors.muted}>No offline Board state is retained.</text>
-            <text fg={colors.warning}>Shared mutations disabled until a fresh snapshot arrives.</text>
-            {error ? <text fg={colors.error}>Error: {error}</text> : null}
-          </>
-        ) : connectionState === "unavailable" ? (
-          <>
-            <text fg={colors.error}>Connection: UNAVAILABLE</text>
-            <text fg={colors.muted}>The Tuiscrib Service is unavailable.</text>
-            <text fg={colors.warning}>Retrying with bounded backoff; shared mutations disabled.</text>
-            {error ? <text fg={colors.error}>Error: {error}</text> : null}
-          </>
-        ) : connectionState === "unauthorized" ? (
-          <>
-            <text fg={colors.error}>Connection: UNAUTHORIZED</text>
-            <text fg={colors.muted}>This Terminal Session is unauthorized.</text>
-            <text fg={colors.warning}>Sign in again; shared mutations disabled.</text>
-            {error ? <text fg={colors.error}>Error: {error}</text> : null}
-          </>
-        ) : connectionState === "closed" ? (
-          <>
-            <text fg={colors.error}>Connection: CLOSED</text>
-            <text fg={colors.muted}>Board collaboration is no longer available.</text>
-            <text fg={colors.warning}>Shared mutations disabled.</text>
-            {error ? <text fg={colors.error}>Error: {error}</text> : null}
-          </>
-        ) : connectionState === "connecting" || pending ? (
-          <>
-            <text fg={colors.accent}>Opening Board over WebSocket…</text>
-            <text fg={colors.muted}>Loading one authoritative snapshot.</text>
-          </>
-        ) : error && !snapshot ? (
-          <text fg={colors.error}>Error: {error}</text>
-        ) : snapshot ? (
-          <>
-            <text fg={colors.success}>
-              Board revision: {snapshot.revision} · Connection: CONNECTED · Board: {snapshot.board.name}
-            </text>
-            <text fg={colors.muted}>
-              Canvas cursor: ({cursor.x}, {cursor.y}) · Viewport origin: ({viewport.x}, {viewport.y}) · visible {viewportSize.width}×{viewportSize.height}
-            </text>
-            <text fg={colors.text}>
-              Selected Sticky Note: {selectedNoteText ?? "none"}{selectedNote ? ` · Stacking Order ${selectedNote.stackingOrder}` : ""}
-            </text>
-            {overlappingNotes.length > 1 ? (
-              <>
-                <text fg={colors.accent}>
-                  Overlap selection: {overlapSelectionIndex >= 0 ? overlapSelectionIndex + 1 : "—"}/{overlappingNotes.length} · Tab cycles front-to-back
-                </text>
-                <text fg={colors.muted}>
-                  Stacking Order back-to-front: {sortCanvasStackingOrder(overlappingNotes, "back-to-front")
-                    .map((note) => `${note.text} (${note.stackingOrder})`)
-                    .join(" · ")}
-                </text>
-              </>
-            ) : null}
-            <text fg={colors.text}>Viewing Presence</text>
-            {snapshot.presence.map((presence) => (
-              <text key={presence.member.username} fg={colors.muted}>
-                {presence.member.username} · {presence.activity}
-              </text>
-            ))}
-            {(snapshot.editClaims ?? []).some((claim) => claim.status === "disconnected") ? (
-              <>
-                <text fg={colors.text}>Edit Claims</text>
-                {(snapshot.editClaims ?? []).filter((claim) => claim.status === "disconnected").map((claim) => (
-                  <text key={claim.stickyNoteId} fg={claim.status === "disconnected" ? colors.warning : colors.muted}>
-                    Edit Claim · {claim.stickyNoteId} · {claim.holder.username} · {claim.status === "disconnected"
-                      ? "disconnected · grace active"
-                      : "connected"}
-                  </text>
-                ))}
-              </>
-            ) : null}
-            <text fg={colors.accent}>
-              Sticky Notes: {snapshot.stickyNotes?.length ?? 0} · {mode === "navigate"
-                ? selectedStickyNoteId
-                  ? "Navigate mode · Sticky Note selected"
-                  : cursor.x === 0 && cursor.y === 0
-                    ? "Navigate mode · cursor at the stable origin"
-                    : `Navigate mode · cursor at (${cursor.x}, ${cursor.y})`
-                : `Edit mode · ${provisionalStickyNote ? "creation text editing active" : "established text editing active"}`}
-                {mode === "edit" && establishedStickyNoteEdit
-                  ? ` · Claim ${establishedStickyNoteEdit.status}`
-                  : ""}
-            </text>
-            {selectedNote ? (
-              <text fg={colors.muted}>
-                Color {selectedNote.color} · Authored by {selectedNote.authorship.member.username} · Last edit by {selectedNote.lastEdit.member.username}
-              </text>
-            ) : null}
-            {error && snapshot ? <text fg={colors.error}>Error: {error}</text> : null}
-            {colorPickerNote ? <StickyNoteColorPicker note={colorPickerNote} /> : null}
-            {statusBeforeCanvas ? <text fg={colors.success}>Status: {status}</text> : null}
-            <box
-              style={{
-                width: viewportSize.width,
-                height: viewportSize.height,
-                backgroundColor: colors.background,
-                position: "relative",
-                overflow: "hidden",
-                flexShrink: 0,
-              }}
-            >
-              {visibleNotes.map((note) => {
-                const screen = canvasCoordinateToScreen(note.position, viewport)
-                const left = screen.x
-                const top = screen.y
-                return establishedStickyNoteEdit?.stickyNoteId === note.id && mode === "edit" ? (
-                  <EstablishedStickyNoteEditorCard
-                    key={note.id}
-                    note={note}
-                    draft={establishedStickyNoteEdit}
-                    left={left}
-                    top={top}
-                    onTextChange={onEstablishedTextChange}
-                  />
-                ) : (
-                  <StickyNoteCard
-                    key={note.id}
-                    note={note}
-                    selected={note.id === selectedStickyNoteId}
-                    left={left}
-                    top={top}
-                  />
-                )
-              })}
-              {cursor.x >= viewport.x &&
-                cursor.x < viewport.x + viewportSize.width &&
-                cursor.y >= viewport.y &&
-                cursor.y < viewport.y + viewportSize.height ? (() => {
-                  const screen = canvasCoordinateToScreen(cursor, viewport)
-                  return (
-                    <text
-                      style={{
-                        position: "absolute",
-                        left: screen.x,
-                        top: screen.y,
-                        zIndex: 1_000,
-                      }}
-                      fg={colors.accent}
-                    >
-                      +
-                    </text>
-                  )
-                })() : null}
-            </box>
-            {provisionalStickyNote ? (
-              <box
-                style={{
-                  width: 40,
-                  border: true,
-                  borderStyle: "rounded",
-                  borderColor: colors.warning,
-                  backgroundColor: colors.panelStrong,
-                  padding: 1,
-                  flexDirection: "column",
-                }}
-              >
-                <text fg={colors.warning}>
-                  Provisional Sticky Note · {provisionalStickyNote.status === "requesting"
-                    ? "authority pending"
-                    : provisionalStickyNote.status === "granted"
-                      ? "authority granted"
-                      : "durable"}
-                </text>
-                <text fg={colors.muted}>
-                  Position ({provisionalStickyNote.position.x}, {provisionalStickyNote.position.y}) · Color {provisionalStickyNote.color}
-                </text>
-                <text fg={colors.muted}>
-                  Draft characters: {userPerceivedCharacterCountLabel(provisionalStickyNote.text)}
-                </text>
-                <StickyNoteEditor
-                  draft={{
-                    editorId: provisionalStickyNote.provisionalId,
-                    text: provisionalStickyNote.text,
-                    status: provisionalStickyNote.status,
-                  }}
-                  mode={mode}
-                  onTextChange={onProvisionalTextChange}
-                />
-              </box>
-            ) : null}
-            {!statusBeforeCanvas && status ? <text fg={colors.success}>Status: {status}</text> : null}
-          </>
-        ) : mode === "navigate" ? (
-          <>
-            <text fg={colors.accent}>
-              {cursor.x === 0 && cursor.y === 0
-                ? "Navigate mode · cursor at the stable origin"
-                : `Navigate mode · cursor at (${cursor.x}, ${cursor.y})`}
-            </text>
-            <text fg={colors.muted}>Enter edit · Tab cycle overlap · [ lower · ] raise · c Color · arrows / hjkl move cursor · Shift+arrows / Shift+hjkl move Sticky Note</text>
-          </>
-        ) : (
-          <>
-            <text fg={colors.warning}>Edit mode · keyboard text editing active</text>
-            <text fg={colors.muted}>Escape leave Edit mode · n creates a durable Sticky Note</text>
-          </>
-        )}
+        {stableMode === "navigate" && mode !== "edit" ? (
+          <text
+            fg={colors.accent}
+            style={{ position: "absolute", left: cursorScreen.x, top: cursorScreen.y, zIndex: 0 }}
+          >
+            ·
+          </text>
+        ) : null}
+        {visibleNotes.map((note) => {
+          const position = movingStickyNote?.stickyNoteId === note.id
+            ? movingStickyNote.position
+            : note.position
+          const screen = canvasCoordinateToScreen(position, viewport)
+          const claim = (snapshot?.editClaims ?? []).find((item) => item.stickyNoteId === note.id)
+          return (
+            <StickyNoteCard
+              key={note.id}
+              note={note}
+              selected={stableMode === "select" && note.id === selectedStickyNoteId}
+              claimed={Boolean(claim && claim.holder.username !== authenticatedUsername)}
+              left={screen.x}
+              top={screen.y}
+            />
+          )
+        })}
+        {!connectionMessage && (!snapshot || notes.length === 0) ? (
+          <box style={{ position: "absolute", left: Math.max(0, Math.floor(viewportSize.width / 2) - 14), top: Math.max(0, Math.floor(viewportSize.height / 2) - 1), width: 28 }}>
+            <text fg={colors.muted}>No Sticky Notes yet</text>
+            <text fg={colors.text}>Enter to add one</text>
+          </box>
+        ) : null}
+        {connectionMessage ? (
+          <box style={{ position: "absolute", left: Math.max(0, Math.floor(viewportSize.width / 2) - 18), top: Math.max(0, Math.floor(viewportSize.height / 2) - 1), width: 36 }}>
+            <text fg={connectionState === "unavailable" || connectionState === "unauthorized" || connectionState === "closed" ? colors.error : colors.accent}>{connectionMessage}</text>
+            {error ? <text fg={colors.muted}>{error}</text> : null}
+          </box>
+        ) : null}
       </box>
+
+      {(editorOpen || (overlay !== "none" && overlay !== "help" && overlay !== "move")) ? (
+        <box style={{ position: "absolute", left: 0, top: 0, width: "100%", height: "100%", backgroundColor: colors.overlay, opacity: 0.82, zIndex: 100 }} />
+      ) : null}
+
+      {overlay === "actions" ? (
+        <OpenCodePanel width={CANVAS_ACTION_PANEL_WIDTH} height={CANVAS_ACTION_PANEL_HEIGHT} left={Math.floor((viewportSize.width - CANVAS_ACTION_PANEL_WIDTH) / 2)} top={Math.max(1, Math.floor((viewportSize.height - CANVAS_ACTION_PANEL_HEIGHT) / 2))} zIndex={200}>
+          <text fg={colors.accentStrong}>Actions</text>
+          <text fg={colors.muted}>Choose what to do with this view.</text>
+          <box style={{ marginTop: 1, flexDirection: "column" }}>
+            {actionItems.map((item, index) => (
+              <MenuRow
+                key={item}
+                label={item}
+                selected={index === actionMenuIndex}
+                tone={item === "Delete" ? "danger" : "default"}
+              />
+            ))}
+          </box>
+          <text fg={colors.subtle}>{actionDescriptions[actionMenuIndex] ?? ""}</text>
+          <text fg={colors.muted}>↑↓ choose · Enter select · Esc close</text>
+        </OpenCodePanel>
+      ) : null}
+
+      {overlay === "info" && infoNote ? (
+        <OpenCodePanel width={overlayPanelWidth} height={overlayPanelHeight} left={Math.max(0, Math.floor((viewportSize.width - overlayPanelWidth) / 2))} top={overlayPanelTop} zIndex={200}>
+          <text fg={colors.accentStrong}>Sticky Note</text>
+          <text fg={colors.muted}>{infoNote.authorship.member.username} · last edit by {infoNote.lastEdit.member.username} at {infoNote.lastEdit.at}</text>
+          <box style={{ marginTop: 1, flexGrow: 1, minHeight: 0 }}>
+            <text fg={colors.text} wrapMode="word" width={overlayPanelWidth - overlayPanelInset}>{infoNote.text}</text>
+          </box>
+          <text fg={colors.muted}>Enter edit · Esc close</text>
+        </OpenCodePanel>
+      ) : null}
+
+      {overlay === "move" && movingStickyNote ? (
+        <box
+          style={{
+            position: "absolute",
+            left: Math.max(1, Math.floor((viewportSize.width - CANVAS_MOVE_PANEL_WIDTH) / 2)),
+            top: 1,
+            width: CANVAS_MOVE_PANEL_WIDTH,
+            height: CANVAS_MOVE_PANEL_HEIGHT,
+            backgroundColor: colors.panel,
+            border: true,
+            borderStyle: "single",
+            borderColor: colors.accent,
+            paddingX: 1,
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 200,
+          }}
+        >
+          <text fg={colors.accentStrong}>
+            Move Sticky Note · ({movingStickyNote.position.x}, {movingStickyNote.position.y}) · arrows move · Enter save · Esc cancel
+          </text>
+        </box>
+      ) : null}
+
+      {editorOpen ? (
+        <OpenCodePanel width={overlayPanelWidth} height={overlayPanelHeight} left={Math.max(0, Math.floor((viewportSize.width - overlayPanelWidth) / 2))} top={overlayPanelTop} zIndex={250}>
+          <text fg={colors.accentStrong}>{provisionalStickyNote ? "Add Sticky Note" : "Edit Sticky Note"}</text>
+          <text fg={colors.muted}>{provisionalStickyNote?.status === "requesting" || establishedStickyNoteEdit?.status === "requesting" ? "Requesting Edit Claim…" : "Ctrl+Enter save · Esc cancel"}</text>
+          <box style={{ marginTop: 1, flexGrow: 1, minHeight: 0 }}>
+            <StickyNoteEditor
+              draft={{
+                editorId: provisionalStickyNote?.provisionalId ?? establishedStickyNoteEdit?.stickyNoteId ?? "editor",
+                text: provisionalStickyNote?.text ?? establishedStickyNoteEdit?.text ?? "",
+                status: provisionalStickyNote?.status ?? establishedStickyNoteEdit?.status ?? "editing",
+              }}
+              mode="edit"
+              width={overlayPanelWidth - overlayPanelInset}
+              height={editorHeight}
+              onTextChange={provisionalStickyNote ? onProvisionalTextChange : onEstablishedTextChange}
+            />
+          </box>
+        </OpenCodePanel>
+      ) : null}
+
+      {(status || (!connectionMessage && error)) ? (
+        <box style={{ position: "absolute", left: 2, bottom: 1, zIndex: 300 }}>
+          <text fg={error ? colors.error : colors.success}>{error ?? status}</text>
+        </box>
+      ) : null}
+    </box>
+  )
+}
+
+function OpenCodePanel({
+  width,
+  height,
+  left,
+  top,
+  zIndex,
+  children,
+}: {
+  width: number
+  height?: number
+  left: number
+  top: number
+  zIndex: number
+  children: ReactNode
+}) {
+  return (
+    <box
+      style={{
+        position: "absolute",
+        left,
+        top,
+        width,
+        height,
+        backgroundColor: colors.panel,
+        border: true,
+        borderStyle: "single",
+        borderColor: colors.border,
+        padding: 2,
+        flexDirection: "column",
+        zIndex,
+      }}
+    >
+      {children}
     </box>
   )
 }
@@ -3933,24 +4249,29 @@ function CanvasSurface({
 function canvasDirectionForKey(name: string): CanvasDirection | undefined {
   switch (name) {
     case "left":
-    case "h":
-    case "H":
       return "left"
     case "right":
-    case "l":
-    case "L":
       return "right"
     case "up":
-    case "k":
-    case "K":
       return "up"
     case "down":
-    case "j":
-    case "J":
       return "down"
     default:
       return undefined
   }
+}
+
+function isStickyNoteSaveKey(
+  name: string,
+  ctrl: boolean,
+  kittyKeyboardSupported: boolean,
+): boolean {
+  // Raw terminals encode Ctrl+Enter as LF ("linefeed"). Kitty keyboard
+  // reports it as a modified Return/KPEnter. Terminals that cannot advertise
+  // Kitty support collapse Ctrl+Enter to an indistinguishable plain Return;
+  // in that fallback mode, Return is the only reliable save gesture.
+  const isEnter = name === "return" || name === "kpenter" || name === "enter"
+  return name === "linefeed" || (ctrl && isEnter) || (!kittyKeyboardSupported && isEnter)
 }
 
 function userPerceivedCharacterCountLabel(value: string): string {
@@ -3961,66 +4282,20 @@ function userPerceivedCharacterCountLabel(value: string): string {
   }
 }
 
-function EstablishedStickyNoteEditorCard({
-  note,
-  draft,
-  left,
-  top,
-  onTextChange,
-}: {
-  note: StickyNote
-  draft: EstablishedStickyNoteEdit
-  left?: number
-  top?: number
-  onTextChange(text: string): boolean
-}) {
-  const positioned = left !== undefined && top !== undefined
-  return (
-    <box
-      style={{
-        width: CANVAS_STICKY_NOTE_CARD_WIDTH,
-        ...(positioned ? { position: "absolute" as const, left, top, zIndex: note.stackingOrder + 1 } : {}),
-        border: true,
-        borderStyle: "rounded",
-        borderColor: colors.warning,
-        backgroundColor: colors.panelStrong,
-        padding: 1,
-        flexDirection: "column",
-      }}
-    >
-      <text fg={colors.warning}>Established Sticky Note · Edit Claim {draft.status}</text>
-      <text fg={colors.muted}>
-        Position ({note.position.x}, {note.position.y}) · v{draft.textVersion} · Color {note.color}
-      </text>
-      <StickyNoteEditor
-        draft={{ editorId: draft.stickyNoteId, text: draft.text, status: draft.status }}
-        mode="edit"
-        ignoreInitialShortcutInput={false}
-        ignoreInitialContentChange
-        onTextChange={onTextChange}
-      />
-      <text fg={colors.muted}>Authored by {note.authorship.member.username} · {note.createdAt}</text>
-      <text fg={colors.muted}>Last edit by {note.lastEdit.member.username} · {note.lastEdit.at}</text>
-    </box>
-  )
-}
-
 function StickyNoteEditor({
   draft,
   mode,
-  ignoreInitialShortcutInput = true,
-  ignoreInitialContentChange = false,
+  width = 32,
+  height,
   onTextChange,
 }: {
   draft: StickyNoteEditorDraft
   mode: ShellMode
-  ignoreInitialShortcutInput?: boolean
-  ignoreInitialContentChange?: boolean
+  width?: number
+  height?: number
   onTextChange(text: string): boolean
 }) {
   const textareaRef = useRef<TextareaRenderable | null>(null)
-  const ignoreShortcutInputRef = useRef(ignoreInitialShortcutInput)
-  const ignoreInitialContentChangeRef = useRef(ignoreInitialContentChange)
   const syncingTextRef = useRef(false)
   const [text, setText] = useState(draft.text)
   const textRef = useRef(draft.text)
@@ -4033,6 +4308,7 @@ function StickyNoteEditor({
       if (textareaRef.current) {
         syncingTextRef.current = true
         textareaRef.current.setText(draft.text)
+        textareaRef.current.cursorOffset = draft.text.length
         syncingTextRef.current = false
       }
     }
@@ -4045,49 +4321,34 @@ function StickyNoteEditor({
       syncingTextRef.current = false
     }
     if (mode === "edit") {
+      if (textareaRef.current && textareaRef.current.cursorOffset === 0 && draft.text.length > 0) {
+        textareaRef.current.cursorOffset = draft.text.length
+      }
       textareaRef.current?.focus()
     }
-    ignoreShortcutInputRef.current = ignoreInitialShortcutInput
-  }, [draft.editorId, draft.status, mode, ignoreInitialShortcutInput])
-
-  useLayoutEffect(() => {
-    ignoreInitialContentChangeRef.current = ignoreInitialContentChange
-  }, [draft.editorId, draft.status, ignoreInitialContentChange])
+  }, [draft.editorId, draft.status, mode])
 
   const handleContentChange = () => {
     const nextText = textareaRef.current?.plainText ?? ""
     if (syncingTextRef.current) {
       return
     }
-    if (ignoreInitialContentChangeRef.current) {
-      ignoreInitialContentChangeRef.current = false
-      if (nextText !== draft.text) {
-        syncingTextRef.current = true
-        textareaRef.current?.setText(draft.text)
-        syncingTextRef.current = false
-        textRef.current = draft.text
-        setText(draft.text)
-      }
-      return
-    }
-    if (ignoreShortcutInputRef.current && nextText === "n") {
-      ignoreShortcutInputRef.current = false
-      textareaRef.current?.setText("")
-      textRef.current = ""
-      setText("")
-      onTextChange("")
-      return
-    }
-    ignoreShortcutInputRef.current = false
     const previousText = textRef.current
+    // Update the local mirror before notifying the parent. The parent updates
+    // synchronously, so doing this afterward would make the sync effect call
+    // setText on every keypress and reset the editor cursor to the beginning.
+    textRef.current = nextText
     if (!onTextChange(nextText)) {
+      textRef.current = previousText
       syncingTextRef.current = true
-      textareaRef.current?.setText(previousText)
+      if (textareaRef.current) {
+        textareaRef.current.setText(previousText)
+        textareaRef.current.cursorOffset = previousText.length
+      }
       syncingTextRef.current = false
       setText(previousText)
       return
     }
-    textRef.current = nextText
     setText(nextText)
   }
 
@@ -4098,21 +4359,21 @@ function StickyNoteEditor({
           textareaRef.current = textarea
         }}
         focused={mode === "edit"}
-        width={32}
-        height={Math.max(3, lines.length + 2)}
+        width={width}
+        height={height ?? Math.max(3, lines.length + 2)}
         initialValue={draft.text}
         placeholder="Type a Sticky Note…"
         placeholderColor={colors.muted}
         wrapMode="char"
-        backgroundColor={colors.panel}
-        focusedBackgroundColor="#26374d"
+        backgroundColor={colors.input}
+        focusedBackgroundColor={colors.panelActive}
         textColor={colors.text}
         focusedTextColor={colors.text}
         cursorColor={colors.accent}
         onContentChange={handleContentChange}
       />
       <text fg={colors.muted}>
-        {lines.length} wrapped line{lines.length === 1 ? "" : "s"} · publishes after idle
+        {userPerceivedCharacterCountLabel(text)} characters · {lines.length} wrapped line{lines.length === 1 ? "" : "s"}
       </text>
     </>
   )
@@ -4121,84 +4382,64 @@ function StickyNoteEditor({
 function StickyNoteCard({
   note,
   selected = false,
+  claimed = false,
   left,
   top,
 }: {
   note: StickyNote
   selected?: boolean
+  claimed?: boolean
   left?: number
   top?: number
 }) {
-  const lines = wrapStickyNoteText(note.text)
   const positioned = left !== undefined && top !== undefined
+  const preview = firstNonEmptyStickyNoteLine(note.text)
   return (
     <box
       style={{
         width: CANVAS_STICKY_NOTE_CARD_WIDTH,
-        ...(positioned ? { position: "absolute" as const, left, top, zIndex: note.stackingOrder + 1 } : {}),
-        border: true,
-        borderStyle: "rounded",
-        borderColor: selected ? colors.accent : stickyNoteColor(note.color),
-        backgroundColor: colors.panelStrong,
-        padding: 1,
-        flexDirection: "column",
+        height: CANVAS_STICKY_NOTE_CARD_HEIGHT,
+        ...(positioned
+          ? { position: "absolute" as const, left, top, zIndex: selected ? CANVAS_MAX_COORDINATE + 1 : note.stackingOrder + 1 }
+          : {}),
+        backgroundColor: selected ? colors.accent : colors.panelStrong,
+        flexDirection: "row",
+        alignItems: "center",
+        paddingLeft: 1,
+        paddingRight: 1,
       }}
     >
-      <text fg={stickyNoteColor(note.color)}>
-        {selected ? "› " : "  "}Sticky Note · ({note.position.x}, {note.position.y}) · v{note.textVersion} · Color {note.color}
+      <text fg={selected ? colors.accentInk : claimed ? colors.accent : colors.subtle}>
+        {selected ? "› " : claimed ? "✎ " : "  "}
       </text>
-      {lines.map((line, index) => (
-        <text key={`${note.id}-line-${index}`} fg={colors.text}>{line || " "}</text>
-      ))}
-      <text fg={colors.muted}>Authored by {note.authorship.member.username} · {note.createdAt}</text>
-      <text fg={colors.muted}>Last edit by {note.lastEdit.member.username} · {note.lastEdit.at}</text>
+      <text fg={selected ? colors.accentInk : colors.text} wrapMode="none" overflow="hidden" width={CANVAS_STICKY_NOTE_CARD_WIDTH - 4}>
+        {preview}
+      </text>
     </box>
   )
 }
 
-function StickyNoteColorPicker({ note }: { note: StickyNote }) {
-  return (
-    <box
-      style={{
-        width: 42,
-        border: true,
-        borderStyle: "rounded",
-        borderColor: colors.warning,
-        backgroundColor: colors.panelStrong,
-        padding: 1,
-        flexDirection: "column",
-      }}
-    >
-      <text fg={colors.warning}>Color picker · Sticky Note</text>
-      <text fg={colors.muted}>Color carries no workflow meaning.</text>
-      <text fg={colors.text}>Current: {note.color}</text>
-      {stickyNoteColorChoices.slice(0, 4).map((choice, index) => {
-        const pairedChoice = stickyNoteColorChoices[index + 4]
-        return (
-          <text key={choice.key} fg={stickyNoteColor(choice.color)}>
-            {choice.key} {choice.color}{choice.color === note.color ? " (current)" : ""}   {pairedChoice.key} {pairedChoice.color}{pairedChoice.color === note.color ? " (current)" : ""}
-          </text>
-        )
-      })}
-      <text fg={colors.muted}>Choose 1-8 · Escape cancel</text>
-    </box>
-  )
-}
-
-function stickyNoteColor(color: StickyNoteColor): string {
-  switch (color) {
-    case "amber":
-    case "yellow":
-      return colors.warning
-    case "green":
-      return colors.success
-    case "red":
-      return colors.error
-    case "blue":
-    case "cyan":
-    case "magenta":
-    case "violet":
-      return colors.accent
+function firstNonEmptyStickyNoteLine(text: string): string {
+  const line = text.split("\n").find((candidate) => candidate.trim().length > 0)?.trim() ?? ""
+  const maxLength = CANVAS_STICKY_NOTE_CARD_WIDTH - 4
+  if (!line) {
+    return " "
+  }
+  try {
+    const segments = splitUserPerceivedCharacters(line)
+    let preview = ""
+    let width = 0
+    for (const segment of segments) {
+      const segmentWidth = Bun.stringWidth(segment)
+      if (width + segmentWidth > maxLength - 1) {
+        return `${preview}…`
+      }
+      preview += segment
+      width += segmentWidth
+    }
+    return preview
+  } catch {
+    return line.length > maxLength ? `${line.slice(0, maxLength - 1)}…` : line
   }
 }
 
@@ -4244,7 +4485,11 @@ function ShellForm({
     if (pending) {
       return
     }
-    if (key.name === "tab") {
+    if (key.name === "up") {
+      focusField(focusedIndexRef.current - 1)
+      return
+    }
+    if (key.name === "down" || key.name === "tab") {
       focusField(focusedIndexRef.current + 1)
       return
     }
@@ -4264,16 +4509,17 @@ function ShellForm({
     >
       <box
         style={{
-          width: 64,
-          border: true,
-          borderStyle: "rounded",
-          borderColor: colors.border,
+          width: SHELL_PANEL_WIDTH,
+          height: SHELL_FORM_PANEL_HEIGHT,
           backgroundColor: colors.panel,
+          border: true,
+          borderStyle: "single",
+          borderColor: colors.border,
           padding: 2,
           flexDirection: "column",
         }}
       >
-        <text fg={colors.accent}>{definition.title}</text>
+        <text fg={colors.accentStrong}>{definition.title}</text>
         <text fg={colors.muted}>{definition.description}</text>
         {definition.warning ? <text fg={colors.warning}>{definition.warning}</text> : null}
         {definition.fields.map((field, index) => (
@@ -4289,10 +4535,10 @@ function ShellForm({
               width={36}
               maxLength={field.maxLength}
               placeholder={field.placeholder}
-              backgroundColor={colors.panelStrong}
-              focusedBackgroundColor={field.sensitive ? colors.panelStrong : "#26374d"}
-              textColor={field.sensitive ? colors.panelStrong : colors.text}
-              focusedTextColor={field.sensitive ? colors.panelStrong : colors.text}
+              backgroundColor={colors.input}
+              focusedBackgroundColor={field.sensitive ? colors.input : colors.panelActive}
+              textColor={field.sensitive ? colors.muted : colors.text}
+              focusedTextColor={field.sensitive ? colors.muted : colors.text}
               cursorColor={colors.accent}
               showCursor={!field.sensitive}
               onInput={(value) => {
@@ -4354,7 +4600,7 @@ function ShellForm({
         {pending ? <text fg={colors.muted}>Contacting the Tuiscrib Service…</text> : null}
         {inputError ? <text fg={colors.error}>Error: {inputError}</text> : null}
         {notice?.kind === "error" ? <text fg={colors.error}>Error: {notice.message}</text> : null}
-        <text fg={colors.muted}>Tab next field · Enter submit · Escape cancel</text>
+        <text fg={colors.muted}>↑↓ fields · Enter submit · Escape cancel</text>
       </box>
     </box>
   )
@@ -4455,6 +4701,7 @@ function updateMaskedInputValue(
 }
 
 function ShellMenu({
+  heroTitle,
   title,
   description,
   items,
@@ -4463,6 +4710,7 @@ function ShellMenu({
   error,
   canGoBack = true,
 }: {
+  heroTitle?: string
   title: string
   description: string
   items: ShellMenuItem[]
@@ -4471,6 +4719,7 @@ function ShellMenu({
   error?: string
   canGoBack?: boolean
 }) {
+  const selectedItem = items[selectedIndex]
   return (
     <box
       style={{
@@ -4482,27 +4731,43 @@ function ShellMenu({
     >
       <box
         style={{
-          width: 58,
-          border: true,
-          borderStyle: "rounded",
-          borderColor: colors.border,
+          width: SHELL_PANEL_WIDTH,
+          height: SHELL_MENU_PANEL_HEIGHT,
           backgroundColor: colors.panel,
+          border: true,
+          borderStyle: "single",
+          borderColor: colors.border,
           padding: 2,
           flexDirection: "column",
         }}
       >
-        <text fg={colors.text}>{title}</text>
-        <text fg={colors.muted}>{description}</text>
-        {items.map((item, index) => (
-          <text key={item.key} fg={index === selectedIndex ? colors.accent : colors.text}>
-            {index === selectedIndex ? "›" : " "} {item.key} {item.label}
+        <box style={{ flexDirection: "column", flexGrow: 1, minHeight: 0 }}>
+          {heroTitle ? (
+            <box style={{ width: "100%", alignItems: "center", marginBottom: 1 }}>
+              <text fg={colors.accentStrong} attributes={menuTitleAttributes}>{heroTitle}</text>
+            </box>
+          ) : null}
+          <box style={{ width: "100%", alignItems: "center" }}>
+            <text fg={colors.accentStrong}>{title}</text>
+          </box>
+          <text fg={colors.muted}>{description}</text>
+          {items.map((item, index) => (
+            <MenuRow
+              key={item.id}
+              label={item.label}
+              selected={index === selectedIndex}
+              tone={item.id === "delete" ? "danger" : "default"}
+            />
+          ))}
+          {selectedItem ? <text fg={colors.subtle}>{selectedItem.description}</text> : null}
+        </box>
+        <box style={{ flexDirection: "column", flexShrink: 0 }}>
+          {error ? <text fg={colors.error}>Error: {error}</text> : null}
+          <text fg={colors.muted}>{status}</text>
+          <text fg={colors.muted}>
+            {canGoBack ? "↑↓ choose · Enter select · Esc back" : "↑↓ choose · Enter select"}
           </text>
-        ))}
-        <text fg={colors.muted}>
-          {canGoBack ? "↑↓ / jk move · Enter choose · Escape back" : "↑↓ / jk move · Enter choose"}
-        </text>
-        {error ? <text fg={colors.error}>Error: {error}</text> : null}
-        <text fg={colors.success}>Status: {status}</text>
+        </box>
       </box>
     </box>
   )
@@ -4520,27 +4785,24 @@ function HelpOverlay() {
     >
       <box
         style={{
-          width: 64,
-          border: true,
-          borderStyle: "rounded",
-          borderColor: colors.accent,
+          width: SHELL_PANEL_WIDTH,
+          height: SHELL_HELP_PANEL_HEIGHT,
           backgroundColor: colors.panel,
+          border: true,
+          borderStyle: "single",
+          borderColor: colors.border,
           padding: 2,
           flexDirection: "column",
         }}
       >
-        <text fg={colors.accent}>Keyboard help</text>
-        <text fg={colors.text}>Navigate mode · move through menus and the Board.</text>
-        <text fg={colors.text}>Edit mode     · type into the selected Sticky Note.</text>
-        <text fg={colors.muted}>b boards · s sign in · r register</text>
-        <text fg={colors.muted}>Boards: o open · c create · f filter · j join · a actions</text>
-        <text fg={colors.muted}>Owner actions: r rename · t rotate Join Code</text>
-        <text fg={colors.muted}>Forms: Tab next field · Enter submit · Escape cancel</text>
-        <text fg={colors.muted}>Confirmations: y confirm · n cancel</text>
-        <text fg={colors.muted}>↑↓ / jk move · Enter choose · Escape back</text>
-        <text fg={colors.muted}>Canvas: Tab cycle overlap · [ lower · ] raise · c Color picker · Shift+arrows / Shift+hjkl move Sticky Note · 1-8 choose</text>
-        <text fg={colors.muted}>x sign out · q quit · ? toggle help</text>
-        <text fg={colors.success}>Escape close</text>
+        <text fg={colors.accentStrong}>Keyboard help</text>
+        <text fg={colors.text}>Arrows navigate · Enter acts · Space opens actions.</text>
+        <text fg={colors.text}>Tab switches Navigate and Select.</text>
+        <text fg={colors.muted}>Canvas: Enter add or edit · Info, Move, Delete live in Actions.</text>
+        <text fg={colors.muted}>Editor: Ctrl+Enter save · Escape cancel.</text>
+        <text fg={colors.muted}>Forms: ↑↓ fields · Enter submit · Escape cancel.</text>
+        <text fg={colors.muted}>Ctrl+C quit · Escape close or go back.</text>
+        <text fg={colors.accent}>Escape close</text>
       </box>
     </box>
   )
@@ -4563,13 +4825,13 @@ function ResizeRequiredScreen({ width, height }: { width: number; height: number
           width: "100%",
           border: true,
           borderStyle: "rounded",
-          borderColor: colors.warning,
+          borderColor: colors.borderStrong,
           backgroundColor: colors.panel,
           padding: 2,
           flexDirection: "column",
         }}
       >
-        <text fg={colors.warning}>Resize required</text>
+        <text fg={colors.accentStrong}>Resize required</text>
         <text fg={colors.text}>
           Tuiscrib needs at least {MIN_TERMINAL_WIDTH} by {MIN_TERMINAL_HEIGHT} cells.
         </text>

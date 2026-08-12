@@ -3,8 +3,9 @@ import { compareStickyNoteStackingOrder } from "@tuiscrib/contracts"
 export const CANVAS_MIN_COORDINATE = -1_000_000
 export const CANVAS_MAX_COORDINATE = 1_000_000
 export const CANVAS_PANEL_WIDTH = 72
-export const CANVAS_STICKY_NOTE_CARD_WIDTH = 40
-export const CANVAS_STICKY_NOTE_CARD_VERTICAL_OVERHEAD = 7
+export const CANVAS_STICKY_NOTE_CARD_WIDTH = 32
+export const CANVAS_STICKY_NOTE_CARD_HEIGHT = 3
+export const CANVAS_STICKY_NOTE_CARD_VERTICAL_OVERHEAD = 2
 
 export type CanvasCoordinate = {
   x: number
@@ -81,7 +82,7 @@ export function createCanvasNavigationState(): CanvasNavigationState {
 }
 
 export function getCanvasPanelWidth(terminalWidth: number): number {
-  return Math.max(1, Math.min(CANVAS_PANEL_WIDTH, terminalWidth - 4))
+  return Math.max(1, terminalWidth)
 }
 
 export function getCanvasViewportSize(
@@ -90,9 +91,109 @@ export function getCanvasViewportSize(
 ): CanvasViewportSize {
   const panelWidth = getCanvasPanelWidth(terminalWidth)
   return {
-    width: Math.max(1, panelWidth - 8),
-    height: Math.max(3, Math.min(8, terminalHeight - 21)),
+    width: Math.max(1, panelWidth),
+    height: Math.max(1, terminalHeight - 1),
   }
+}
+
+export function getCanvasStickyNoteCardRect(position: CanvasCoordinate): CanvasRect {
+  return {
+    left: position.x,
+    top: position.y,
+    width: CANVAS_STICKY_NOTE_CARD_WIDTH,
+    height: CANVAS_STICKY_NOTE_CARD_HEIGHT,
+  }
+}
+
+export function nearestCanvasNote<T extends { id: string; position: CanvasCoordinate }>(
+  notes: readonly T[],
+  point: CanvasCoordinate,
+): T | undefined {
+  return [...notes].sort((left, right) => {
+    const leftDistance = distanceSquared(noteCenter(left.position), point)
+    const rightDistance = distanceSquared(noteCenter(right.position), point)
+    if (leftDistance !== rightDistance) return leftDistance - rightDistance
+    const leftStackingOrder = "stackingOrder" in left && typeof left.stackingOrder === "number"
+      ? left.stackingOrder
+      : undefined
+    const rightStackingOrder = "stackingOrder" in right && typeof right.stackingOrder === "number"
+      ? right.stackingOrder
+      : undefined
+    if (leftStackingOrder !== undefined && rightStackingOrder !== undefined && leftStackingOrder !== rightStackingOrder) {
+      return rightStackingOrder - leftStackingOrder
+    }
+    return compareCanvasNoteIds(left.id, right.id)
+  })[0]
+}
+
+export function selectCanvasNoteInDirection<T extends { id: string; position: CanvasCoordinate }>(
+  notes: readonly T[],
+  selectedId: string | null,
+  direction: CanvasDirection,
+): T | undefined {
+  if (notes.length === 0) return undefined
+  const current = selectedId ? notes.find((note) => note.id === selectedId) : undefined
+  if (!current) return nearestCanvasNote(notes, { x: 0, y: 0 })
+
+  const origin = noteCenter(current.position)
+  const candidates = notes.filter((note) => {
+    if (note.id === current.id) return false
+    const center = noteCenter(note.position)
+    switch (direction) {
+      case "left": return center.x < origin.x
+      case "right": return center.x > origin.x
+      case "up": return center.y < origin.y
+      case "down": return center.y > origin.y
+    }
+  })
+  return candidates.sort((left, right) => {
+    const leftCenter = noteCenter(left.position)
+    const rightCenter = noteCenter(right.position)
+    const leftPrimary = primaryDistance(origin, leftCenter, direction)
+    const rightPrimary = primaryDistance(origin, rightCenter, direction)
+    if (leftPrimary !== rightPrimary) return leftPrimary - rightPrimary
+    const leftSecondary = secondaryDistance(origin, leftCenter, direction)
+    const rightSecondary = secondaryDistance(origin, rightCenter, direction)
+    if (leftSecondary !== rightSecondary) return leftSecondary - rightSecondary
+    return compareCanvasNoteIds(left.id, right.id)
+  })[0]
+}
+
+function compareCanvasNoteIds(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0
+}
+
+function noteCenter(position: CanvasCoordinate): CanvasCoordinate {
+  return {
+    x: position.x + Math.floor(CANVAS_STICKY_NOTE_CARD_WIDTH / 2),
+    y: position.y + Math.floor(CANVAS_STICKY_NOTE_CARD_HEIGHT / 2),
+  }
+}
+
+function distanceSquared(left: CanvasCoordinate, right: CanvasCoordinate): number {
+  const dx = left.x - right.x
+  const dy = left.y - right.y
+  return dx * dx + dy * dy
+}
+
+function primaryDistance(
+  origin: CanvasCoordinate,
+  candidate: CanvasCoordinate,
+  direction: CanvasDirection,
+): number {
+  return direction === "left" || direction === "right"
+    ? Math.abs(candidate.x - origin.x)
+    : Math.abs(candidate.y - origin.y)
+}
+
+function secondaryDistance(
+  origin: CanvasCoordinate,
+  candidate: CanvasCoordinate,
+  direction: CanvasDirection,
+): number {
+  return direction === "left" || direction === "right"
+    ? Math.abs(candidate.y - origin.y)
+    : Math.abs(candidate.x - origin.x)
 }
 
 export function canvasCoordinateToScreen(

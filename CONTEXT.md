@@ -17,8 +17,12 @@ A named freeform canvas of sticky notes that forms the boundary of collaboration
 _Avoid_: Workspace, wall, collection
 
 **Sticky Note**:
-A board contribution consisting of bounded multiline Unicode plain text, a decorative color, authorship, and a position.
+A board contribution consisting of one Body, a decorative color, authorship, and a position. It has no separate title.
 _Avoid_: Card, item, document
+
+**Body**:
+The bounded multiline Unicode plain text of a Sticky Note. Meaningful whitespace is preserved.
+_Avoid_: Title, content, text
 
 **User-perceived Unicode character**:
 One Unicode extended grapheme cluster segmented by `Intl.Segmenter("und", { granularity: "grapheme" })`; the shared contracts fail closed when that runtime is unavailable.

@@ -1,0 +1,3 @@
+# Use two stable canvas modes
+
+The Board canvas has two stable modes: Navigate pans freely and creates Sticky Notes at the center of the current view, while Select moves spatially between Sticky Notes and exposes the initial core actions valid after creation. Adding, editing, and moving are transient activities that return to the preceding stable mode rather than additional modes. Decorative customization remains backend-compatible but is intentionally not exposed in this first minimal UI slice; this keeps the canvas-first interface predictable and avoids a growing set of overlapping modes. This supersedes the Navigate and Edit mode clause in ADR-0010.

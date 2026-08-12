@@ -1,0 +1,3 @@
+# Save Sticky Note drafts explicitly
+
+Adding or editing a Sticky Note keeps its Body as a session-local draft until the member explicitly saves with Ctrl+Enter; Escape discards the draft and returns directly to the canvas. The terminal client accepts Kitty and raw-terminal encodings of Ctrl+Enter, including the plain-CR fallback used by terminals that cannot disambiguate the modifier, and queues a save requested before creation authority arrives. Other Members see an active Edit Claim but not draft text, and saved text becomes visible only after the Tuiscrib Service durably persists and acknowledges it. This trades live text previews for predictable Save and Cancel behavior and supersedes the debounced text-publication clauses in ADR-0001 and ADR-0007.

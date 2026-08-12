@@ -9,6 +9,8 @@ import {
   createCanvasNavigationState,
   getCanvasStickyNoteCardHeight,
   getCanvasViewportSize,
+  nearestCanvasNote,
+  selectCanvasNoteInDirection,
   sortCanvasStackingOrder,
   type CanvasViewportSize,
 } from "./canvas-navigation.ts"
@@ -96,8 +98,8 @@ test("maps world coordinates to viewport cells and includes only visible edges",
 })
 
 test("uses the rendered Sticky Note card dimensions for viewport culling", () => {
-  expect(getCanvasStickyNoteCardHeight(1)).toBe(8)
-  expect(getCanvasStickyNoteCardHeight(3)).toBe(10)
+  expect(getCanvasStickyNoteCardHeight(1)).toBe(3)
+  expect(getCanvasStickyNoteCardHeight(3)).toBe(5)
   expect(() => getCanvasStickyNoteCardHeight(0)).toThrow(
     "Sticky Note line count must be a positive integer",
   )
@@ -135,9 +137,9 @@ test("uses a deterministic front-to-back Stacking Order for hit testing and cycl
 })
 
 test("derives deterministic viewport sizes for supported and below-minimum terminals", () => {
-  expect(getCanvasViewportSize(80, 24)).toEqual({ width: 64, height: 3 })
-  expect(getCanvasViewportSize(100, 30)).toEqual({ width: 64, height: 8 })
-  expect(getCanvasViewportSize(79, 24)).toEqual({ width: 64, height: 3 })
+  expect(getCanvasViewportSize(80, 24)).toEqual({ width: 80, height: 23 })
+  expect(getCanvasViewportSize(100, 30)).toEqual({ width: 100, height: 29 })
+  expect(getCanvasViewportSize(79, 24)).toEqual({ width: 79, height: 23 })
 })
 
 test("keeps the viewport inside the shared coordinate plane at its bounds", () => {
@@ -150,4 +152,17 @@ test("keeps the viewport inside the shared coordinate plane at its bounds", () =
 
   state = applyCanvasNavigation(state, "right", viewportSize, { pan: true })
   expect(state.viewport.x).toBe(999_997)
+})
+
+test("selects Sticky Notes spatially with ordinary arrow directions", () => {
+  const notes = [
+    { id: "origin", position: { x: 0, y: 0 } },
+    { id: "right", position: { x: 40, y: -2 } },
+    { id: "below", position: { x: 0, y: 8 } },
+  ]
+
+  expect(nearestCanvasNote(notes, { x: 16, y: 1 })?.id).toBe("origin")
+  expect(selectCanvasNoteInDirection(notes, "origin", "right")?.id).toBe("right")
+  expect(selectCanvasNoteInDirection(notes, "origin", "down")?.id).toBe("below")
+  expect(selectCanvasNoteInDirection(notes, "origin", "left")).toBeUndefined()
 })

@@ -31,10 +31,12 @@ test("opens keyboard help from the Navigate shell and returns with Escape", asyn
   await activeSetup.renderOnce()
   const initialFrame = activeSetup.captureCharFrame()
 
+  expect(activeSetup.captureSpans().lines[0]?.spans[0]?.bg.toInts()).toEqual([0, 0, 0, 255])
+  expect(initialFrame).toContain("Welcome to Tuiscrib")
   expect(initialFrame).toContain("TUISCRIB")
-  expect(initialFrame).toContain("MODE  NAVIGATE")
-  expect(initialFrame).toContain("b boards")
-  expect(initialFrame).toContain("? help")
+  expect(initialFrame).toContain("NAVIGATE")
+  expect(initialFrame).toContain("boards")
+  expect(initialFrame).toContain("↑↓ choose · Enter select")
 
   await act(async () => {
     activeSetup?.mockInput.pressKey("?")
@@ -44,7 +46,8 @@ test("opens keyboard help from the Navigate shell and returns with Escape", asyn
   const helpFrame = activeSetup.captureCharFrame()
   expect(helpFrame).toContain("Keyboard help")
   expect(helpFrame).toContain("Escape close")
-  expect(helpFrame).toContain("Navigate mode")
+  expect(helpFrame).toContain("Arrows navigate")
+  expect(helpFrame).toContain("Ctrl+Enter save")
 
   await act(async () => {
     activeSetup?.mockInput.pressEscape()
@@ -53,7 +56,7 @@ test("opens keyboard help from the Navigate shell and returns with Escape", asyn
   })
 
   const returnedFrame = await activeSetup.waitForFrame((frame) => !frame.includes("Keyboard help"))
-  expect(returnedFrame).toContain("MODE  NAVIGATE")
+  expect(returnedFrame).toContain("NAVIGATE")
   expect(returnedFrame).not.toContain("Keyboard help")
 })
 
@@ -65,26 +68,65 @@ test("navigates the shell menu with keyboard hints and opens Boards", async () =
   })
 
   await activeSetup.renderOnce()
+  expectFixedShellPanel(activeSetup.captureCharFrame())
+  expectNavigationPinnedToPanelBottom(
+    activeSetup.captureCharFrame(),
+    "↑↓ choose · Enter select",
+  )
+  const titleLine = activeSetup.captureCharFrame().split("\n").find((line) => line.includes("TUISCRIB"))
+  expect(titleLine?.indexOf("TUISCRIB")).toBe(36)
 
   await act(async () => {
-    activeSetup?.mockInput.pressKey("j")
+    activeSetup?.mockInput.pressArrow("up")
     await activeSetup?.renderOnce()
   })
-
-  expect(activeSetup.captureCharFrame()).toContain("› s sign in")
+  expect(activeSetup.captureCharFrame()).toContain("› sign out")
 
   await act(async () => {
-    activeSetup?.mockInput.pressKey("k")
+    activeSetup?.mockInput.pressArrow("down")
     await activeSetup?.renderOnce()
+  })
+  expect(activeSetup.captureCharFrame()).toContain("› boards")
+
+  await act(async () => {
     activeSetup?.mockInput.pressEnter()
     await activeSetup?.renderOnce()
   })
 
-  expect(activeSetup.captureCharFrame()).toContain("Board list")
-  expect(activeSetup.captureCharFrame()).toContain("o open Board")
-  expect(activeSetup.captureCharFrame()).toContain("c create Board")
-  expect(activeSetup.captureCharFrame()).toContain("j join Board")
+  expect(activeSetup.captureCharFrame()).toContain("Boards")
+  expectFixedShellPanel(activeSetup.captureCharFrame())
+  expectNavigationPinnedToPanelBottom(
+    activeSetup.captureCharFrame(),
+    "↑↓ choose · Enter select · Esc back",
+  )
+  expect(activeSetup.captureCharFrame()).toContain("open Board")
+  expect(activeSetup.captureCharFrame()).toContain("Open the collaboration canvas")
+  expect(activeSetup.captureCharFrame()).toContain("create Board")
+  expect(activeSetup.captureCharFrame()).toContain("join Board")
+  expect(activeSetup.captureCharFrame()).not.toContain("hjkl")
+
+  await act(async () => {
+    activeSetup?.mockInput.pressArrow("down")
+    activeSetup?.mockInput.pressEnter()
+    await activeSetup?.renderOnce()
+  })
+  expect(activeSetup.captureCharFrame()).toContain("Create Board")
+  expectFixedShellPanel(activeSetup.captureCharFrame())
 })
+
+function expectFixedShellPanel(frame: string): void {
+  const topBorder = frame.split("\n").find((line) => line.includes("┌"))
+  expect(topBorder).toContain(`┌${"─".repeat(70)}┐`)
+}
+
+function expectNavigationPinnedToPanelBottom(frame: string, navigation: string): void {
+  const lines = frame.split("\n")
+  const navigationLine = lines.findIndex((line) => line.includes(navigation))
+  const bottomBorder = lines.findIndex((line) => line.includes(`└${"─".repeat(70)}┘`))
+  expect(navigationLine).toBeGreaterThan(-1)
+  expect(bottomBorder).toBeGreaterThan(-1)
+  expect(bottomBorder - navigationLine).toBe(3)
+}
 
 test("redeems a Join Code from the keyboard form and renders the new Membership", async () => {
   const credential = "a".repeat(43)
@@ -164,15 +206,12 @@ test("redeems a Join Code from the keyboard form and renders the new Membership"
     }
     throw new Error(`Timed out waiting for rendered frame\n${lastFrame}`)
   }
-  await waitForFrame((value) => value.includes("Terminal Session restored"))
+  await waitForFrame((value) => value.includes("Boards"))
 
   await act(async () => {
-    activeSetup?.mockInput.pressKey("b")
-    await activeSetup?.renderOnce()
-  })
-  await waitForFrame((value) => value.includes("Board list"))
-  await act(async () => {
-    activeSetup?.mockInput.pressKey("j")
+    activeSetup?.mockInput.pressArrow("down")
+    activeSetup?.mockInput.pressArrow("down")
+    activeSetup?.mockInput.pressEnter()
     await activeSetup?.renderOnce()
   })
   await waitForFrame((value) => value.includes("Join Board"))
@@ -250,7 +289,6 @@ test("confirms leaving a Board from Board actions and removes the Membership", a
     )
     await activeSetup.renderOnce()
   })
-
   const waitForFrame = async (predicate: (frame: string) => boolean): Promise<string> => {
     let matchedFrame: string | undefined
     let lastFrame = ""
@@ -271,26 +309,27 @@ test("confirms leaving a Board from Board actions and removes the Membership", a
     throw new Error(`Timed out waiting for rendered frame\n${lastFrame}`)
   }
 
-  await waitForFrame((value) => value.includes("Terminal Session restored"))
+  await waitForFrame((value) => value.includes("Boards"))
   await act(async () => {
-    activeSetup?.mockInput.pressKey("b")
-    await activeSetup?.renderOnce()
-  })
-  await waitForFrame((value) => value.includes("Ideas · Member"))
-  await act(async () => {
-    activeSetup?.mockInput.pressKey("a")
+    activeSetup?.mockInput.pressArrow("down")
+    activeSetup?.mockInput.pressArrow("down")
+    activeSetup?.mockInput.pressArrow("down")
+    activeSetup?.mockInput.pressEnter()
     await activeSetup?.renderOnce()
   })
   await waitForFrame((value) => value.includes("Board actions"))
   await act(async () => {
-    activeSetup?.mockInput.pressKey("l")
+    activeSetup?.mockInput.pressArrow("down")
+    activeSetup?.mockInput.pressEnter()
     await activeSetup?.renderOnce()
   })
   await waitForFrame((value) => value.includes("Confirm leaving Board"))
   await act(async () => {
     await Bun.sleep(10)
     await activeSetup?.renderOnce()
-    activeSetup?.mockInput.pressKey("y")
+    activeSetup?.mockInput.pressArrow("right")
+    await activeSetup?.renderOnce()
+    activeSetup?.mockInput.pressEnter()
     await activeSetup?.renderOnce()
   })
 
@@ -356,7 +395,6 @@ test("clearly prevents the Owner from leaving a Board in Board actions", async (
     )
     await activeSetup.renderOnce()
   })
-
   const waitForFrame = async (predicate: (frame: string) => boolean): Promise<string> => {
     let matchedFrame: string | undefined
     let lastFrame = ""
@@ -377,19 +415,18 @@ test("clearly prevents the Owner from leaving a Board in Board actions", async (
     throw new Error(`Timed out waiting for rendered frame\n${lastFrame}`)
   }
 
-  await waitForFrame((value) => value.includes("Terminal Session restored"))
+  await waitForFrame((value) => value.includes("Boards"))
   await act(async () => {
-    activeSetup?.mockInput.pressKey("b")
-    await activeSetup?.renderOnce()
-  })
-  await waitForFrame((value) => value.includes("Ideas · Owner"))
-  await act(async () => {
-    activeSetup?.mockInput.pressKey("a")
+    activeSetup?.mockInput.pressArrow("down")
+    activeSetup?.mockInput.pressArrow("down")
+    activeSetup?.mockInput.pressArrow("down")
+    activeSetup?.mockInput.pressEnter()
     await activeSetup?.renderOnce()
   })
   await waitForFrame((value) => value.includes("Board actions"))
   await act(async () => {
-    activeSetup?.mockInput.pressKey("l")
+    activeSetup?.mockInput.pressArrow("down")
+    activeSetup?.mockInput.pressEnter()
     await activeSetup?.renderOnce()
   })
 
@@ -410,6 +447,7 @@ test("renames a Board and rotates its Join Code from the rendered Owner actions"
   let boards = [originalBoard]
   let renameInput: { credential: string; boardId: string; name: string } | undefined
   let rotateInput: { credential: string; boardId: string } | undefined
+  let copiedJoinCode: string | undefined
 
   const boardClient: BoardClient = {
     createBoard: async () => {
@@ -460,6 +498,12 @@ test("renames a Board and rotates its Join Code from the rendered Owner actions"
     )
     await activeSetup.renderOnce()
   })
+  if (activeSetup) {
+    activeSetup.renderer.copyToClipboardOSC52 = (text: string) => {
+      copiedJoinCode = text
+      return true
+    }
+  }
 
   const waitForFrame = async (predicate: (frame: string) => boolean): Promise<string> => {
     let matchedFrame: string | undefined
@@ -481,16 +525,19 @@ test("renames a Board and rotates its Join Code from the rendered Owner actions"
     throw new Error(`Timed out waiting for rendered frame\n${lastFrame}`)
   }
 
-  await waitForFrame((value) => value.includes("Terminal Session restored"))
+  await waitForFrame((value) => value.includes("Boards"))
   await act(async () => {
-    activeSetup?.mockInput.pressKey("b")
+    activeSetup?.mockInput.pressArrow("down")
+    activeSetup?.mockInput.pressArrow("down")
+    activeSetup?.mockInput.pressArrow("down")
+    activeSetup?.mockInput.pressEnter()
     await activeSetup?.renderOnce()
   })
   await waitForFrame((value) => value.includes("Ideas · Owner"))
   await act(async () => {
-    activeSetup?.mockInput.pressKey("a")
-    await activeSetup?.renderOnce()
-    activeSetup?.mockInput.pressKey("r")
+    activeSetup?.mockInput.pressArrow("down")
+    activeSetup?.mockInput.pressArrow("down")
+    activeSetup?.mockInput.pressEnter()
     await activeSetup?.renderOnce()
   })
   await waitForFrame((value) => value.includes("Rename Board"))
@@ -508,16 +555,44 @@ test("renames a Board and rotates its Join Code from the rendered Owner actions"
   })
 
   await act(async () => {
-    activeSetup?.mockInput.pressKey("t")
+    activeSetup?.mockInput.pressArrow("down")
+    activeSetup?.mockInput.pressArrow("down")
+    activeSetup?.mockInput.pressArrow("down")
+    activeSetup?.mockInput.pressEnter()
     await activeSetup?.renderOnce()
   })
   const frame = await waitForFrame((value) => value.includes("Rotated Join Code"))
   expect(frame).toContain(rotatedJoinCode)
   expect(frame).not.toContain("Initial Join Code")
+  expect(frame).toContain("[ c ] Copy")
   expect(rotateInput).toEqual({ credential, boardId: originalBoard.id })
 
+  const copyLine = frame.split("\n").findIndex((line) => line.includes("[ c ] Copy"))
+  const copyColumn = frame.split("\n")[copyLine]?.indexOf("[ c ] Copy") ?? -1
+  expect(copyLine).toBeGreaterThan(-1)
+  expect(copyColumn).toBeGreaterThan(-1)
   await act(async () => {
-    activeSetup?.mockInput.pressKey("a")
+    await activeSetup?.mockMouse.click(copyColumn + 1, copyLine)
+    await activeSetup?.renderOnce()
+  })
+  expect(copiedJoinCode).toBe(rotatedJoinCode)
+  expect(activeSetup?.captureCharFrame()).toContain("Join Code copied to the clipboard.")
+
+  if (activeSetup) {
+    activeSetup.renderer.copyToClipboardOSC52 = () => false
+  }
+  await act(async () => {
+    activeSetup?.mockInput.pressKey("c")
+    await activeSetup?.renderOnce()
+  })
+  expect(activeSetup?.captureCharFrame()).toContain("Clipboard access is unavailable.")
+  expect(activeSetup?.captureCharFrame()).toContain("Code manually.")
+
+  await act(async () => {
+    activeSetup?.mockInput.pressArrow("down")
+    activeSetup?.mockInput.pressArrow("down")
+    activeSetup?.mockInput.pressArrow("down")
+    activeSetup?.mockInput.pressEnter()
     await activeSetup?.renderOnce()
   })
   await waitForFrame((value) => value.includes("Board actions"))
@@ -526,7 +601,7 @@ test("renames a Board and rotates its Join Code from the rendered Owner actions"
     await activeSetup?.renderOnce()
   })
   const clearedFrame = await waitForFrame(
-    (value) => value.includes("Board list") && !value.includes(rotatedJoinCode),
+    (value) => value.includes("Boards") && !value.includes(rotatedJoinCode),
   )
   expect(clearedFrame).not.toContain(rotatedJoinCode)
 })
@@ -613,13 +688,19 @@ test("renders Owner-only authorization errors for Member Board actions", async (
     throw new Error(`Timed out waiting for rendered frame\n${lastFrame}`)
   }
 
-  await waitForFrame((value) => value.includes("Terminal Session restored"))
+  await waitForFrame((value) => value.includes("Boards"))
   await act(async () => {
-    activeSetup?.mockInput.pressKey("b")
+    activeSetup?.mockInput.pressArrow("down")
+    activeSetup?.mockInput.pressArrow("down")
+    activeSetup?.mockInput.pressArrow("down")
+    activeSetup?.mockInput.pressEnter()
     await activeSetup?.renderOnce()
-    activeSetup?.mockInput.pressKey("a")
-    await activeSetup?.renderOnce()
-    activeSetup?.mockInput.pressKey("r")
+  })
+  await waitForFrame((value) => value.includes("Board actions"))
+  await act(async () => {
+    activeSetup?.mockInput.pressArrow("down")
+    activeSetup?.mockInput.pressArrow("down")
+    activeSetup?.mockInput.pressEnter()
     await activeSetup?.renderOnce()
   })
   await waitForFrame((value) => value.includes("Rename Board"))
@@ -634,14 +715,24 @@ test("renders Owner-only authorization errors for Member Board actions", async (
   await act(async () => {
     activeSetup?.mockInput.pressEscape()
     await activeSetup?.renderOnce()
-    activeSetup?.mockInput.pressKey("t")
+    activeSetup?.mockInput.pressArrow("down")
+    activeSetup?.mockInput.pressArrow("down")
+    activeSetup?.mockInput.pressArrow("down")
+    activeSetup?.mockInput.pressEnter()
     await activeSetup?.renderOnce()
   })
   const rotateFrame = await waitForFrame((value) => value.includes("Only the Owner may rotate"))
   expect(rotateFrame).toContain("Error: Only the Owner may rotate this Join Code.")
 
   await act(async () => {
-    activeSetup?.mockInput.pressKey("d")
+    activeSetup?.mockInput.pressEscape()
+    await activeSetup?.renderOnce()
+    activeSetup?.mockInput.pressArrow("down")
+    activeSetup?.mockInput.pressArrow("down")
+    activeSetup?.mockInput.pressArrow("down")
+    activeSetup?.mockInput.pressEnter()
+    await activeSetup?.renderOnce()
+    activeSetup?.mockInput.pressEnter()
     await activeSetup?.renderOnce()
   })
   const deleteFrame = await waitForFrame((value) => value.includes("Only the Owner may delete"))
@@ -658,7 +749,9 @@ test("uses the reusable Register form with visible validation and status", async
   await activeSetup.renderOnce()
 
   await act(async () => {
-    activeSetup?.mockInput.pressKey("r")
+    activeSetup?.mockInput.pressArrow("down")
+    activeSetup?.mockInput.pressArrow("down")
+    activeSetup?.mockInput.pressEnter()
     await activeSetup?.renderOnce()
   })
 
@@ -667,7 +760,7 @@ test("uses the reusable Register form with visible validation and status", async
   expect(frame).toContain("Username")
   expect(frame).toContain("Password")
   expect(frame).toContain("Confirm password")
-  expect(frame).toContain("Tab next field · Enter submit · Escape cancel")
+  expect(frame).toContain("↑↓ fields · Enter submit · Escape cancel")
 
   await act(async () => {
     activeSetup?.mockInput.pressEnter()
@@ -690,8 +783,8 @@ test("uses the reusable Register form with visible validation and status", async
   })
 
   frame = activeSetup.captureCharFrame()
-  expect(frame).toContain("Status: registration form complete")
-  expect(frame).toContain("MODE  NAVIGATE")
+  expect(frame).toContain("registration form complete")
+  expect(frame).toContain("NAVIGATE")
 })
 
 test("requires the exact current Board name and lets Escape cancel without deleting", async () => {
@@ -746,16 +839,17 @@ test("requires the exact current Board name and lets Escape cancel without delet
   if (!setup) {
     throw new Error("terminal renderer did not start")
   }
-  await setup.waitForFrame((frame) => frame.includes("Terminal Session restored"))
+  await setup.waitForFrame((frame) => frame.includes("Boards"))
   await act(async () => {
-    setup.mockInput.pressKey("b")
+    setup.mockInput.pressArrow("down")
+    setup.mockInput.pressArrow("down")
+    setup.mockInput.pressArrow("down")
+    setup.mockInput.pressEnter()
     await setup.renderOnce()
   })
   await setup.waitForFrame((frame) => frame.includes("Ideas · Owner"))
   await act(async () => {
-    setup.mockInput.pressKey("a")
-    await setup.renderOnce()
-    setup.mockInput.pressKey("d")
+    setup.mockInput.pressEnter()
     await setup.renderOnce()
   })
 
@@ -781,19 +875,19 @@ test("requires the exact current Board name and lets Escape cancel without delet
   expect(deleteCalls).toBe(0)
 
   await act(async () => {
-    setup.mockInput.pressKey("d")
+    setup.mockInput.pressEnter()
     await setup.renderOnce()
     setup.mockInput.typeText("Ideas")
     setup.mockInput.pressEnter()
     await setup.renderOnce()
   })
   frame = await setup.waitForFrame((value) => value.includes("Board \"Ideas\" deleted permanently."))
-  expect(frame).toContain("Board list")
+  expect(frame).toContain("Boards")
   expect(deleteCalls).toBe(1)
   expect(deleted).toBe(true)
 })
 
-test("keeps Navigate and Edit mode presentation visibly distinct", async () => {
+test("keeps Navigate and Select mode presentation visibly distinct", async () => {
   activeSetup = await testRender(<TerminalShell label="alpha" />, {
     width: 80,
     height: 24,
@@ -803,36 +897,33 @@ test("keeps Navigate and Edit mode presentation visibly distinct", async () => {
   await activeSetup.renderOnce()
 
   await act(async () => {
-    activeSetup?.mockInput.pressKey("b")
+    activeSetup?.mockInput.pressEnter()
     await activeSetup?.renderOnce()
-    activeSetup?.mockInput.pressKey("o")
-    await activeSetup?.renderOnce()
-  })
-
-  let frame = activeSetup.captureCharFrame()
-  expect(frame).toContain("Board canvas")
-  expect(frame).toContain("MODE  NAVIGATE")
-  expect(frame).toContain("Navigate mode · cursor at the stable origin")
-  expect(frame).toContain("Enter edit")
-
-  await act(async () => {
     activeSetup?.mockInput.pressEnter()
     await activeSetup?.renderOnce()
   })
 
-  frame = activeSetup.captureCharFrame()
-  expect(frame).toContain("MODE  EDIT")
-  expect(frame).toContain("Edit mode · keyboard text editing active")
-  expect(frame).toContain("Escape leave Edit mode")
-  expect(frame).not.toContain("MODE  NAVIGATE")
+  let frame = activeSetup.captureCharFrame()
+  expect(frame).toContain("NAVIGATE")
+  expect(frame).toContain("No Sticky Notes yet")
+  expect(frame).toContain("Enter to add one")
 
   await act(async () => {
-    activeSetup?.mockInput.pressEscape()
+    activeSetup?.mockInput.pressTab()
     await activeSetup?.renderOnce()
   })
 
   frame = activeSetup.captureCharFrame()
-  expect(frame).toContain("MODE  NAVIGATE")
+  expect(frame).toContain("SELECT")
+  expect(frame).toContain("Space actions")
+
+  await act(async () => {
+    activeSetup?.mockInput.pressTab()
+    await activeSetup?.renderOnce()
+  })
+
+  frame = activeSetup.captureCharFrame()
+  expect(frame).toContain("NAVIGATE")
 
   await act(async () => {
     activeSetup?.mockInput.pressKey("?")
@@ -847,7 +938,7 @@ test("keeps Navigate and Edit mode presentation visibly distinct", async () => {
     await activeSetup?.renderOnce()
   })
 
-  expect(activeSetup.captureCharFrame()).toContain("MODE  NAVIGATE")
+  expect(activeSetup.captureCharFrame()).toContain("NAVIGATE")
 })
 
 test("shows a resize-required screen below the supported minimum", async () => {
@@ -862,7 +953,7 @@ test("shows a resize-required screen below the supported minimum", async () => {
   expect(frame).toContain("Resize required")
   expect(frame).toContain("needs at least 80 by 24 cells")
   expect(frame).toContain("Current terminal: 79 by 24")
-  expect(frame).not.toContain("MODE  NAVIGATE")
+  expect(frame).not.toContain("NAVIGATE")
 
   await act(async () => {
     activeSetup?.resize(80, 24)
@@ -870,7 +961,7 @@ test("shows a resize-required screen below the supported minimum", async () => {
   })
 
   frame = activeSetup.captureCharFrame()
-  expect(frame).toContain("MODE  NAVIGATE")
+  expect(frame).toContain("NAVIGATE")
 })
 
 test("reports truecolor only when the terminal capability is detected", async () => {
@@ -888,7 +979,8 @@ test("reports truecolor only when the terminal capability is detected", async ()
 
   await activeSetup.renderOnce()
   const frame = activeSetup.captureCharFrame()
-  expect(frame).toContain("Unicode · 256-color baseline active · truecolor detected")
+  expect(frame).toContain("Welcome to Tuiscrib")
+  expect(frame).not.toContain("truecolor detected")
 })
 
 test("keeps the baseline capability label when truecolor is unavailable", async () => {
@@ -906,7 +998,7 @@ test("keeps the baseline capability label when truecolor is unavailable", async 
 
   await activeSetup.renderOnce()
   const frame = activeSetup.captureCharFrame()
-  expect(frame).toContain("Unicode · 256-color baseline")
+  expect(frame).toContain("Welcome to Tuiscrib")
   expect(frame).not.toContain("truecolor detected")
 })
 
@@ -954,14 +1046,18 @@ test("restores a persisted Terminal Session and signs out through keyboard contr
   )
 
   await act(async () => {
-    await activeSetup?.waitForFrame((frame) => frame.includes("Terminal Session restored"))
+    await activeSetup?.waitForFrame((frame) => frame.includes("Boards"))
   })
   expect(restoredCredential).toBe(credential)
   expect(activeSetup.captureCharFrame()).toContain("ada_lovelace")
   expect(activeSetup.captureCharFrame()).not.toContain(credential)
 
   await act(async () => {
-    activeSetup?.mockInput.pressKey("x")
+    activeSetup?.mockInput.pressEscape()
+    activeSetup?.mockInput.pressArrow("down")
+    activeSetup?.mockInput.pressArrow("down")
+    activeSetup?.mockInput.pressArrow("down")
+    activeSetup?.mockInput.pressEnter()
     await activeSetup?.renderOnce()
   })
 
@@ -1015,7 +1111,7 @@ test("returns to sign-in with a clear error when no local Terminal Session exist
   })
   expect(frame).toContain("Error: No saved Terminal Session.")
   expect(frame).toContain("continue.")
-  expect(frame).toContain("s sign in")
+  expect(frame).toContain("sign in")
   expect(restoreCalled).toBe(false)
 })
 
@@ -1091,24 +1187,17 @@ test("opens the selected Board through its WebSocket and renders authoritative v
   if (!setup) {
     throw new Error("terminal renderer did not start")
   }
-  await setup.waitForFrame((frame) => frame.includes("Terminal Session restored"))
+  await setup.waitForFrame((frame) => frame.includes("Boards"))
   await act(async () => {
-    activeSetup?.mockInput.pressKey("b")
-    await activeSetup?.renderOnce()
-  })
-  await setup.waitForFrame((frame) => frame.includes("Ideas · Member"))
-  await act(async () => {
-    activeSetup?.mockInput.pressKey("o")
+    activeSetup?.mockInput.pressEnter()
     await activeSetup?.renderOnce()
   })
 
-  const frame = await setup.waitForFrame((value) => value.includes("grace_hopper"))
+  const frame = await setup.waitForFrame((value) => value.includes("Ideas · Connected"))
   expect(opened).toEqual({ credential, boardId: board.id })
-  expect(frame).toContain("Board canvas")
-  expect(frame).toContain("Navigate mode · cursor at the stable origin")
-  expect(frame).toContain("Board revision: 3")
-  expect(frame).toContain("ada_lovelace · viewing")
-  expect(frame).toContain("grace_hopper · viewing")
+  expect(frame).toContain("Ideas · Connected · 2 online")
+  expect(frame).not.toContain("Board canvas")
+  expect(frame).not.toContain("ada_lovelace · viewing")
 })
 
 test("replaces an optimistic Sticky Note edit with the authoritative conflict response", async () => {
@@ -1220,17 +1309,12 @@ test("replaces an optimistic Sticky Note edit with the authoritative conflict re
     throw new Error(`Timed out waiting for rendered frame\n${lastFrame}`)
   }
 
-  await waitForFrame((frame) => frame.includes("Terminal Session restored"))
+  await waitForFrame((frame) => frame.includes("Boards"))
   await act(async () => {
-    setup.mockInput.pressKey("b")
+    setup.mockInput.pressEnter()
     await setup.renderOnce()
   })
-  await waitForFrame((frame) => frame.includes("Conflict Ideas · Member"))
-  await act(async () => {
-    setup.mockInput.pressKey("o")
-    await setup.renderOnce()
-  })
-  await waitForFrame((frame) => frame.includes("durable text") && frame.includes("Board revision: 1"))
+  await waitForFrame((frame) => frame.includes("durable text") && frame.includes("Conflict Ideas · Connected"))
 
   await act(async () => {
     setup.mockInput.pressEnter()
@@ -1242,8 +1326,11 @@ test("replaces an optimistic Sticky Note edit with the authoritative conflict re
     await setup.renderOnce()
   })
   expect(setup.captureCharFrame()).toContain("stale optimistic text")
+  expect(sent.some((command) => command.includes("publish_sticky_note_edit"))).toBe(false)
 
   await act(async () => {
+    setup.mockInput.pressEnter({ ctrl: true })
+    await setup.renderOnce()
     handlers?.onCommandError?.({
       type: "error",
       code: "text_version_conflict",
@@ -1254,9 +1341,6 @@ test("replaces an optimistic Sticky Note edit with the authoritative conflict re
   })
 
   const conflict = await waitForFrame((frame) => frame.includes("authoritative durable text"))
-  expect(conflict).toContain("Board revision: 2")
-  expect(conflict).toContain("Your local")
-  expect(conflict).toContain("replaced with the authoritative text")
   expect(conflict).not.toContain("stale optimistic text")
   expect(sent.some((command) => command.includes("begin_sticky_note_edit"))).toBe(true)
 })
@@ -1347,17 +1431,23 @@ test("uses a clear destructive confirmation mode for Sticky Note deletion and ke
   if (!setup) {
     throw new Error("terminal renderer did not start")
   }
-  await setup.waitForFrame((frame) => frame.includes("Terminal Session restored"))
+  await setup.waitForFrame((frame) => frame.includes("Boards"))
   await act(async () => {
-    setup.mockInput.pressKey("b")
-    await setup.renderOnce()
-    setup.mockInput.pressKey("o")
+    setup.mockInput.pressEnter()
     await setup.renderOnce()
   })
-  await setup.waitForFrame((frame) => frame.includes("Board revision: 1") && frame.includes("delete me"))
+  await setup.waitForFrame((frame) => frame.includes("Deletion Ideas · Connected") && frame.includes("delete me"))
 
   await act(async () => {
-    setup.mockInput.pressKey("d")
+    setup.mockInput.pressKey(" ")
+    await setup.renderOnce()
+    setup.mockInput.pressArrow("down")
+    await setup.renderOnce()
+    setup.mockInput.pressArrow("down")
+    await setup.renderOnce()
+    setup.mockInput.pressArrow("down")
+    await setup.renderOnce()
+    setup.mockInput.pressEnter()
     await setup.renderOnce()
   })
   expect(sent).toHaveLength(1)
@@ -1377,25 +1467,41 @@ test("uses a clear destructive confirmation mode for Sticky Note deletion and ke
   const confirmation = setup.captureCharFrame()
   expect(confirmation).toContain("Permanently delete Sticky Note")
   expect(confirmation).toContain("delete me")
-  expect(confirmation).toContain("release Edit Claim")
+  expect(confirmation).toContain("Edit Claim is held")
+  expect(confirmation).toContain("› Cancel")
 
   await act(async () => {
-    setup.mockInput.pressKey("x")
+    setup.mockInput.pressEscape()
     await setup.renderOnce()
   })
-  expect(setup.captureCharFrame()).toContain("Permanently delete Sticky Note")
+  expect(setup.captureCharFrame()).toContain("delete me")
   expect(sent.some((command) => command.includes('"type":"delete_sticky_note"'))).toBe(false)
 
   await act(async () => {
-    setup.mockInput.pressKey("n")
+    setup.mockInput.pressKey(" ")
+    await setup.renderOnce()
+    setup.mockInput.pressArrow("down")
+    await setup.renderOnce()
+    setup.mockInput.pressArrow("down")
+    await setup.renderOnce()
+    setup.mockInput.pressArrow("down")
+    await setup.renderOnce()
+    setup.mockInput.pressEnter()
     await setup.renderOnce()
   })
   expect(sent.some((command) => command.includes('"type":"release_sticky_note_edit"'))).toBe(true)
-  expect(setup.captureCharFrame()).toContain("Board revision: 1")
   expect(setup.captureCharFrame()).toContain("delete me")
 
   await act(async () => {
-    setup.mockInput.pressKey("d")
+    setup.mockInput.pressKey(" ")
+    await setup.renderOnce()
+    setup.mockInput.pressArrow("down")
+    await setup.renderOnce()
+    setup.mockInput.pressArrow("down")
+    await setup.renderOnce()
+    setup.mockInput.pressArrow("down")
+    await setup.renderOnce()
+    setup.mockInput.pressEnter()
     await setup.renderOnce()
     handlers?.onStickyNoteEditClaimGranted?.({
       type: "sticky_note_edit_claim_granted",
@@ -1404,13 +1510,15 @@ test("uses a clear destructive confirmation mode for Sticky Note deletion and ke
       stickyNote: note,
     })
     await setup.renderOnce()
-    setup.mockInput.pressKey("y")
+    setup.mockInput.pressArrow("right")
+    await setup.renderOnce()
+    expect(setup.captureCharFrame()).toContain("› Delete permanently")
+    setup.mockInput.pressEnter()
     await setup.renderOnce()
   })
   const deleted = setup.captureCharFrame()
   expect(sent.some((command) => command.includes('"type":"delete_sticky_note"'))).toBe(true)
-  expect(deleted).toContain("Board revision: 2")
-  expect(deleted).toContain("Sticky Notes: 0")
+  expect(deleted).toContain("No Sticky Notes yet")
   expect(deleted).not.toContain("delete me")
 })
 
@@ -1477,33 +1585,27 @@ test("renders reconnecting after Board loss and does not send shared mutations w
   if (!setup) {
     throw new Error("terminal renderer did not start")
   }
-  await setup.waitForFrame((frame) => frame.includes("Terminal Session restored"))
+  await setup.waitForFrame((frame) => frame.includes("Boards"))
   await act(async () => {
-    setup.mockInput.pressKey("b")
+    setup.mockInput.pressEnter()
     await setup.renderOnce()
   })
-  await setup.waitForFrame((frame) => frame.includes("Reconnect Ideas"))
-  await act(async () => {
-    setup.mockInput.pressKey("o")
-    await setup.renderOnce()
-  })
-  await setup.waitForFrame((frame) => frame.includes("Board revision: 8"))
+  await setup.waitForFrame((frame) => frame.includes("Reconnect Ideas · Connected"))
 
   await act(async () => {
     handlers?.onClose()
     await setup.renderOnce()
   })
   const reconnecting = setup.captureCharFrame()
-  expect(reconnecting).toContain("Connection: RECONNECTING")
-  expect(reconnecting).toContain("Shared mutations disabled")
-  expect(reconnecting).not.toContain("Board revision: 8")
+  expect(reconnecting).toContain("Reconnecting…")
+  expect(reconnecting).toContain("Reconnect Ideas")
 
   await act(async () => {
-    setup.mockInput.pressKey("n")
+    setup.mockInput.pressEnter()
     await setup.renderOnce()
   })
   expect(sent).toEqual([])
-  expect(setup.captureCharFrame()).toContain("Connection: RECONNECTING")
+  expect(setup.captureCharFrame()).toContain("Reconnecting…")
 
   await act(async () => {
     handlers?.onConnectionState?.("waking")
@@ -1511,9 +1613,8 @@ test("renders reconnecting after Board loss and does not send shared mutations w
     await setup.renderOnce()
   })
   const waking = setup.captureCharFrame()
-  expect(waking).toContain("Connection: WAKING")
-  expect(waking).toContain("Retrying with bounded backoff")
-  expect(waking).not.toContain("Connection: RECONNECTING")
+  expect(waking).toContain("Waking the Tuiscrib Service…")
+  expect(waking).not.toContain("Reconnecting…")
 
   await act(async () => {
     handlers?.onConnectionState?.("unavailable")
@@ -1521,8 +1622,8 @@ test("renders reconnecting after Board loss and does not send shared mutations w
     await setup.renderOnce()
   })
   const unavailable = setup.captureCharFrame()
-  expect(unavailable).toContain("Connection: UNAVAILABLE")
-  expect(unavailable).not.toContain("Connection: RECONNECTING")
+  expect(unavailable).toContain("Service unavailable")
+  expect(unavailable).not.toContain("Reconnecting…")
 
   await act(async () => {
     handlers?.onConnectionState?.("unauthorized")
@@ -1530,6 +1631,6 @@ test("renders reconnecting after Board loss and does not send shared mutations w
     await setup.renderOnce()
   })
   const unauthorized = setup.captureCharFrame()
-  expect(unauthorized).toContain("Connection: UNAUTHORIZED")
-  expect(unauthorized).not.toContain("Connection: UNAVAILABLE")
+  expect(unauthorized).toContain("Session unauthorized")
+  expect(unauthorized).not.toContain("Service unavailable")
 })
