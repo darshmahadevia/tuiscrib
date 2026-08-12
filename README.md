@@ -2,8 +2,6 @@
 
 Tuiscrib is a keyboard-first collaborative Sticky Note editor for small groups. Open two terminal clients, join the same Board, and edit or arrange notes together while the Tuiscrib Service persists the shared state.
 
-![Tuiscrib terminal collaboration canvas](docs/assets/tuiscrib-portfolio-screenshot.svg)
-
 ## Try it in one minute
 
 Clone the repository, use Bun 1.3.14, and start the terminal client:
