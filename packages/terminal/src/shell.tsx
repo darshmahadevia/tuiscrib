@@ -76,6 +76,7 @@ type ShellOverlay = "none" | "help" | "actions" | "info" | "move"
 type ShellView =
   | "home"
   | "boards"
+  | "join-code"
   | "board-actions"
   | "board-delete-confirmation"
   | "canvas"
@@ -115,6 +116,8 @@ type ShellNotice = {
 }
 
 type BoardCodeNotice = {
+  boardId: string
+  boardName: string
   kind: "initial" | "rotated"
   code: string
 }
@@ -194,6 +197,7 @@ const boardActionsMenu: ShellMenuItem[] = [
   { id: "delete", label: "delete Board", description: "Permanently remove this Board" },
   { id: "leave", label: "leave Board", description: "Leave this Board as a Member" },
   { id: "rename", label: "rename Board", description: "Rename this Board as the Owner" },
+  { id: "show-code", label: "show Join Code", description: "Show the current code if it was issued in this Terminal Session" },
   { id: "rotate-code", label: "rotate Join Code", description: "Replace this Board's Join Code as the Owner" },
 ]
 
@@ -275,6 +279,7 @@ const colors = {
   dangerSurface: "#39262b",
   success: "#8fd7b0",
   warning: "#edc17b",
+  loading: "#c4a7ff",
   error: "#f08f99",
   overlay: "#020406",
 }
@@ -285,7 +290,7 @@ const colors = {
 const SHELL_PANEL_WIDTH = 72
 const SHELL_MENU_PANEL_HEIGHT = 20
 const SHELL_BOARD_PANEL_HEIGHT = 20
-const SHELL_FORM_PANEL_HEIGHT = 22
+const SHELL_JOIN_CODE_PANEL_HEIGHT = 18
 const SHELL_CONFIRMATION_PANEL_HEIGHT = 12
 const SHELL_HELP_PANEL_HEIGHT = 16
 const CANVAS_ACTION_PANEL_WIDTH = 64
@@ -372,6 +377,7 @@ export function TerminalShell({
   const [boardFilter, setBoardFilter] = useState("")
   const [boardsPending, setBoardsPending] = useState(false)
   const [boardCodeNotice, setBoardCodeNotice] = useState<BoardCodeNotice | null>(null)
+  const [knownBoardCodes, setKnownBoardCodes] = useState<Record<string, BoardCodeNotice>>({})
   const [boardSnapshot, setBoardSnapshot] = useState<BoardSnapshot | null>(null)
   const [boardConnectionState, setBoardConnectionState] = useState<BoardConnectionState | null>(null)
   const [canvasCursor, setCanvasCursor] = useState<StickyNotePosition>(
@@ -410,6 +416,7 @@ export function TerminalShell({
   const confirmationActionRef = useRef(confirmationAction)
   const boardActionPendingRef = useRef(boardActionPending)
   const boardCodeNoticeRef = useRef<BoardCodeNotice | null>(boardCodeNotice)
+  const knownBoardCodesRef = useRef<Record<string, BoardCodeNotice>>(knownBoardCodes)
   const boardConnectionRef = useRef<BoardConnection | null>(null)
   const activeBoardIdRef = useRef<string | null>(null)
   const boardConnectionGenerationRef = useRef(0)
@@ -445,6 +452,7 @@ export function TerminalShell({
   confirmationActionRef.current = confirmationAction
   boardActionPendingRef.current = boardActionPending
   boardCodeNoticeRef.current = boardCodeNotice
+  knownBoardCodesRef.current = knownBoardCodes
   boardConnectionStateRef.current = boardConnectionState
   boardSnapshotRef.current = boardSnapshot
   canvasCursorRef.current = canvasCursor
@@ -2662,6 +2670,7 @@ export function TerminalShell({
       }
       await boardClient.deleteBoard(credential, board.id)
       flushSync(() => {
+        forgetBoardCode(board.id)
         setBoards((currentBoards) =>
           currentBoards.filter((currentBoard) => currentBoard.id !== board.id),
         )
@@ -2770,14 +2779,21 @@ export function TerminalShell({
       }
       const response = await boardClient.rotateJoinCode(credential, board.id)
       flushSync(() => {
+        const codeNotice: BoardCodeNotice = {
+          boardId: response.board.id,
+          boardName: response.board.name,
+          kind: "rotated",
+          code: response.joinCode,
+        }
         setBoards((currentBoards) =>
           currentBoards.map((currentBoard) =>
             currentBoard.id === response.board.id ? response.board : currentBoard,
           ),
         )
         setSelectedIndex(0)
-        setView("boards")
-        setBoardCodeNotice({ kind: "rotated", code: response.joinCode })
+        setView("join-code")
+        rememberBoardCode(codeNotice)
+        setBoardCodeNotice(codeNotice)
         setNotice({
           kind: "status",
           message: `Join Code rotated for Board "${response.board.name}".`,
@@ -2800,6 +2816,22 @@ export function TerminalShell({
     const nextIndex =
       (selectedBoardIndexRef.current + direction + boards.length) % boards.length
     flushSync(() => setSelectedBoardIndex(nextIndex))
+  }
+
+  const rememberBoardCode = (nextNotice: BoardCodeNotice) => {
+    const nextKnownBoardCodes = {
+      ...knownBoardCodesRef.current,
+      [nextNotice.boardId]: nextNotice,
+    }
+    knownBoardCodesRef.current = nextKnownBoardCodes
+    setKnownBoardCodes(nextKnownBoardCodes)
+  }
+
+  const forgetBoardCode = (boardId: string) => {
+    const nextKnownBoardCodes = { ...knownBoardCodesRef.current }
+    delete nextKnownBoardCodes[boardId]
+    knownBoardCodesRef.current = nextKnownBoardCodes
+    setKnownBoardCodes(nextKnownBoardCodes)
   }
 
   const completeForm = async (values: Record<string, string>) => {
@@ -2887,6 +2919,10 @@ export function TerminalShell({
           name: values.name,
         })
         flushSync(() => {
+          const knownCode = knownBoardCodesRef.current[response.board.id]
+          if (knownCode) {
+            rememberBoardCode({ ...knownCode, boardName: response.board.name })
+          }
           setBoards((currentBoards) =>
             currentBoards.map((currentBoard) =>
               currentBoard.id === response.board.id ? response.board : currentBoard,
@@ -2921,7 +2957,13 @@ export function TerminalShell({
         }
         const response = await boardClient.createBoard(credential, { name: values.name })
         flushSync(() => {
-          setView(formReturnView)
+          const codeNotice: BoardCodeNotice = {
+            boardId: response.board.id,
+            boardName: response.board.name,
+            kind: "initial",
+            code: response.joinCode,
+          }
+          setView("join-code")
           setFormKind(null)
           setFormInitialKey(null)
           setSelectedIndex(0)
@@ -2931,7 +2973,8 @@ export function TerminalShell({
             response.board,
             ...currentBoards.filter((currentBoard) => currentBoard.id !== response.board.id),
           ])
-          setBoardCodeNotice({ kind: "initial", code: response.joinCode })
+          rememberBoardCode(codeNotice)
+          setBoardCodeNotice(codeNotice)
           setNotice({
             kind: "status",
             message: `Board "${response.board.name}" created.`,
@@ -3031,8 +3074,11 @@ export function TerminalShell({
       }
       await credentialStore.remove()
       flushSync(() => {
+        knownBoardCodesRef.current = {}
         setAuthenticatedUsername(null)
         setSessionState("signed-out")
+        setKnownBoardCodes({})
+        setBoardCodeNotice(null)
         setNotice({ kind: "status", message: "Signed out. Terminal Session revoked." })
       })
     } catch (error) {
@@ -3058,6 +3104,50 @@ export function TerminalShell({
             kind: "error",
             message: "Clipboard access is unavailable. Select and copy the Join Code manually.",
           })
+    })
+  }
+
+  const closeJoinCode = () => {
+    flushSync(() => {
+      setView("boards")
+      setBoardCodeNotice(null)
+      setSelectedIndex(0)
+      setNotice(null)
+    })
+    void loadBoards(boardFilterRef.current)
+  }
+
+  const showSelectedJoinCode = () => {
+    const board = boards[selectedBoardIndexRef.current]
+    if (!board) {
+      flushSync(() => {
+        setNotice({ kind: "error", message: "Select a Board before showing its Join Code." })
+      })
+      return
+    }
+    if (board.role !== "owner") {
+      flushSync(() => {
+        setNotice({ kind: "error", message: "Only the Owner may view this Board's Join Code." })
+      })
+      return
+    }
+
+    const knownCode = knownBoardCodesRef.current[board.id]
+    if (!knownCode) {
+      flushSync(() => {
+        setNotice({
+          kind: "error",
+          message: "This Terminal Session does not know the current Join Code. Rotate it to issue a new one.",
+        })
+      })
+      return
+    }
+
+    flushSync(() => {
+      setView("join-code")
+      setSelectedIndex(selectedBoardIndexRef.current)
+      setBoardCodeNotice({ ...knownCode, boardName: board.name })
+      setNotice({ kind: "status", message: `Showing Join Code for Board "${board.name}".` })
     })
   }
 
@@ -3095,11 +3185,11 @@ export function TerminalShell({
         return
       }
       if (key.name === "return" && selectedIndexRef.current === 1) {
-        openForm("sign-in")
+        openForm("sign-in", "home", key.name)
         return
       }
       if (key.name === "return" && selectedIndexRef.current === 2) {
-        openForm("register")
+        openForm("register", "home", key.name)
         return
       }
       if (key.name === "return" && selectedIndexRef.current === 3) {
@@ -3137,10 +3227,10 @@ export function TerminalShell({
               void openSelectedBoard()
               return
             case 1:
-              openForm("create-board", "boards")
+              openForm("create-board", "boards", key.name)
               return
             case 2:
-              openForm("join-board", "boards")
+              openForm("join-board", "boards", key.name)
               return
             case 3:
               openView("board-actions")
@@ -3149,10 +3239,10 @@ export function TerminalShell({
         } else {
           switch (actionIndex) {
             case 0:
-              openForm("create-board", "boards")
+              openForm("create-board", "boards", key.name)
               return
             case 1:
-              openForm("join-board", "boards")
+              openForm("join-board", "boards", key.name)
               return
             case 2:
               openView("board-actions")
@@ -3160,6 +3250,17 @@ export function TerminalShell({
           }
         }
       }
+    }
+
+    if (viewRef.current === "join-code") {
+      if (key.name === "c") {
+        copyVisibleJoinCode()
+        return
+      }
+      if (key.name === "escape" || key.name === "return") {
+        closeJoinCode()
+      }
+      return
     }
 
     if (viewRef.current === "canvas") {
@@ -3307,6 +3408,14 @@ export function TerminalShell({
         openView("boards")
         return
       }
+      if (key.name === "left") {
+        moveBoardSelection(-1)
+        return
+      }
+      if (key.name === "right") {
+        moveBoardSelection(1)
+        return
+      }
       if (key.name === "up") {
         moveSelection(-1)
         return
@@ -3317,10 +3426,11 @@ export function TerminalShell({
       }
       if (key.name === "return") {
         switch (selectedIndexRef.current) {
-          case 0: openBoardDeleteConfirmation(); return
+          case 0: openBoardDeleteConfirmation(key.name); return
           case 1: openLeaveConfirmation(); return
-          case 2: openForm("rename-board", "board-actions"); return
-          case 3: void rotateSelectedJoinCode(); return
+          case 2: openForm("rename-board", "board-actions", key.name); return
+          case 3: showSelectedJoinCode(); return
+          case 4: void rotateSelectedJoinCode(); return
         }
       }
     }
@@ -3383,8 +3493,15 @@ export function TerminalShell({
     <BoardActions
       selectedIndex={selectedIndex}
       selectedBoard={boards[selectedBoardIndex]}
+      canSelectBoard={boards.length > 1}
       status={notice?.kind === "status" ? notice.message : "choose an action"}
       error={notice?.kind === "error" ? notice.message : undefined}
+    />
+  ) : view === "join-code" && boardCodeNotice ? (
+    <JoinCodeScreen
+      joinCode={boardCodeNotice}
+      notice={notice}
+      onCopy={copyVisibleJoinCode}
     />
   ) : view === "board-delete-confirmation" ? (
     <BoardDeleteConfirmation
@@ -3393,6 +3510,9 @@ export function TerminalShell({
       notice={notice}
       pending={boardActionPending}
       onCancel={cancelBoardDeleteConfirmation}
+      onEdit={() => {
+        if (notice?.kind === "error") setNotice(null)
+      }}
       onSubmit={deleteSelectedBoard}
     />
   ) : view === "confirmation" ? (
@@ -3439,6 +3559,9 @@ export function TerminalShell({
       pending={formPending}
       initialKeyToIgnore={formInitialKey}
       onCancel={() => openView(formReturnView)}
+      onEdit={() => {
+        if (notice?.kind === "error") setNotice(null)
+      }}
       onSubmit={completeForm}
     />
   ) : (
@@ -3449,8 +3572,6 @@ export function TerminalShell({
       filter={boardFilter}
       pending={boardsPending}
       notice={notice}
-      joinCode={boardCodeNotice}
-      onCopyJoinCode={copyVisibleJoinCode}
       hasBoardClient={Boolean(boardClient)}
       sessionState={sessionState}
     />
@@ -3471,9 +3592,9 @@ export function TerminalShell({
               ? "Ctrl+Enter save · Escape cancel"
               : `${boardSnapshot?.board.name ?? "Board"} · ${boardConnectionState === "connected" ? "Connected" : boardConnectionState ?? "Connecting"} · ${boardSnapshot?.presence.length ?? 0} online · Space actions`
           : view === "boards"
-            ? boardCodeNotice
-              ? "c copy code · ? help · Ctrl+C quit"
-              : "? help · Ctrl+C quit"
+            ? "? help · Ctrl+C quit"
+            : view === "join-code"
+              ? "c copy · Enter done · Escape done"
           : "? help · Ctrl+C quit"
 
   return (
@@ -3596,6 +3717,7 @@ function ShellHome({
             ? notice.message
             : "shell ready"
       }
+      statusColor={sessionState === "checking" ? colors.loading : undefined}
       error={notice?.kind === "error" ? notice.message : undefined}
       canGoBack={false}
     />
@@ -3609,8 +3731,6 @@ function BoardList({
   filter,
   pending,
   notice,
-  joinCode,
-  onCopyJoinCode,
   hasBoardClient,
   sessionState,
 }: {
@@ -3620,8 +3740,6 @@ function BoardList({
   filter: string
   pending: boolean
   notice: ShellNotice | null
-  joinCode: BoardCodeNotice | null
-  onCopyJoinCode: () => void
   hasBoardClient: boolean
   sessionState: SessionState
 }) {
@@ -3670,9 +3788,6 @@ function BoardList({
               selected={index === selectedIndex}
             />
           ))}
-          {joinCode ? (
-            <JoinCodeCallout joinCode={joinCode} onCopy={onCopyJoinCode} />
-          ) : null}
           {availableActions.map((item, index) => (
             <MenuRow
               key={item.id}
@@ -3686,9 +3801,7 @@ function BoardList({
           {notice?.kind === "error" ? <text fg={colors.error}>Error: {notice.message}</text> : null}
           {notice?.kind === "status" ? <text fg={colors.success}>Status: {notice.message}</text> : null}
           <text fg={colors.muted}>
-            {joinCode
-              ? "↑↓ choose · Enter select · c copy code · Esc back"
-              : "↑↓ choose · Enter select · Esc back"}
+            ↑↓ choose · Enter select · Esc back
           </text>
         </box>
       </box>
@@ -3696,51 +3809,63 @@ function BoardList({
   )
 }
 
-function JoinCodeCallout({
+function JoinCodeScreen({
   joinCode,
   onCopy,
+  notice,
 }: {
   joinCode: BoardCodeNotice
   onCopy: () => void
+  notice: ShellNotice | null
 }) {
   const renderer = useRenderer()
   const [copyHovered, setCopyHovered] = useState(false)
 
   return (
-    <box
-      style={{
-        width: "100%",
-        height: 2,
-        backgroundColor: colors.panelStrong,
-        paddingX: 1,
-        flexDirection: "column",
-      }}
-    >
-      <box style={{ width: "100%", height: 1, flexDirection: "row" }}>
-        <text fg={colors.muted}>
-          {joinCode.kind === "initial" ? "Initial" : "Rotated"} Join Code · shown once
-        </text>
-        <box style={{ flexGrow: 1 }} />
-        <box
-          onMouseDown={onCopy}
-          onMouseOver={() => {
-            setCopyHovered(true)
-            renderer.setMousePointer("pointer")
-          }}
-          onMouseOut={() => {
-            setCopyHovered(false)
-            renderer.setMousePointer("default")
-          }}
-          style={{
-            height: 1,
-            backgroundColor: copyHovered ? colors.accentStrong : colors.accent,
-            paddingX: 1,
-          }}
-        >
-          <text fg={colors.accentInk}>[ c ] Copy</text>
+    <box style={{ width: "100%", height: "100%", alignItems: "center", justifyContent: "center" }}>
+      <box
+        style={{
+          width: SHELL_PANEL_WIDTH,
+          height: SHELL_JOIN_CODE_PANEL_HEIGHT,
+          backgroundColor: colors.panel,
+          border: true,
+          borderStyle: "single",
+          borderColor: colors.accent,
+          padding: 2,
+          flexDirection: "column",
+        }}
+      >
+        <text fg={colors.accentStrong}>{joinCode.kind === "initial" ? "Board created" : "Join Code rotated"}</text>
+        <text fg={colors.text}>{joinCode.boardName}</text>
+        <text fg={colors.muted}>Share this code with people who should become Members.</text>
+        <box style={{ width: "100%", height: 3, marginTop: 1, backgroundColor: colors.input, paddingX: 2, justifyContent: "center" }}>
+          <text selectable fg={colors.success} attributes={menuTitleAttributes}>{joinCode.code}</text>
         </box>
+        <box style={{ width: "100%", flexDirection: "row", marginTop: 1 }}>
+          <box
+            onMouseDown={onCopy}
+            onMouseOver={() => {
+              setCopyHovered(true)
+              renderer.setMousePointer("pointer")
+            }}
+            onMouseOut={() => {
+              setCopyHovered(false)
+              renderer.setMousePointer("default")
+            }}
+            style={{
+              height: 1,
+              backgroundColor: copyHovered ? colors.accentStrong : colors.accent,
+              paddingX: 2,
+            }}
+          >
+            <text fg={colors.accentInk}>[ c ] Copy Join Code</text>
+          </box>
+          <box style={{ flexGrow: 1 }} />
+          <text fg={colors.muted}>Enter done · Escape done</text>
+        </box>
+        {notice?.kind === "status" ? <text fg={colors.success}>{notice.message}</text> : null}
+        {notice?.kind === "error" ? <text fg={colors.error}>{notice.message}</text> : null}
       </box>
-      <text selectable fg={colors.success} attributes={menuTitleAttributes}>{joinCode.code}</text>
     </box>
   )
 }
@@ -3748,11 +3873,13 @@ function JoinCodeCallout({
 function BoardActions({
   selectedIndex,
   selectedBoard,
+  canSelectBoard,
   status,
   error,
 }: {
   selectedIndex: number
   selectedBoard: BoardSummary | undefined
+  canSelectBoard: boolean
   status: string
   error?: string
 }) {
@@ -3768,6 +3895,9 @@ function BoardActions({
       selectedIndex={selectedIndex}
       status={status}
       error={error}
+      navigationHint={canSelectBoard
+        ? "←→ select Board · ↑↓ choose · Enter select · Esc back"
+        : undefined}
     />
   )
 }
@@ -3778,6 +3908,7 @@ function BoardDeleteConfirmation({
   notice,
   pending,
   onCancel,
+  onEdit,
   onSubmit,
 }: {
   board: BoardSummary | undefined
@@ -3785,6 +3916,7 @@ function BoardDeleteConfirmation({
   notice: ShellNotice | null
   pending: boolean
   onCancel: () => void
+  onEdit: () => void
   onSubmit: (typedName: string) => void | Promise<void>
 }) {
   const inputRef = useRef<InputRenderable | null>(null)
@@ -3856,13 +3988,26 @@ function BoardDeleteConfirmation({
                     initialKeyToIgnoreRef.current = null
                     return
                   }
+                  initialKeyToIgnoreRef.current = null
                   typedNameRef.current = value
+                  onEdit()
                 }}
-                onSubmit={() => onSubmit(typedNameRef.current)}
+                onSubmit={() => {
+                  if (initialKeyToIgnoreRef.current === "return") {
+                    initialKeyToIgnoreRef.current = null
+                    return
+                  }
+                  onSubmit(typedNameRef.current)
+                }}
               />
             </box>
-            {pending ? <text fg={colors.muted}>Deleting Board transactionally…</text> : null}
-            {notice?.kind === "error" ? <text fg={colors.error}>Error: {notice.message}</text> : null}
+            <text fg={colors.subtle}>Confirmation must match <span style={{ fg: colors.accentStrong }}>{board.name}</span>.</text>
+            {pending ? <text fg={colors.loading}>Deleting Board transactionally…</text> : null}
+            {notice?.kind === "error" ? (
+              <box style={{ width: "100%", height: 1, backgroundColor: colors.dangerSurface, paddingX: 1 }}>
+                <text fg={colors.error}>Error: {notice.message}</text>
+              </box>
+            ) : null}
             <text fg={colors.warning}>Enter permanently delete · Escape cancel</text>
           </>
         ) : (
@@ -4393,7 +4538,7 @@ function StickyNoteCard({
   top?: number
 }) {
   const positioned = left !== undefined && top !== undefined
-  const preview = firstNonEmptyStickyNoteLine(note.text)
+  const noteBackground = stickyNoteBackground(note.color)
   return (
     <box
       style={{
@@ -4402,44 +4547,37 @@ function StickyNoteCard({
         ...(positioned
           ? { position: "absolute" as const, left, top, zIndex: selected ? CANVAS_MAX_COORDINATE + 1 : note.stackingOrder + 1 }
           : {}),
-        backgroundColor: selected ? colors.accent : colors.panelStrong,
-        flexDirection: "row",
-        alignItems: "center",
-        paddingLeft: 1,
-        paddingRight: 1,
+        backgroundColor: selected ? colors.accent : noteBackground,
+        flexDirection: "column",
+        padding: 1,
       }}
     >
-      <text fg={selected ? colors.accentInk : claimed ? colors.accent : colors.subtle}>
-        {selected ? "› " : claimed ? "✎ " : "  "}
+      <text fg={colors.accentInk}>
+        {selected ? "› Sticky Note" : claimed ? "✎ Sticky Note" : "Sticky Note"}
       </text>
-      <text fg={selected ? colors.accentInk : colors.text} wrapMode="none" overflow="hidden" width={CANVAS_STICKY_NOTE_CARD_WIDTH - 4}>
-        {preview}
+      <text
+        fg={colors.accentInk}
+        wrapMode="word"
+        overflow="hidden"
+        width={CANVAS_STICKY_NOTE_CARD_WIDTH - 2}
+        height={CANVAS_STICKY_NOTE_CARD_HEIGHT - 3}
+      >
+        {note.text.trim().length > 0 ? note.text : " "}
       </text>
     </box>
   )
 }
 
-function firstNonEmptyStickyNoteLine(text: string): string {
-  const line = text.split("\n").find((candidate) => candidate.trim().length > 0)?.trim() ?? ""
-  const maxLength = CANVAS_STICKY_NOTE_CARD_WIDTH - 4
-  if (!line) {
-    return " "
-  }
-  try {
-    const segments = splitUserPerceivedCharacters(line)
-    let preview = ""
-    let width = 0
-    for (const segment of segments) {
-      const segmentWidth = Bun.stringWidth(segment)
-      if (width + segmentWidth > maxLength - 1) {
-        return `${preview}…`
-      }
-      preview += segment
-      width += segmentWidth
-    }
-    return preview
-  } catch {
-    return line.length > maxLength ? `${line.slice(0, maxLength - 1)}…` : line
+function stickyNoteBackground(color: StickyNoteColor): string {
+  switch (color) {
+    case "amber": return "#dca54a"
+    case "blue": return "#82b8e8"
+    case "cyan": return "#78ccd1"
+    case "green": return "#8acb91"
+    case "magenta": return "#d58ac4"
+    case "red": return "#e58c8c"
+    case "violet": return "#ad9cde"
+    case "yellow": return "#e6cf68"
   }
 }
 
@@ -4449,6 +4587,7 @@ function ShellForm({
   pending,
   initialKeyToIgnore,
   onCancel,
+  onEdit,
   onSubmit,
 }: {
   definition: FormDefinition
@@ -4456,6 +4595,7 @@ function ShellForm({
   pending: boolean
   initialKeyToIgnore: string | null
   onCancel: () => void
+  onEdit: () => void
   onSubmit: (values: Record<string, string>) => void | Promise<void>
 }) {
   const [focusedIndex, setFocusedIndex] = useState(0)
@@ -4510,7 +4650,7 @@ function ShellForm({
       <box
         style={{
           width: SHELL_PANEL_WIDTH,
-          height: SHELL_FORM_PANEL_HEIGHT,
+          height: 22,
           backgroundColor: colors.panel,
           border: true,
           borderStyle: "single",
@@ -4522,9 +4662,10 @@ function ShellForm({
         <text fg={colors.accentStrong}>{definition.title}</text>
         <text fg={colors.muted}>{definition.description}</text>
         {definition.warning ? <text fg={colors.warning}>{definition.warning}</text> : null}
-        {definition.fields.map((field, index) => (
+        <box style={{ marginTop: 1, flexDirection: "column" }}>
+          {definition.fields.map((field, index) => (
           <box key={field.id} style={{ width: "100%", flexDirection: "row" }}>
-            <text fg={colors.muted} style={{ width: 20 }}>
+            <text fg={focusedIndex === index ? colors.accentStrong : colors.muted} style={{ width: 20 }}>
               {focusedIndex === index ? "› " : "  "}{field.label}:
             </text>
             <input
@@ -4550,6 +4691,7 @@ function ShellForm({
                   initialKeyToIgnoreRef.current = null
                   return
                 }
+                initialKeyToIgnoreRef.current = null
 
                 if (field.sensitive) {
                   if (maskingInputRef.current) {
@@ -4585,6 +4727,7 @@ function ShellForm({
                   const nextValues = { ...valuesRef.current, [field.id]: nextRawValue }
                   valuesRef.current = nextValues
                   setValues(nextValues)
+                  onEdit()
                   return
                 }
 
@@ -4592,14 +4735,26 @@ function ShellForm({
                 const nextValues = { ...valuesRef.current, [field.id]: value }
                 valuesRef.current = nextValues
                 setValues(nextValues)
+                onEdit()
               }}
-              onSubmit={() => onSubmit(valuesRef.current)}
+              onSubmit={() => {
+                if (initialKeyToIgnoreRef.current === "return") {
+                  initialKeyToIgnoreRef.current = null
+                  return
+                }
+                onSubmit(valuesRef.current)
+              }}
             />
           </box>
-        ))}
-        {pending ? <text fg={colors.muted}>Contacting the Tuiscrib Service…</text> : null}
+          ))}
+        </box>
+        {pending ? <text fg={colors.loading}>Contacting the Tuiscrib Service…</text> : null}
         {inputError ? <text fg={colors.error}>Error: {inputError}</text> : null}
-        {notice?.kind === "error" ? <text fg={colors.error}>Error: {notice.message}</text> : null}
+        {notice?.kind === "error" ? (
+          <box style={{ width: "100%", height: 1, backgroundColor: colors.dangerSurface, paddingX: 1 }}>
+            <text fg={colors.error}>Error: {notice.message}</text>
+          </box>
+        ) : null}
         <text fg={colors.muted}>↑↓ fields · Enter submit · Escape cancel</text>
       </box>
     </box>
@@ -4707,8 +4862,10 @@ function ShellMenu({
   items,
   selectedIndex,
   status,
+  statusColor,
   error,
   canGoBack = true,
+  navigationHint,
 }: {
   heroTitle?: string
   title: string
@@ -4716,8 +4873,10 @@ function ShellMenu({
   items: ShellMenuItem[]
   selectedIndex: number
   status: string
+  statusColor?: string
   error?: string
   canGoBack?: boolean
+  navigationHint?: string
 }) {
   const selectedItem = items[selectedIndex]
   return (
@@ -4763,9 +4922,11 @@ function ShellMenu({
         </box>
         <box style={{ flexDirection: "column", flexShrink: 0 }}>
           {error ? <text fg={colors.error}>Error: {error}</text> : null}
-          <text fg={colors.muted}>{status}</text>
+          <text fg={statusColor ?? colors.muted}>{status}</text>
           <text fg={colors.muted}>
-            {canGoBack ? "↑↓ choose · Enter select · Esc back" : "↑↓ choose · Enter select"}
+            {navigationHint ?? (
+              canGoBack ? "↑↓ choose · Enter select · Esc back" : "↑↓ choose · Enter select"
+            )}
           </text>
         </box>
       </box>

@@ -3,8 +3,8 @@ import { compareStickyNoteStackingOrder } from "@tuiscrib/contracts"
 export const CANVAS_MIN_COORDINATE = -1_000_000
 export const CANVAS_MAX_COORDINATE = 1_000_000
 export const CANVAS_PANEL_WIDTH = 72
-export const CANVAS_STICKY_NOTE_CARD_WIDTH = 32
-export const CANVAS_STICKY_NOTE_CARD_HEIGHT = 3
+export const CANVAS_STICKY_NOTE_CARD_WIDTH = 16
+export const CANVAS_STICKY_NOTE_CARD_HEIGHT = 16
 export const CANVAS_STICKY_NOTE_CARD_VERTICAL_OVERHEAD = 2
 
 export type CanvasCoordinate = {

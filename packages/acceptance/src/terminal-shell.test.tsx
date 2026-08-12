@@ -114,6 +114,38 @@ test("navigates the shell menu with keyboard hints and opens Boards", async () =
   expectFixedShellPanel(activeSetup.captureCharFrame())
 })
 
+test("distinguishes Terminal Session restoration as a loading state", async () => {
+  const restorePromise = Promise.withResolvers<{ user: { username: string } }>()
+  const authClient: AuthClient = {
+    register: async () => { throw new Error("not used") },
+    signIn: async () => { throw new Error("not used") },
+    restore: async () => restorePromise.promise,
+    signOut: async () => ({ status: "signed_out" }),
+  }
+  const credentialStore: CredentialStore = {
+    filePath: "memory://loading/session",
+    load: async () => "a".repeat(43),
+    save: async () => undefined,
+    remove: async () => undefined,
+  }
+
+  activeSetup = await testRender(
+    <TerminalShell authClient={authClient} credentialStore={credentialStore} />,
+    { width: 80, height: 24, kittyKeyboard: true },
+  )
+  await activeSetup.renderOnce()
+
+  const loadingSpan = activeSetup.captureSpans().lines
+    .flatMap((line) => line.spans)
+    .find((span) => span.text.includes("Restoring Terminal Session"))
+  expect(loadingSpan?.fg.toInts()).toEqual([196, 167, 255, 255])
+
+  await act(async () => {
+    restorePromise.resolve({ user: { username: "loading_user" } })
+    await activeSetup?.waitForFrame((frame) => frame.includes("loading_user"))
+  })
+})
+
 function expectFixedShellPanel(frame: string): void {
   const topBorder = frame.split("\n").find((line) => line.includes("┌"))
   expect(topBorder).toContain(`┌${"─".repeat(70)}┐`)
@@ -214,7 +246,8 @@ test("redeems a Join Code from the keyboard form and renders the new Membership"
     activeSetup?.mockInput.pressEnter()
     await activeSetup?.renderOnce()
   })
-  await waitForFrame((value) => value.includes("Join Board"))
+  const emptyJoinForm = await waitForFrame((value) => value.includes("Join Board"))
+  expect(emptyJoinForm).not.toContain("Join Code is required")
   await act(async () => {
     await activeSetup?.mockInput.typeText("ABCD-EFGH-JKMN-PRST-TVWX-YZ23-45")
     activeSetup?.mockInput.pressEnter()
@@ -558,13 +591,17 @@ test("renames a Board and rotates its Join Code from the rendered Owner actions"
     activeSetup?.mockInput.pressArrow("down")
     activeSetup?.mockInput.pressArrow("down")
     activeSetup?.mockInput.pressArrow("down")
+    activeSetup?.mockInput.pressArrow("down")
     activeSetup?.mockInput.pressEnter()
     await activeSetup?.renderOnce()
   })
-  const frame = await waitForFrame((value) => value.includes("Rotated Join Code"))
+  const frame = await waitForFrame((value) => value.includes("Join Code rotated"))
   expect(frame).toContain(rotatedJoinCode)
   expect(frame).not.toContain("Initial Join Code")
   expect(frame).toContain("[ c ] Copy")
+  expect(frame).not.toContain("create Board")
+  expect(frame).not.toContain("join Board")
+  expect(frame).not.toContain("Board actions")
   expect(rotateInput).toEqual({ credential, boardId: originalBoard.id })
 
   const copyLine = frame.split("\n").findIndex((line) => line.includes("[ c ] Copy"))
@@ -586,9 +623,11 @@ test("renames a Board and rotates its Join Code from the rendered Owner actions"
     await activeSetup?.renderOnce()
   })
   expect(activeSetup?.captureCharFrame()).toContain("Clipboard access is unavailable.")
-  expect(activeSetup?.captureCharFrame()).toContain("Code manually.")
+  expect(activeSetup?.captureCharFrame()).toContain("manually.")
 
   await act(async () => {
+    activeSetup?.mockInput.pressEscape()
+    await activeSetup?.renderOnce()
     activeSetup?.mockInput.pressArrow("down")
     activeSetup?.mockInput.pressArrow("down")
     activeSetup?.mockInput.pressArrow("down")
@@ -715,6 +754,7 @@ test("renders Owner-only authorization errors for Member Board actions", async (
   await act(async () => {
     activeSetup?.mockInput.pressEscape()
     await activeSetup?.renderOnce()
+    activeSetup?.mockInput.pressArrow("down")
     activeSetup?.mockInput.pressArrow("down")
     activeSetup?.mockInput.pressArrow("down")
     activeSetup?.mockInput.pressArrow("down")
@@ -857,6 +897,7 @@ test("requires the exact current Board name and lets Escape cancel without delet
   expect(frame).toContain("Permanently delete Board")
   expect(frame).toContain("Type Board name exactly")
   expect(frame).toContain("Every connected Member will lose access immediately.")
+  expect(frame).not.toContain("Type the exact current Board name")
 
   await act(async () => {
     setup.mockInput.typeText("Wrong")
