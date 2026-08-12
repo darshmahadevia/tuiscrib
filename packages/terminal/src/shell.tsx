@@ -179,10 +179,19 @@ type MovingStickyNote = {
   position: StickyNotePosition
 }
 
-const homeMenu: ShellMenuItem[] = [
-  { id: "boards", label: "boards", description: "Open the Board list" },
+const signedOutHomeMenu: ShellMenuItem[] = [
   { id: "sign-in", label: "sign in", description: "Sign in as a User" },
   { id: "register", label: "register", description: "Register a new User" },
+]
+
+const signedInHomeMenu: ShellMenuItem[] = [
+  { id: "boards", label: "return to Boards", description: "Open your Board list" },
+  { id: "sign-out", label: "sign out", description: "Revoke the current Terminal Session" },
+]
+
+const demoHomeMenu: ShellMenuItem[] = [
+  { id: "boards", label: "boards", description: "Open the Board list" },
+  ...signedOutHomeMenu,
   { id: "sign-out", label: "sign out", description: "Revoke the current Terminal Session" },
 ]
 
@@ -301,6 +310,8 @@ const CANVAS_MOVE_PANEL_HEIGHT = 3
 const CANVAS_OVERLAY_WIDTH = 64
 const CANVAS_OVERLAY_HEIGHT = 20
 const menuTitleAttributes = createTextAttributes({ bold: true })
+const SHELL_LOGO_WIDTH = 64
+const SHELL_LOGO_HEIGHT = 7
 
 function stickyNoteCanvasFootprint(note: StickyNote) {
   return getCanvasStickyNoteCardRect(note.position)
@@ -533,10 +544,7 @@ export function TerminalShell({
         if (!credential) {
           flushSync(() => {
             setSessionState("signed-out")
-            setNotice({
-              kind: "error",
-              message: "No saved Terminal Session. Sign in to continue.",
-            })
+            setNotice(null)
           })
           return
         }
@@ -548,7 +556,6 @@ export function TerminalShell({
         flushSync(() => {
           setAuthenticatedUsername(response.user.username)
           setSessionState("signed-in")
-          setView("boards")
           setSelectedIndex(0)
           setNotice({
             kind: "status",
@@ -2146,7 +2153,11 @@ export function TerminalShell({
   const moveSelection = (direction: -1 | 1) => {
     const availableBoardActions = boards.length > 0 ? boardMenu.slice(1) : boardMenu
     const items = viewRef.current === "home"
-      ? homeMenu
+      ? !authClient
+        ? demoHomeMenu
+        : sessionStateRef.current === "signed-in"
+        ? signedInHomeMenu
+        : signedOutHomeMenu
       : viewRef.current === "boards"
         ? availableBoardActions
         : boardActionsMenu
@@ -3181,20 +3192,32 @@ export function TerminalShell({
         moveSelection(1)
         return
       }
-      if (key.name === "return" && selectedIndexRef.current === 0) {
-        openView("boards")
-        return
-      }
-      if (key.name === "return" && selectedIndexRef.current === 1) {
-        openForm("sign-in", "home", key.name)
-        return
-      }
-      if (key.name === "return" && selectedIndexRef.current === 2) {
-        openForm("register", "home", key.name)
-        return
-      }
-      if (key.name === "return" && selectedIndexRef.current === 3) {
-        void signOut()
+      if (key.name === "return") {
+        if (!authClient) {
+          if (selectedIndexRef.current === 0) {
+            openView("boards")
+          } else if (selectedIndexRef.current === 1) {
+            openForm("sign-in", "home", key.name)
+          } else if (selectedIndexRef.current === 2) {
+            openForm("register", "home", key.name)
+          } else if (selectedIndexRef.current === 3) {
+            void signOut()
+          }
+          return
+        }
+        if (sessionStateRef.current === "signed-in") {
+          if (selectedIndexRef.current === 0) {
+            openView("boards")
+          } else if (selectedIndexRef.current === 1) {
+            void signOut()
+          }
+          return
+        }
+        if (selectedIndexRef.current === 0) {
+          openForm("sign-in", "home", key.name)
+        } else if (selectedIndexRef.current === 1) {
+          openForm("register", "home", key.name)
+        }
         return
       }
     }
@@ -3489,6 +3512,7 @@ export function TerminalShell({
       selectedIndex={selectedIndex}
       sessionState={sessionState}
       notice={notice}
+      demoMode={!authClient}
     />
   ) : view === "board-actions" ? (
     <BoardActions
@@ -3709,29 +3733,122 @@ function ShellHome({
   selectedIndex,
   sessionState,
   notice,
+  demoMode,
 }: {
   selectedIndex: number
   sessionState: SessionState
   notice: ShellNotice | null
+  demoMode: boolean
 }) {
+  const checking = !demoMode && sessionState === "checking"
+  const items = demoMode
+    ? demoHomeMenu
+    : sessionState === "signed-in"
+      ? signedInHomeMenu
+      : signedOutHomeMenu
+  const selectedItem = items[selectedIndex]
   return (
-    <ShellMenu
-      heroTitle="TUISCRIB"
-      title="Welcome to Tuiscrib"
-      description="Choose a workflow. Every action remains keyboard reachable."
-      items={homeMenu}
-      selectedIndex={selectedIndex}
-      status={
-        sessionState === "checking"
-          ? "Restoring Terminal Session…"
-          : notice?.kind === "status"
-            ? notice.message
-            : "shell ready"
-      }
-      statusColor={sessionState === "checking" ? colors.loading : undefined}
-      error={notice?.kind === "error" ? notice.message : undefined}
-      canGoBack={false}
-    />
+    <box style={{ width: "100%", height: "100%", flexDirection: "column" }}>
+      <box
+        style={{
+          width: "100%",
+          height: "58%",
+          minHeight: 13,
+          alignItems: "center",
+          justifyContent: "center",
+          flexDirection: "column",
+          paddingTop: 1,
+          paddingBottom: 1,
+        }}
+      >
+        <TuiscribLogo />
+        <box style={{ marginTop: 2, alignItems: "center", flexDirection: "column" }}>
+          {demoMode ? (
+            <>
+              <text fg={colors.text}>Welcome to Tuiscrib</text>
+              <text fg={colors.subtle}>Choose a workflow. Every action remains keyboard reachable.</text>
+            </>
+          ) : (
+            <>
+              <text fg={colors.text}>A shared wall for ideas that should not disappear.</text>
+              <text fg={colors.subtle}>Terminal-first · live collaboration · durable Boards</text>
+            </>
+          )}
+        </box>
+      </box>
+
+      <box
+        style={{
+          width: "100%",
+          height: "42%",
+          alignItems: "center",
+          flexDirection: "column",
+          paddingTop: 1,
+        }}
+      >
+        <box style={{ width: 64, height: 1, flexDirection: "row" }}>
+          <box style={{ width: 20, height: 1, backgroundColor: colors.stickyNote }} />
+          <box style={{ flexGrow: 1 }} />
+          <box style={{ width: 20, height: 1, backgroundColor: colors.panelActive }} />
+          <box style={{ flexGrow: 1 }} />
+          <box style={{ width: 20, height: 1, backgroundColor: colors.accent }} />
+        </box>
+
+        {checking ? (
+          <box style={{ width: 64, marginTop: 2, alignItems: "center", flexDirection: "column" }}>
+            <text fg={colors.loading} attributes={menuTitleAttributes}>Restoring Terminal Session…</text>
+            <text fg={colors.muted}>Checking this terminal for a saved User.</text>
+          </box>
+        ) : (
+          <box style={{ width: 64, marginTop: 1, flexDirection: "column" }}>
+            {!demoMode ? (
+              <>
+                <text fg={colors.accentStrong} attributes={menuTitleAttributes}>
+                  {sessionState === "signed-in"
+                    ? "Terminal Session ready"
+                    : "Continue to Tuiscrib"}
+                </text>
+                <text fg={colors.muted}>
+                  {sessionState === "signed-in"
+                    ? "Return to your Boards or revoke this Terminal Session."
+                    : "Use an existing User or create a permanent identity."}
+                </text>
+              </>
+            ) : null}
+            <box style={{ marginTop: 1, flexDirection: "column" }}>
+              {items.map((item, index) => (
+                <MenuRow key={item.id} label={item.label} selected={selectedIndex === index} />
+              ))}
+            </box>
+            {!demoMode && selectedItem ? <text fg={colors.subtle}>{selectedItem.description}</text> : null}
+            {notice?.kind === "error" ? <text fg={colors.error}>Error: {notice.message}</text> : null}
+            {notice?.kind === "status" ? <text fg={colors.success}>{notice.message}</text> : null}
+            <text fg={colors.muted}>↑↓ choose · Enter select</text>
+          </box>
+        )}
+      </box>
+    </box>
+  )
+}
+
+function TuiscribLogo() {
+  return (
+    <box
+      style={{
+        width: SHELL_LOGO_WIDTH,
+        height: SHELL_LOGO_HEIGHT,
+        alignItems: "center",
+        justifyContent: "center",
+        flexShrink: 0,
+      }}
+    >
+      <ascii-font
+        text="TUISCRIB"
+        font="block"
+        color={colors.accent}
+        backgroundColor={colors.background}
+      />
+    </box>
   )
 }
 
@@ -4558,6 +4675,9 @@ function StickyNoteCard({
           ? { position: "absolute" as const, left, top, zIndex: selected ? CANVAS_MAX_COORDINATE + 1 : note.stackingOrder + 1 }
           : {}),
         backgroundColor: selected ? colors.accent : colors.stickyNote,
+        border: true,
+        borderStyle: "single",
+        borderColor: selected ? colors.accentInk : colors.border,
         flexDirection: "column",
         padding: 1,
       }}
@@ -4569,8 +4689,8 @@ function StickyNoteCard({
         fg={selected ? colors.accentInk : colors.text}
         wrapMode="word"
         overflow="hidden"
-        width={CANVAS_STICKY_NOTE_CARD_WIDTH - 2}
-        height={CANVAS_STICKY_NOTE_CARD_HEIGHT - 3}
+        width={CANVAS_STICKY_NOTE_CARD_WIDTH - 4}
+        height={CANVAS_STICKY_NOTE_CARD_HEIGHT - 5}
       >
         {note.text.trim().length > 0 ? note.text : " "}
       </text>
@@ -4853,24 +4973,20 @@ function updateMaskedInputValue(
 }
 
 function ShellMenu({
-  heroTitle,
   title,
   description,
   items,
   selectedIndex,
   status,
-  statusColor,
   error,
   canGoBack = true,
   navigationHint,
 }: {
-  heroTitle?: string
   title: string
   description: string
   items: ShellMenuItem[]
   selectedIndex: number
   status: string
-  statusColor?: string
   error?: string
   canGoBack?: boolean
   navigationHint?: string
@@ -4898,11 +5014,6 @@ function ShellMenu({
         }}
       >
         <box style={{ flexDirection: "column", flexGrow: 1, minHeight: 0 }}>
-          {heroTitle ? (
-            <box style={{ width: "100%", alignItems: "center", marginBottom: 1 }}>
-              <text fg={colors.accentStrong} attributes={menuTitleAttributes}>{heroTitle}</text>
-            </box>
-          ) : null}
           <box style={{ width: "100%", alignItems: "center" }}>
             <text fg={colors.accentStrong}>{title}</text>
           </box>
@@ -4919,7 +5030,7 @@ function ShellMenu({
         </box>
         <box style={{ flexDirection: "column", flexShrink: 0 }}>
           {error ? <text fg={colors.error}>Error: {error}</text> : null}
-          <text fg={statusColor ?? colors.muted}>{status}</text>
+          <text fg={colors.muted}>{status}</text>
           <text fg={colors.muted}>
             {navigationHint ?? (
               canGoBack ? "↑↓ choose · Enter select · Esc back" : "↑↓ choose · Enter select"

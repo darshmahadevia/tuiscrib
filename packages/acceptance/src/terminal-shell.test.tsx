@@ -21,7 +21,18 @@ afterEach(async () => {
   activeSetup = null
 })
 
-test("opens keyboard help from the Navigate shell and returns with Escape", async () => {
+async function openBoardsAfterSessionRestore(setup: TestRendererSetup): Promise<string> {
+  await setup.waitForFrame((frame) =>
+    frame.includes("Terminal Session ready") && frame.includes("return to Boards"),
+  )
+  await act(async () => {
+    setup.mockInput.pressEnter()
+    await setup.renderOnce()
+  })
+  return setup.waitForFrame((frame) => frame.includes("Your shared Boards"))
+}
+
+test("renders the demo shell and opens keyboard help", async () => {
   activeSetup = await testRender(<TerminalShell label="alpha" />, {
     width: 80,
     height: 24,
@@ -33,9 +44,12 @@ test("opens keyboard help from the Navigate shell and returns with Escape", asyn
 
   expect(activeSetup.captureSpans().lines[0]?.spans[0]?.bg.toInts()).toEqual([0, 0, 0, 255])
   expect(initialFrame).toContain("Welcome to Tuiscrib")
-  expect(initialFrame).toContain("TUISCRIB")
+  expect(initialFrame).toContain("████████╗")
   expect(initialFrame).toContain("NAVIGATE")
   expect(initialFrame).toContain("boards")
+  expect(initialFrame).toContain("sign in")
+  expect(initialFrame).toContain("register")
+  expect(initialFrame).toContain("sign out")
   expect(initialFrame).toContain("↑↓ choose · Enter select")
 
   await act(async () => {
@@ -60,57 +74,40 @@ test("opens keyboard help from the Navigate shell and returns with Escape", asyn
   expect(returnedFrame).not.toContain("Keyboard help")
 })
 
-test("navigates the shell menu with keyboard hints and opens Boards", async () => {
-  activeSetup = await testRender(<TerminalShell label="alpha" />, {
+test("navigates the signed-out gateway and opens Register", async () => {
+  const authClient: AuthClient = {
+    register: async () => { throw new Error("not used") },
+    signIn: async () => { throw new Error("not used") },
+    restore: async () => { throw new Error("not used") },
+    signOut: async () => ({ status: "signed_out" }),
+  }
+  const credentialStore: CredentialStore = {
+    filePath: "memory://gateway/session",
+    load: async () => null,
+    save: async () => undefined,
+    remove: async () => undefined,
+  }
+  activeSetup = await testRender(<TerminalShell label="alpha" authClient={authClient} credentialStore={credentialStore} />, {
     width: 80,
     height: 24,
     kittyKeyboard: true,
   })
 
-  await activeSetup.renderOnce()
-  expectFixedShellPanel(activeSetup.captureCharFrame())
-  expectNavigationPinnedToPanelBottom(
-    activeSetup.captureCharFrame(),
-    "↑↓ choose · Enter select",
-  )
-  const titleLine = activeSetup.captureCharFrame().split("\n").find((line) => line.includes("TUISCRIB"))
-  expect(titleLine?.indexOf("TUISCRIB")).toBe(36)
-
   await act(async () => {
-    activeSetup?.mockInput.pressArrow("up")
-    await activeSetup?.renderOnce()
+    await activeSetup?.waitForFrame((frame) => frame.includes("Continue to Tuiscrib"))
   })
-  expect(activeSetup.captureCharFrame()).toContain("› sign out")
-
   await act(async () => {
     activeSetup?.mockInput.pressArrow("down")
     await activeSetup?.renderOnce()
   })
-  expect(activeSetup.captureCharFrame()).toContain("› boards")
+  expect(activeSetup.captureCharFrame()).toContain("› register")
 
   await act(async () => {
     activeSetup?.mockInput.pressEnter()
     await activeSetup?.renderOnce()
   })
 
-  expect(activeSetup.captureCharFrame()).toContain("Boards")
-  expectFixedShellPanel(activeSetup.captureCharFrame())
-  expectNavigationPinnedToPanelBottom(
-    activeSetup.captureCharFrame(),
-    "↑↓ choose · Enter select · Esc back",
-  )
-  expect(activeSetup.captureCharFrame()).toContain("open Board")
-  expect(activeSetup.captureCharFrame()).toContain("Open the collaboration canvas")
-  expect(activeSetup.captureCharFrame()).toContain("create Board")
-  expect(activeSetup.captureCharFrame()).toContain("join Board")
-  expect(activeSetup.captureCharFrame()).not.toContain("hjkl")
-
-  await act(async () => {
-    activeSetup?.mockInput.pressArrow("down")
-    activeSetup?.mockInput.pressEnter()
-    await activeSetup?.renderOnce()
-  })
-  expect(activeSetup.captureCharFrame()).toContain("Create Board")
+  expect(activeSetup.captureCharFrame()).toContain("Register User")
   expectFixedShellPanel(activeSetup.captureCharFrame())
 })
 
@@ -135,6 +132,10 @@ test("distinguishes Terminal Session restoration as a loading state", async () =
   )
   await activeSetup.renderOnce()
 
+  const loadingFrame = activeSetup.captureCharFrame()
+  expect(loadingFrame).toContain("████████╗")
+  expect(loadingFrame).not.toContain("sign in")
+  expect(loadingFrame).not.toContain("register")
   const loadingSpan = activeSetup.captureSpans().lines
     .flatMap((line) => line.spans)
     .find((span) => span.text.includes("Restoring Terminal Session"))
@@ -142,8 +143,19 @@ test("distinguishes Terminal Session restoration as a loading state", async () =
 
   await act(async () => {
     restorePromise.resolve({ user: { username: "loading_user" } })
-    await activeSetup?.waitForFrame((frame) => frame.includes("loading_user"))
+    await activeSetup?.waitForFrame((frame) =>
+      frame.includes("Terminal Session ready") &&
+      frame.includes("return to Boards") &&
+      frame.includes("loading_user"),
+    )
   })
+  expect(activeSetup.captureCharFrame()).not.toContain("Your shared Boards")
+
+  await act(async () => {
+    activeSetup?.mockInput.pressEnter()
+    await activeSetup?.renderOnce()
+  })
+  await activeSetup?.waitForFrame((frame) => frame.includes("Your shared Boards"))
 })
 
 function expectFixedShellPanel(frame: string): void {
@@ -238,7 +250,7 @@ test("redeems a Join Code from the keyboard form and renders the new Membership"
     }
     throw new Error(`Timed out waiting for rendered frame\n${lastFrame}`)
   }
-  await waitForFrame((value) => value.includes("Boards"))
+  await openBoardsAfterSessionRestore(activeSetup!)
 
   await act(async () => {
     activeSetup?.mockInput.pressArrow("down")
@@ -342,7 +354,7 @@ test("confirms leaving a Board from Board actions and removes the Membership", a
     throw new Error(`Timed out waiting for rendered frame\n${lastFrame}`)
   }
 
-  await waitForFrame((value) => value.includes("Boards"))
+  await openBoardsAfterSessionRestore(activeSetup!)
   await act(async () => {
     activeSetup?.mockInput.pressArrow("down")
     activeSetup?.mockInput.pressArrow("down")
@@ -448,7 +460,7 @@ test("clearly prevents the Owner from leaving a Board in Board actions", async (
     throw new Error(`Timed out waiting for rendered frame\n${lastFrame}`)
   }
 
-  await waitForFrame((value) => value.includes("Boards"))
+  await openBoardsAfterSessionRestore(activeSetup!)
   await act(async () => {
     activeSetup?.mockInput.pressArrow("down")
     activeSetup?.mockInput.pressArrow("down")
@@ -558,7 +570,7 @@ test("renames a Board and rotates its Join Code from the rendered Owner actions"
     throw new Error(`Timed out waiting for rendered frame\n${lastFrame}`)
   }
 
-  await waitForFrame((value) => value.includes("Boards"))
+  await openBoardsAfterSessionRestore(activeSetup!)
   await act(async () => {
     activeSetup?.mockInput.pressArrow("down")
     activeSetup?.mockInput.pressArrow("down")
@@ -727,7 +739,7 @@ test("renders Owner-only authorization errors for Member Board actions", async (
     throw new Error(`Timed out waiting for rendered frame\n${lastFrame}`)
   }
 
-  await waitForFrame((value) => value.includes("Boards"))
+  await openBoardsAfterSessionRestore(activeSetup!)
   await act(async () => {
     activeSetup?.mockInput.pressArrow("down")
     activeSetup?.mockInput.pressArrow("down")
@@ -879,7 +891,7 @@ test("requires the exact current Board name and lets Escape cancel without delet
   if (!setup) {
     throw new Error("terminal renderer did not start")
   }
-  await setup.waitForFrame((frame) => frame.includes("Boards"))
+  await openBoardsAfterSessionRestore(setup)
   await act(async () => {
     setup.mockInput.pressArrow("down")
     setup.mockInput.pressArrow("down")
@@ -1086,9 +1098,7 @@ test("restores a persisted Terminal Session and signs out through keyboard contr
     },
   )
 
-  await act(async () => {
-    await activeSetup?.waitForFrame((frame) => frame.includes("Boards"))
-  })
+  await openBoardsAfterSessionRestore(activeSetup!)
   expect(restoredCredential).toBe(credential)
   expect(activeSetup.captureCharFrame()).toContain("ada_lovelace")
   expect(activeSetup.captureCharFrame()).not.toContain(credential)
@@ -1112,7 +1122,7 @@ test("restores a persisted Terminal Session and signs out through keyboard contr
   expect(frame).not.toContain(credential)
 })
 
-test("returns to sign-in with a clear error when no local Terminal Session exists", async () => {
+test("routes a missing local Terminal Session to the signed-out gateway", async () => {
   let restoreCalled = false
   const credentialStore: CredentialStore = {
     filePath: "/protected/tuiscrib/session",
@@ -1148,11 +1158,13 @@ test("returns to sign-in with a clear error when no local Terminal Session exist
 
   let frame = ""
   await act(async () => {
-    frame = await activeSetup?.waitForFrame((value) => value.includes("No saved Terminal Session")) ?? ""
+    frame = await activeSetup?.waitForFrame((value) => value.includes("Continue to Tuiscrib")) ?? ""
   })
-  expect(frame).toContain("Error: No saved Terminal Session.")
-  expect(frame).toContain("continue.")
+  expect(frame).toContain("A shared wall for ideas that should not disappear.")
   expect(frame).toContain("sign in")
+  expect(frame).toContain("register")
+  expect(frame).not.toContain("Error:")
+  expect(frame).not.toContain("Your shared Boards")
   expect(restoreCalled).toBe(false)
 })
 
@@ -1228,7 +1240,7 @@ test("opens the selected Board through its WebSocket and renders authoritative v
   if (!setup) {
     throw new Error("terminal renderer did not start")
   }
-  await setup.waitForFrame((frame) => frame.includes("Boards"))
+  await openBoardsAfterSessionRestore(setup)
   await act(async () => {
     activeSetup?.mockInput.pressEnter()
     await activeSetup?.renderOnce()
@@ -1350,7 +1362,7 @@ test("replaces an optimistic Sticky Note edit with the authoritative conflict re
     throw new Error(`Timed out waiting for rendered frame\n${lastFrame}`)
   }
 
-  await waitForFrame((frame) => frame.includes("Boards"))
+  await openBoardsAfterSessionRestore(setup)
   await act(async () => {
     setup.mockInput.pressEnter()
     await setup.renderOnce()
@@ -1483,7 +1495,7 @@ test("uses a clear destructive confirmation mode for Sticky Note deletion and ke
   if (!setup) {
     throw new Error("terminal renderer did not start")
   }
-  await setup.waitForFrame((frame) => frame.includes("Boards"))
+  await openBoardsAfterSessionRestore(setup)
   await act(async () => {
     setup.mockInput.pressEnter()
     await setup.renderOnce()
@@ -1637,7 +1649,7 @@ test("renders reconnecting after Board loss and does not send shared mutations w
   if (!setup) {
     throw new Error("terminal renderer did not start")
   }
-  await setup.waitForFrame((frame) => frame.includes("Boards"))
+  await openBoardsAfterSessionRestore(setup)
   await act(async () => {
     setup.mockInput.pressEnter()
     await setup.renderOnce()

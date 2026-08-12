@@ -568,6 +568,7 @@ test("renders overlapping Sticky Notes in deterministic front order", async () =
 
   let frame = activeSetup.captureCharFrame()
   expect(frame).toContain("front note")
+  expect(frame).toContain("┌────────────────────────┐")
     expect(frame).toContain("Overlap Board · Connected · 1 online · Space actions")
 
   await act(async () => {
@@ -621,7 +622,16 @@ async function renderCanvas(
   if (dimensions.width < 80 || dimensions.height < 24) {
     return setup
   }
-  await setup.waitForFrame((frame) => frame.includes("Boards"))
+  await setup.waitForFrame((frame) =>
+    frame.includes("Terminal Session ready") && frame.includes("return to Boards"),
+  )
+  await act(async () => {
+    setup.mockInput.pressEnter()
+    await setup.renderOnce()
+  })
+  await setup.waitForFrame((frame) =>
+    frame.includes("Your shared Boards") && frame.includes(boardName),
+  )
   await act(async () => {
     setup.mockInput.pressEnter()
     await setup.renderOnce()
