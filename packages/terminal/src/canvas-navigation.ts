@@ -5,8 +5,8 @@ export const CANVAS_MAX_COORDINATE = 1_000_000
 export const CANVAS_PANEL_WIDTH = 72
 // Ghostty cells are about 2.25 times taller than they are wide, so this cell
 // footprint renders as a visual square rather than a tall rectangle.
-export const CANVAS_STICKY_NOTE_CARD_WIDTH = 36
-export const CANVAS_STICKY_NOTE_CARD_HEIGHT = 16
+export const CANVAS_STICKY_NOTE_CARD_WIDTH = 26
+export const CANVAS_STICKY_NOTE_CARD_HEIGHT = 11
 export const CANVAS_STICKY_NOTE_CARD_VERTICAL_OVERHEAD = 2
 
 export type CanvasCoordinate = {

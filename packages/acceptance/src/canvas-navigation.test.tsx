@@ -30,6 +30,10 @@ test("renders the canvas as a large Select-first surface at multiple terminal si
 
     let frame = activeSetup.captureCharFrame()
     expect(frame).toContain("Canvas Board · Connected · 1 online · Space actions")
+    const actionsSpan = activeSetup.captureSpans().lines
+      .flatMap((line) => line.spans)
+      .find((span) => span.text.includes("Space actions"))
+    expect(actionsSpan?.bg.toInts()).toEqual([145, 205, 247, 255])
     expect(frame).toContain("origin note")
     expect(frame).not.toContain("hjkl")
 

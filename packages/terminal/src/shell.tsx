@@ -3604,6 +3604,7 @@ export function TerminalShell({
       mode={mode}
       capabilities={capabilitiesOverride ?? detectedCapabilities}
       footerHint={footerHint}
+      highlightSpaceActions={view === "canvas" && mode !== "edit"}
     >
       {content}
     </ShellFrame>
@@ -3615,12 +3616,14 @@ function ShellFrame({
   mode,
   capabilities,
   footerHint,
+  highlightSpaceActions,
   children,
 }: {
   label: string
   mode: ShellMode
   capabilities: TerminalCapabilities | null
   footerHint: string
+  highlightSpaceActions: boolean
   children: ReactNode
 }) {
   const modeLabel = mode === "edit" ? "EDIT" : mode.toUpperCase()
@@ -3651,7 +3654,14 @@ function ShellFrame({
         }}
       >
         <text fg={modeColor} style={{ flexShrink: 0 }}>{modeLabel}</text>
-        <text fg={colors.muted} style={{ flexShrink: 1 }}>{footerHint}</text>
+        {highlightSpaceActions ? (
+          <box style={{ flexDirection: "row", flexShrink: 1 }}>
+            <text fg={colors.muted}>{footerHint.slice(0, -"Space actions".length)}</text>
+            <text fg={colors.accentInk} bg={colors.accent}>Space actions</text>
+          </box>
+        ) : (
+          <text fg={colors.muted} style={{ flexShrink: 1 }}>{footerHint}</text>
+        )}
         <box style={{ flexGrow: 1 }} />
         <text fg={colors.subtle} style={{ flexShrink: 0 }}>{label}</text>
       </box>

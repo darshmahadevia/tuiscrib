@@ -18,7 +18,26 @@ bun run dev:terminal
 
 The source client connects to the hosted Tuiscrib Service at `https://tuiscrib.onrender.com` by default. Docker and PostgreSQL are not needed merely to try the client. Tuiscrib needs an 80 by 24 terminal with Unicode and 256-color support.
 
-After the first render, press `r` to register a User, then enter a username and password twice. Press `b`, then `c` to create a Board. Press `n`, type a Sticky Note, and press Escape to publish it. Start a second `bun run dev:terminal` client, press `b`, then `j`, and enter the displayed Join Code to collaborate.
+Use the arrow keys and `Enter` to register a User, create a Board, and open its canvas. The interface displays the available controls at the bottom of every screen.
+
+## Controls
+
+| Context | Keys | Action |
+| --- | --- | --- |
+| Menus | `Up` / `Down` | Choose an item |
+| Menus | `Enter` | Open or run the selected item |
+| Menus | `Escape` | Return to the previous screen |
+| Canvas | `Space` | Open the highlighted Actions menu |
+| Canvas | `Tab` | Switch between Navigate and Select modes |
+| Canvas | Arrow keys | Pan in Navigate mode or choose a Sticky Note in Select mode |
+| Canvas | `Enter` | Add a Sticky Note in Navigate mode or edit the selected note |
+| Canvas | `?` | Open keyboard help |
+| Sticky Note editor | `Ctrl+Enter` | Save the draft |
+| Sticky Note editor | `Escape` | Cancel the draft |
+| Forms | `Up` / `Down` or `Tab` | Move between fields |
+| Forms | `Enter` | Submit |
+| Join Code screen | `c` | Copy the Join Code |
+| Anywhere | `Ctrl+C` | Quit Tuiscrib |
 
 ## Choose the Tuiscrib Service
 
